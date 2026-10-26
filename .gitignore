@@ -1,0 +1,10 @@
+# Local runtime data and generated output (not source or fixtures).
+/runtime/
+/state/
+/artifacts/
+/bin/
+/dist/
+/coverage/
+/ocq
+/ocq.exe
+/ocq.test
