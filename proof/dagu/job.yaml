@@ -1,0 +1,13 @@
+name: proof-job
+queue: proof-serial
+params:
+  - NUMBER: '0'
+steps:
+  - name: harmless
+    command: sh
+    script: |
+      set -eu
+      printf 'start %s\n' "$NUMBER" >> "$OCQ_PROOF_RUN/events"
+      printf 'hello from job %s\n' "$NUMBER"
+      sleep 1
+      printf 'end %s\n' "$NUMBER" >> "$OCQ_PROOF_RUN/events"

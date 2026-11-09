@@ -1,0 +1,21 @@
+version: "2"
+sql:
+  - engine: sqlite
+    schema:
+      - internal/core/sql/schema.sql
+      - internal/core/sql/schema2.sql
+      - internal/core/sql/schema3.sql
+      - internal/core/sql/schema4.sql
+      - internal/core/sql/schema5.sql
+    queries:
+      - internal/core/sql/receipts.sql
+      - internal/core/sql/agents.sql
+      - internal/core/sql/dispatch.sql
+      - internal/core/sql/notifications.sql
+      - internal/core/sql/projects.sql
+      - internal/core/sql/inbox.sql
+    gen:
+      go:
+        package: dbquery
+        out: internal/core/dbquery
+        emit_empty_slices: true

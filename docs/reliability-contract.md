@@ -15,6 +15,10 @@ must establish them before live coding-agent jobs are entrusted to ocq.
   silently skip the head for throughput. Concurrent completions are unordered.
 - Recover accepted jobs after service restart without silently losing them or
   launching a second execution. Reconcile uncertain running jobs before acting.
+  [Command-only systemd supervision](supervision.md) is now proven on harmless
+  transient fixtures: dispatcher restart retains unknown ownership/capacity and
+  never retries execution. Graceful drain and forced unit cleanup are distinct
+  from successful job completion. This is not unattended agent deployment.
 
 ## Execution and ownership
 
@@ -40,9 +44,24 @@ must establish them before live coding-agent jobs are entrusted to ocq.
 - Store validation status and evidence separately from process exit status.
   Exit zero alone does not establish a validated change; missing validation,
   permission blocks, and ambiguous outcomes must remain visible.
+- For the experimental agent adapter, use the local single-user, dedicated-
+  session completion policy in [agent integration](agent-integration.md): one
+  exact supplied prompt consumed once in full ordered history, explicit terminal
+  outcome, stable profile/transcript, no active loop or pending input/permissions/
+  forms. Record system/synthetic context without asserting its producer or causal
+  ownership. Additional user/command/shell execution inputs and profile changes
+  remain unknown. Known foreground tools require terminal completed/error states;
+  running/streaming/unsupported tools hold capacity. Runtime-tracked background
+  shells require exact ID/session/location-bound exit observations and before/
+  final resource checks; an outer tool's return is insufficient. Missing resources
+  stay unknown. Idle/CLI exit alone is insufficient. This is a cooperative local
+  scope, not malicious same-user API defense or escaped-daemon detection.
 - Make notification delivery recoverable from durable state, with retriable
   delivery and stable job identity for duplicate handling. A lost notification
   must not erase an outcome or require executing the job again.
+  The first implemented interface is [local CLI pull/ack](notifications.md): one
+  frozen completion event per job, atomic with terminal transition, redelivered
+  until explicitly acknowledged. Proactive chat/network delivery is not provided.
 
 Resource admission must also honor the memory floor, heavy-phase separation,
 and non-deadlocking token policy in [architecture](architecture.md).

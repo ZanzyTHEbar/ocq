@@ -1,0 +1,22 @@
+[Unit]
+Description=ocq command dispatcher (%i)
+Documentation=man:systemd.service(5) man:systemd.kill(5)
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=exec
+EnvironmentFile=%E/ocq/%i.env
+ExecStartPre=/usr/bin/test -n "${OCQ_STATE_DIR}"
+ExecStartPre=/usr/bin/test -x "${OCQ_BIN}"
+ExecStart=/usr/bin/env -- ${OCQ_BIN} --state-dir ${OCQ_STATE_DIR} dispatch --commands-only
+WorkingDirectory=%h
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+SendSIGKILL=yes
+
+# Deliberately no [Install] target: opt-in/manual start, never enable by default.
