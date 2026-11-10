@@ -25,9 +25,10 @@ import (
 )
 
 type store struct {
-	db       *sql.DB
-	database *dbbootstrap.DB
-	dir      string
+	db                 *sql.DB
+	database           *dbbootstrap.DB
+	dir                string
+	existingSchemaOnly bool
 }
 
 type Job struct {
@@ -438,6 +439,11 @@ func (s *store) write(fn func(*sql.Conn) error) error {
 		return classifyDiagnostic(faults.CodeDatabaseWrite, err)
 	}
 	defer c.ExecContext(context.Background(), "ROLLBACK") // harmless after COMMIT
+	if s.existingSchemaOnly {
+		if err := requireProjectSchema5(c); err != nil {
+			return err
+		}
+	}
 	if err := fn(c); err != nil {
 		return err
 	}
@@ -527,8 +533,12 @@ func jobFromRow(row dbquery.JobByIDRow) (Job, error) {
 }
 
 func (s *store) get(id string) (_ Job, resultErr error) {
+	return s.getFrom(s.db, id)
+}
+
+func (s *store) getFrom(q sqlQueryer, id string) (_ Job, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeDatabaseRead, resultErr) }()
-	row, err := dbquery.New(s.db).JobByID(context.Background(), id)
+	row, err := dbquery.New(q).JobByID(context.Background(), id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Job{}, classifyDiagnostic(faults.CodeNotFound, err)
@@ -538,7 +548,7 @@ func (s *store) get(id string) (_ Job, resultErr error) {
 	job, err := jobFromRow(row)
 	if err == nil && job.State == "queued" {
 		var head string
-		head, err = dbquery.New(s.db).QueuedHead(context.Background())
+		head, err = dbquery.New(q).QueuedHead(context.Background())
 		if err == nil && head != id {
 			job.Reason = "FIFO behind " + head
 		} else if errors.Is(err, sql.ErrNoRows) {
@@ -548,7 +558,7 @@ func (s *store) get(id string) (_ Job, resultErr error) {
 		}
 	}
 	if err == nil && job.agentRequest != nil {
-		job.Agent, err = s.agentOwnership(id)
+		job.Agent, err = agentOwnershipFrom(q, id)
 	}
 	return job, err
 }

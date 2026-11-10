@@ -292,6 +292,25 @@ func (q *Queries) InboxPage(ctx context.Context, arg InboxPageParams) ([]InboxPa
 	return items, nil
 }
 
+const inboxRecentAnchor = `-- name: InboxRecentAnchor :one
+SELECT CAST(COALESCE((SELECT sequence FROM project_inbox_messages
+ WHERE project_id=?1 AND (recipient=?2 OR ?2='all')
+ ORDER BY sequence DESC LIMIT 1 OFFSET ?3), 0) AS INTEGER)
+`
+
+type InboxRecentAnchorParams struct {
+	ProjectID string
+	Recipient string
+	PageLimit int64
+}
+
+func (q *Queries) InboxRecentAnchor(ctx context.Context, arg InboxRecentAnchorParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, inboxRecentAnchor, arg.ProjectID, arg.Recipient, arg.PageLimit)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const inboxUnreadCount = `-- name: InboxUnreadCount :one
 SELECT COUNT(*) FROM project_inbox_messages
 WHERE project_id=?1 AND read_at IS NULL

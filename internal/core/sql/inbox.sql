@@ -5,6 +5,11 @@ WHERE m.project_id=sqlc.arg(project_id) AND m.sequence>sqlc.arg(after_sequence)
  AND (m.recipient=sqlc.arg(recipient) OR sqlc.arg(recipient)='all')
 ORDER BY m.sequence ASC LIMIT sqlc.arg(page_limit);
 
+-- name: InboxRecentAnchor :one
+SELECT CAST(COALESCE((SELECT sequence FROM project_inbox_messages
+ WHERE project_id=sqlc.arg(project_id) AND (recipient=sqlc.arg(recipient) OR sqlc.arg(recipient)='all')
+ ORDER BY sequence DESC LIMIT 1 OFFSET sqlc.arg(page_limit)), 0) AS INTEGER);
+
 -- name: UnreadInboxPage :many
 SELECT m.id,m.sequence,m.key,m.project_id,m.sender,m.recipient,m.lane_id,m.job_id,m.kind,m.subject,m.body,m.manifest_digest,m.assoc_id,m.fsfork_path,m.reply_to_id,m.created_at,m.read_at,m.archived_at
 FROM project_inbox_messages m

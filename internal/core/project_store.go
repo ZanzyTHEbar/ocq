@@ -131,6 +131,16 @@ func (q *Queue) RegisterProject(rawBytes []byte) (_ ProjectRegistrationResult, r
 }
 
 func (s *store) lookupProjectRegistration(q sqlQueryer, key string, expectedCanonical []byte, expectedDigest string) (ProjectRegistrationResult, bool, error) {
+	if s.existingSchemaOnly && q == s.db {
+		var result ProjectRegistrationResult
+		var found bool
+		err := s.readSchema5(func(tx sqlQueryer) error {
+			var err error
+			result, found, err = s.lookupProjectRegistration(tx, key, expectedCanonical, expectedDigest)
+			return err
+		})
+		return result, found, err
+	}
 	ctx := context.Background()
 	var res ProjectRegistrationResult
 	queries := dbquery.New(q)
@@ -485,12 +495,22 @@ func (s *store) lookupProjectSubmissionRow(ctx context.Context, q sqlQueryer, pa
 }
 
 func (s *store) lookupProjectSubmission(q sqlQueryer, parsed parsedProjectSubmission) (ProjectSubmissionResult, bool, error) {
+	if s.existingSchemaOnly && q == s.db {
+		var result ProjectSubmissionResult
+		var found bool
+		err := s.readSchema5(func(tx sqlQueryer) error {
+			var err error
+			result, found, err = s.lookupProjectSubmission(tx, parsed)
+			return err
+		})
+		return result, found, err
+	}
 	var out ProjectSubmissionResult
 	meta, found, err := s.lookupProjectSubmissionRow(context.Background(), q, parsed)
 	if err != nil || !found {
 		return out, false, err
 	}
-	job, err := s.get(meta.jobID)
+	job, err := s.getFrom(q, meta.jobID)
 	if err != nil {
 		return out, false, err
 	}

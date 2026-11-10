@@ -1,10 +1,10 @@
 # Alpha command core
 
 This is a local Linux foreground-command queue, **not a production coding-agent
-system**. SQLite is the only queue authority; Dagu is historical proof material.
-The [decision](architecture.md) explains why the approved follow-up needed this
-core. The [full reliability contract](reliability-contract.md) still includes
-integration and deployment work. The subsequent [experimental agent slice](agent-integration.md)
+system**. SQLite is the only queue authority. The [architecture](architecture.md)
+explains the core's ownership boundaries. The
+[full reliability contract](reliability-contract.md) still includes integration
+and deployment work. The subsequent [experimental agent slice](agent-integration.md)
 adds provisioning and session-scoped cooperative tool completion; the v1
 command contract and serialized request bytes remain unchanged.
 
@@ -194,12 +194,29 @@ GOMAXPROCS=2 runtime/ocq-acceptance "$PWD/runtime/ocq"
 ```
 
 Project registration/submission, lanes, the integrator inbox, Goldfish review,
-capture/verification, and the terminal board are covered by the same acceptance
-binary via `--project`; see [project control plane](project-control-plane.md).
+capture/verification, and the terminal board use a fresh schema-5 queue with
+`--project`; this does **not** test migration. It creates and cancels two v1
+command jobs in that current-schema queue to check refusal of unattributed-key
+adoption. No dispatcher is started in this project scenario.
 
 ```sh
-OCQ_PROOF_REVIEW_AGENT=YOUR_EXISTING_REVIEW_AGENT GOMAXPROCS=2 runtime/ocq-acceptance --project "$PWD/runtime/ocq" /path/to/schema1.db /path/to/schema2.db
+OCQ_PROOF_REVIEW_AGENT=YOUR_EXISTING_REVIEW_AGENT GOMAXPROCS=2 runtime/ocq-acceptance --project "$PWD/runtime/ocq"
 ```
+
+To run the same project assertions after real schema-1 → 2 → 3 → 4 → 5 migration,
+including receipt preservation, non-initializing old-schema reads, migration
+notifications, and unattributed legacy jobs, invoke the separate legacy mode:
+
+```sh
+OCQ_PROOF_REVIEW_AGENT=YOUR_EXISTING_REVIEW_AGENT GOMAXPROCS=2 runtime/ocq-acceptance --project-legacy "$PWD/runtime/ocq" /path/to/ocq-schema1 /path/to/ocq-schema2
+```
+
+The last two arguments must be authentic historical OCQ executables that create
+or upgrade schema-1 and schema-2 queues, not database files. The former
+`--project OCQ LEGACY_SCHEMA1 LEGACY_SCHEMA2` form remains a legacy-mode alias.
+Both project modes discover an existing OpenCode session and verify an explicit
+review agent; isolate their discovery environment before running them when a
+shared service must not be inspected. See [project control plane](project-control-plane.md).
 
 The runner prints a persistent private XDG evidence directory. It uses real CLI
 processes/SQLite/host MemAvailable, not mocks, and supplies its own harmless
@@ -221,8 +238,7 @@ live-process resolution rejection, and explicit resolution after the cooperative
 probe exits. A separate run was intentionally interrupted while its harmless
 probe was active: it exited 1 on context cancellation, released the owned probe,
 retired the dispatcher, and verified all recorded PID/start identities exited.
-Gofmt, bounded `go vet`, both bounded builds, historical shell-runner syntax, and
-`git diff --check` passed. The historical Dagu lifecycle was not rerun in this phase.
+Gofmt, bounded `go vet`, both bounded builds, and `git diff --check` passed.
 Exact run identities/raw evidence
 remain private, not in tracked documentation.
 

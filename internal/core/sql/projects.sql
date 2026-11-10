@@ -55,6 +55,10 @@ SELECT n.id,n.sequence,n.job_id,n.state,n.outcome,n.exit_code,n.validation,n.ori
  FROM completion_notifications n JOIN project_jobs pj ON n.job_id=pj.job_id
  WHERE pj.project_id=? AND n.sequence>? ORDER BY n.sequence ASC LIMIT ?;
 
+-- name: ProjectResultsRecentAnchor :one
+SELECT CAST(COALESCE((SELECT n.sequence FROM completion_notifications n JOIN project_jobs pj ON n.job_id=pj.job_id
+ WHERE pj.project_id=sqlc.arg(project_id) ORDER BY n.sequence DESC LIMIT 1 OFFSET sqlc.arg(page_limit)), 0) AS INTEGER);
+
 -- name: ProjectJobByID :one
 SELECT job_id,project_id,binding_revision,role,brief_digest,target_job_id,target_result_digest,recorded_at
  FROM project_jobs WHERE project_id=? AND job_id=?;

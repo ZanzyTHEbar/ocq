@@ -410,9 +410,10 @@ func main() {
 	notifications := len(os.Args) > 1 && os.Args[1] == "--notifications"
 	supervision := len(os.Args) > 1 && os.Args[1] == "--supervision"
 	project := len(os.Args) > 1 && os.Args[1] == "--project"
-	check((!notifications && !supervision && !project && len(os.Args) == 2) || (notifications && len(os.Args) == 5) || (supervision && len(os.Args) == 3) || (project && len(os.Args) == 5), "usage: ocq-acceptance OCQ | --notifications OCQ LEGACY_SCHEMA1 LEGACY_SCHEMA2 | --supervision OCQ | --project OCQ LEGACY_SCHEMA1 LEGACY_SCHEMA2")
+	projectLegacy := len(os.Args) > 1 && os.Args[1] == "--project-legacy"
+	check((!notifications && !supervision && !project && !projectLegacy && len(os.Args) == 2) || (notifications && len(os.Args) == 5) || (supervision && len(os.Args) == 3) || (project && (len(os.Args) == 3 || len(os.Args) == 5)) || (projectLegacy && len(os.Args) == 5), "usage: ocq-acceptance OCQ | --notifications OCQ LEGACY_SCHEMA1 LEGACY_SCHEMA2 | --supervision OCQ | --project OCQ | --project-legacy OCQ LEGACY_SCHEMA1 LEGACY_SCHEMA2")
 	binArg := os.Args[1]
-	if notifications || supervision || project {
+	if notifications || supervision || project || projectLegacy {
 		binArg = os.Args[2]
 	}
 	bin, err := filepath.Abs(binArg)
@@ -446,8 +447,13 @@ func main() {
 			s.runSupervision()
 		} else if notifications {
 			s.runNotifications(os.Args[3], os.Args[4])
-		} else if project {
-			s.runProjectAcceptance(os.Args[3], os.Args[4])
+		} else if project || projectLegacy {
+			if len(os.Args) == 5 {
+				check(os.Args[3] != "" && os.Args[4] != "", "legacy project mode requires both historical executables")
+				s.runProjectAcceptance(os.Args[3], os.Args[4])
+			} else {
+				s.runProjectAcceptance("", "")
+			}
 		} else {
 			s.run()
 		}
@@ -466,8 +472,12 @@ func main() {
 		if supervision {
 			label = "PASS isolated systemd user supervision acceptance"
 		}
-		if project {
-			label = "PASS project control plane and terminal board acceptance"
+		if project || projectLegacy {
+			if len(os.Args) == 5 {
+				label = "PASS project control plane and terminal board acceptance (legacy migration verified)"
+			} else {
+				label = "PASS project control plane and terminal board acceptance (fresh schema; migration not tested)"
+			}
 		}
 		s.note(label)
 		fmt.Println(label)

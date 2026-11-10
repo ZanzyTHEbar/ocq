@@ -355,6 +355,15 @@ func (r *Reader) Lanes(projectID string) (_ ProjectLanesOutput, resultErr error)
 
 // Inbox returns a non-consuming, recipient-scoped page and unread count.
 func (r *Reader) Inbox(projectID, recipient string, unreadOnly bool, afterSeq int64, limit int) (_ ProjectInboxOutput, resultErr error) {
+	return r.inbox(projectID, recipient, unreadOnly, afterSeq, limit, false)
+}
+
+// RecentInbox returns the newest retained messages in one stored snapshot.
+func (r *Reader) RecentInbox(projectID string, limit int) (ProjectInboxOutput, error) {
+	return r.inbox(projectID, "all", false, 0, limit, true)
+}
+
+func (r *Reader) inbox(projectID, recipient string, unreadOnly bool, afterSeq int64, limit int, recent bool) (_ ProjectInboxOutput, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeDatabaseRead, resultErr) }()
 	var out ProjectInboxOutput
 	if !isValidProjectID(projectID) {
@@ -387,6 +396,12 @@ func (r *Reader) Inbox(projectID, recipient string, unreadOnly bool, afterSeq in
 		if _, err := queries.LaneByID(ctx, dbquery.LaneByIDParams{ProjectID: projectID, LaneID: strings.TrimPrefix(recipient, "lane:")}); errors.Is(err, sql.ErrNoRows) {
 			return out, faults.Wrap(faults.CodeNotFound, fmt.Sprintf("lane %s does not exist in project %s", strings.TrimPrefix(recipient, "lane:"), projectID), err)
 		} else if err != nil {
+			return out, err
+		}
+	}
+	if recent {
+		afterSeq, err = queries.InboxRecentAnchor(ctx, dbquery.InboxRecentAnchorParams{ProjectID: projectID, Recipient: recipient, PageLimit: int64(limit)})
+		if err != nil {
 			return out, err
 		}
 	}
@@ -436,7 +451,11 @@ type MailRequest struct {
 }
 
 // SendMail retains an immutable, idempotent message in the project inbox.
-func (q *Queue) SendMail(in MailRequest) (_ ProjectInboxMessage, resultErr error) {
+func (q *Queue) SendMail(in MailRequest) (ProjectInboxMessage, error) {
+	return q.sendMail(in, false, nil)
+}
+
+func (q *Queue) sendMail(in MailRequest, existingSchemaOnly bool, expectedLanePath *string) (_ ProjectInboxMessage, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeDatabaseWrite, resultErr) }()
 	var committed ProjectInboxMessage
 	projectID := in.ProjectID
@@ -483,6 +502,17 @@ func (q *Queue) SendMail(in MailRequest) (_ ProjectInboxMessage, resultErr error
 
 	ctx := context.Background()
 	err := q.store.write(func(c *sql.Conn) error {
+		if existingSchemaOnly {
+			// Recheck on the transaction's actual connection, as the store opener
+			// cannot guarantee a later connection still has the same schema.
+			var version int
+			if err := c.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+				return classifyDiagnostic(faults.CodeDatabaseRead, err)
+			}
+			if version != 5 {
+				return faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing writable store requires schema version 5, got %d", version))
+			}
+		}
 		queries := dbquery.New(c)
 		owner, err := queries.LaneOwnerAndPath(ctx, dbquery.LaneOwnerAndPathParams{ProjectID: projectID, LaneID: lane})
 		if errors.Is(err, sql.ErrNoRows) {
@@ -493,6 +523,9 @@ func (q *Queue) SendMail(in MailRequest) (_ ProjectInboxMessage, resultErr error
 		}
 		if owner.OwnerJobID != job {
 			return faults.New(faults.CodeValidationFailed, fmt.Sprintf("lane %s is owned by job %s, not %s", lane, owner.OwnerJobID, job))
+		}
+		if expectedLanePath != nil && owner.FsforkPath != *expectedLanePath {
+			return faults.New(faults.CodeValidationFailed, "lane path changed before compose dispatch")
 		}
 		if strings.HasPrefix(to, "lane:") {
 			if _, err := queries.LaneByID(ctx, dbquery.LaneByIDParams{ProjectID: projectID, LaneID: strings.TrimPrefix(to, "lane:")}); errors.Is(err, sql.ErrNoRows) {
@@ -542,6 +575,34 @@ func (q *Queue) SendMail(in MailRequest) (_ ProjectInboxMessage, resultErr error
 		return committed, err
 	}
 	return committed, nil
+}
+
+// MailSender can only send explicit inbox mail to an existing schema-5 queue.
+// It does not initialize or migrate state, dispatch jobs, or release capacity.
+type MailSender struct{ store *store }
+
+// OpenExistingMailSender requires an existing private schema-5 store and lock.
+func OpenExistingMailSender(stateDir string) (_ *MailSender, resultErr error) {
+	defer func() { resultErr = classifyDiagnostic(faults.CodeRuntimeFailed, resultErr) }()
+	s, err := openExistingWritableStore(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	return &MailSender{store: s}, nil
+}
+
+func (s *MailSender) Close() error {
+	return classifyDiagnostic(faults.CodeDatabaseWrite, s.store.database.Close())
+}
+
+// Send applies the same validation and idempotency contract as Queue.SendMail.
+// It performs one attempt; callers must handle ambiguous outcomes themselves.
+func (s *MailSender) Send(in MailRequest) (ProjectInboxMessage, error) {
+	return (&Queue{store: s.store}).sendMail(in, true, nil)
+}
+
+func (s *MailSender) sendAtLanePath(in MailRequest, expectedLanePath string) (ProjectInboxMessage, error) {
+	return (&Queue{store: s.store}).sendMail(in, true, &expectedLanePath)
 }
 
 // AcknowledgeMail marks a retained inbox message read and optionally archived.

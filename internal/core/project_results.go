@@ -14,6 +14,10 @@ import (
 // projectResultsData returns stored terminal snapshots, including acknowledged
 // events. Reading it neither acknowledges events nor changes capacity.
 func (s *store) projectResultsData(projectID string, afterSeq int64, limit int) (_ ProjectResultsOutput, resultErr error) {
+	return s.projectResultsPage(projectID, afterSeq, limit, false)
+}
+
+func (s *store) projectResultsPage(projectID string, afterSeq int64, limit int, recent bool) (_ ProjectResultsOutput, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeDatabaseRead, resultErr) }()
 	var out ProjectResultsOutput
 	if !isValidProjectID(projectID) {
@@ -35,6 +39,12 @@ func (s *store) projectResultsData(projectID string, afterSeq int64, limit int) 
 	}
 	if err != nil {
 		return out, err
+	}
+	if recent {
+		afterSeq, err = dbquery.New(tx).ProjectResultsRecentAnchor(ctx, dbquery.ProjectResultsRecentAnchorParams{ProjectID: projectID, PageLimit: int64(limit)})
+		if err != nil {
+			return out, err
+		}
 	}
 	rows, err := dbquery.New(tx).ProjectResultEvents(ctx, dbquery.ProjectResultEventsParams{ProjectID: projectID, Sequence: afterSeq, Limit: int64(limit)})
 	if err != nil {

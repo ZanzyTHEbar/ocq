@@ -1,101 +1,163 @@
-# ocq
+# OCQ
 
-A local-first **alpha command queue**, intended as a foundation for later
-coding-agent integration—not a production agent system.
+OCQ is a local-first execution queue for Linux. It accepts commands with durable
+receipts, dispatches them under a local concurrency and memory-admission policy,
+and records their outcomes and output. It also has an experimental OpenCode agent
+adapter and project control plane.
 
-The Go CLI and singleton dispatcher use SQLite as the **sole queue authority**.
-The Dagu proof passed its shell lifecycle scenario, but pinned-source review
-found no suitable external prelaunch resource/head-admission hook. An external
-adapter meeting the full contract would itself become another scheduler.
-The approved follow-up therefore chose a narrow Go + SQLite core, with no Dagu,
-Python, or JS/TS runtime dependency. See the [decision](docs/architecture.md).
+**Status: alpha, not a production agent system.** The command queue is intended
+for cooperative foreground processes. Agent execution, the Herdr interface,
+remote operation, and unattended deployment have narrower validation; read the
+[reliability contract](docs/reliability-contract.md) before relying on them.
 
-The goal is reusable local orchestration, not another agent runtime. OpenCode
-owns execution and permissions; Workmux owns worktrees; exactly one queue
-authority owns scheduling. Existing live helpers must remain untouched.
+## How it works
 
-## Start here
+SQLite is the **sole queue authority**: it stores requests, FIFO order, lifecycle
+state, and completion notifications. A singleton dispatcher admits work from
+that queue. OpenCode owns agent execution and permissions; Workmux provisions
+agent worktrees. Neither the project views nor Herdr are schedulers. The
+[architecture](docs/architecture.md) explains the single-authority decision.
 
-- [Architecture and proof-of-fit boundary](docs/architecture.md)
-- [Required reliability contract](docs/reliability-contract.md)
-- [Command core: usage, semantics, acceptance, and deployment gates](docs/command-core.md)
-- [Experimental agent adapter: verified operations and correlation blocker](docs/agent-integration.md)
-- [Project control plane and current Herdr workspace](docs/project-control-plane.md)
-- [Dagu proof: commands, results, and adoption gaps](docs/dagu-proof-of-fit.md)
-- [Contributor instructions](AGENTS.md)
+OCQ executes command arguments directly, not through a shell unless you explicitly
+request one. Commands run with a restricted fixed environment, but retain the
+user's filesystem and network permissions: **this is not a sandbox**. Submit only
+commands you trust, and avoid daemonizing or unmanaged child processes.
 
-Requires Linux and Go 1.26+. Build with bounded parallelism:
+## Build and install
 
-```sh
-GOMAXPROCS=2 go build -p 1 -o runtime/ocq .
-runtime/ocq submit --key harmless-example -- /usr/bin/printf '%s\n' hello
-runtime/ocq dispatch
-```
+Prerequisites:
 
-State defaults to `$XDG_STATE_HOME/ocq` or `~/.local/state/ocq`; it must be on a
-persistent local supported filesystem, not tmpfs, a shared VM mount, or a network
-share. Use global `--state-dir DIR` before the command to choose another location.
-Dispatch defaults to two slots and a 6 GiB MemAvailable floor. Unknown launches
-retain capacity and require explicit reconciliation; execution is never retried.
+- Linux and Go **1.26.5 or later**.
+- A private, persistent local filesystem for SQLite state: ext4-family, XFS, or
+  Btrfs. Temporary filesystems, network filesystems, overlay filesystems, and
+  shared VM mounts are rejected. See [storage requirements](docs/command-core.md#build-and-use).
+- For agent workflows only: a compatible OpenCode service and Workmux setup; see
+  [agent integration](docs/agent-integration.md). Neither is needed for the
+  command-only example below.
 
-Completion notifications are durable **local CLI pull**, not chat delivery:
+From a checkout, build the CLI and optionally put it on your `PATH`:
 
 ```sh
-runtime/ocq notifications --limit 20
-runtime/ocq ack COMPLETION_EVENT_ID
+mkdir -p "$HOME/.local/bin"
+GOMAXPROCS=2 go build -p 1 -o "$HOME/.local/bin/ocq" .
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Unacknowledged events redeliver with the same ID after client/dispatcher restart.
-Acknowledgement is idempotent and never retries execution or releases capacity.
-See [notification semantics and migration](docs/notifications.md).
+The SQLite driver is included as a Go dependency; no separate SQLite server is
+needed. State defaults to `$XDG_STATE_HOME/ocq`, or `$HOME/.local/state/ocq` if
+`XDG_STATE_HOME` is unset. Specify `--state-dir DIR` **before** the command to
+use a different private persistent location. OCQ creates private state; do not
+copy live state or remove its lock files.
 
-An alpha **project control plane** (Schema 5) binds an OCQ product project to an
-exact repository root, commit anchor, and coordinating OpenCode session
-(**Elephant**) with compare-and-swap binding revisions, receipt-first registration
-and submission envelope retries, non-consuming `project results` across globally
-acknowledged completion events, atomic idempotent `record-result` with explicit
-`supersedes` lineage and source-labelled assertions (`verification=structure_hash_linkage_only`),
-cooperative before/after worktree snapshot capture (`project capture-result`,
-`source=machine_capture`, `verification=machine_verified_snapshot`) and read-only
-live worktree-to-snapshot verification (`project verify-worktree`),
-first-class **owned lanes** with set-once `fsfork_path` and sealed result
-snapshots, a local immutable **integrator inbox** (`project lanes`,
-`project inbox`, idempotent `project mail-send` / `project mail-ack`),
-a static **Goldfish** review gate (`<= 16 KiB` deterministic inline review prompt
-and `read`/`glob`/`grep` + `deny *` permission policy), and a read-only terminal
-board usable in current `herdr-app` and `herdr-core`. See
-[project control plane](docs/project-control-plane.md).
-Review intake and pre-prompt checks verify the exact agent and the supported
-OpenCode policy version; the session's ordered read-only rules are checked again
-before prompting. This is cooperative isolation, not a filesystem sandbox.
-Choose an exact project with `ocq project list`, then run
-`ocq project board PROJECT_ID` for a plain terminal overview. It shows stored
-job and unread inbox observations without acknowledging mail or reconciling work.
-An experimental native `herdr-app` panel is in `share/herdr/mods/ocq`; its
-short-lived `ocq-herdr` Go bridge calls read-only core operations directly, not
-the `ocq` CLI. It shows stored project, job and unread inbox observations only;
-it does not submit work, reconcile jobs, acknowledge mail or answer permissions.
+## Command-only quickstart
 
-An opt-in [systemd user-unit template](docs/supervision.md) and a real isolated
-restart/drain proof are available for **command-only** queues. Nothing is
-installed/enabled; this does not validate unattended agents or deployment.
+Use a fresh state directory on a supported filesystem. This example submits one
+harmless foreground command, then starts a foreground dispatcher. Use a new key
+for each distinct request: a key is an immutable idempotency key, not a job name
+that can be reused for different work.
 
-An **experimental Workmux + shared OpenCode V2 adapter** now provisions a dedicated
-worktree/session and journals a single supplied-ID prompt. Its real tiny Plan-agent
-probe recovered after dispatcher crash through API-only reconciliation: one exact
-consumed prompt, stable full history, explicit success, no active loop or pending
-requests, and no tools. System/synthetic events are recorded session context,
-without claiming trusted provenance. The retained job finished `agent_succeeded`,
-released its slot, and kept `validation=not_run`; nothing was resent.
-See the [session-scoped contract and limits](docs/agent-integration.md).
-The next real Build fixture also passed read/patch, foreground shell verification,
-four actual tool permission blocks with explicit fixture-only once approvals, and
-a bounded background shell. ocq held the slot while the outer tool was complete
-and the session idle, releasing it only after that exact runtime shell exited.
-**Arbitrary tools, detached daemons, and production deployment remain unvalidated.**
+```sh
+STATE="$HOME/.local/state/ocq-demo"
+ocq --state-dir "$STATE" submit --key hello-v1 --cwd "$HOME" -- /usr/bin/printf '%s\n' hello
+ocq --state-dir "$STATE" dispatch --commands-only
+```
 
-There is no permission autoapproval, heavy-phase admission, service installation,
-HTTP server, or unattended deployment. The historical Dagu
-experiment remains reproducible with `bash proof/dagu/run.sh`; it is not used by ocq.
+The dispatcher stays running. In another terminal, inspect the queue and use the
+job ID returned by `submit` or `list`:
 
-Licensed under the [MIT License](LICENSE).
+```sh
+STATE="$HOME/.local/state/ocq-demo"
+ocq --state-dir "$STATE" list
+ocq --state-dir "$STATE" status JOB_ID
+ocq --state-dir "$STATE" logs JOB_ID
+ocq --state-dir "$STATE" notifications
+```
+
+After the job finishes, stop the dispatcher with Ctrl-C in its terminal. Shutdown
+stops admission and waits for its owned foreground commands; a stuck command can
+therefore delay shutdown. The default dispatcher has two slots and a 6 GiB
+available-memory floor, so a job may remain queued on a busy or smaller machine.
+These are admission controls, not resource limits. `--commands-only` prevents
+agent admission and polling; an agent at the FIFO head can block later commands.
+See [command usage and admission](docs/command-core.md) for flags and recovery.
+
+Completion notifications are durable local pull events. `ocq --state-dir "$STATE"
+ack EVENT_ID` acknowledges one idempotently; it does not release capacity or
+retry work. See [notifications](docs/notifications.md).
+
+## Agent and project workflows
+
+The experimental adapter provisions a dedicated worktree and OpenCode session for
+an explicitly submitted prompt. Project records add bindings, owned lanes,
+results, and a local integrator inbox. A terminal view is available through
+`ocq project list` and `ocq project board PROJECT_ID`. Results and stored views
+are observations, not proof that a deliverable was validated or that an agent is
+still running. See [agent integration](docs/agent-integration.md) and the
+[project control plane](docs/project-control-plane.md) for prerequisites, exact
+semantics, and supported workflows.
+
+OCQ never answers permission requests. Agent completion requires the documented
+session and tool/resource observations; a closed client, disconnected view, or
+completed shell tool call alone is not proof that all work has stopped. Unknown
+ownership retains capacity and is not automatically retried. Arbitrary tools,
+escaped daemons, remote disconnect handling, and production operation are not
+broadly validated. Review isolation is cooperative, not a filesystem sandbox.
+
+## Herdr workspace (experimental)
+
+The native `herdr-app` mod uses a short-lived Go bridge to show stored OCQ project,
+job, and inbox information. It can explicitly mark inbox messages read or archive
+already-read messages. Local compose can prepare a `lane.blocked` message from a
+selected lane to its integrator, preview the retained request, and send it only
+after a separate confirmation. A previously prepared supported `lane.assigned`
+message can also be previewed and confirmed. An uncertain send is not automatically
+resent; use the explicit stored-receipt check instead. Remote compose is unavailable.
+
+**Before using the new compose claim protocol, stop older panel and bridge
+processes and ensure no previously launched old dispatch can start later.** Older
+bridges do not require the durable claim, so mixed versions are not safe.
+
+The compose journal checks the queue file's device and inode, but cannot detect an
+in-place restore. Do not replace or retarget database paths concurrently with
+compose operations. Explicit local project intake can register projects or queue
+work, which an already-running dispatcher may start. Remote intake and compose
+are disabled. The panel does not reconcile jobs or answer permissions; only the
+human operator may approve permission requests. The mod is
+trusted code running with the user's permissions. The bridge runs on the selected
+Herdr machine and uses its OCQ state directory, or `OCQ_STATE_DIR` from its
+environment. Remote use and disconnect behavior have not been validated end to end.
+
+For **herdr-app 0.1.14**, build the bridge and make it available on the selected
+machine's Herdr core `PATH`. Start the app once, then explicitly install and
+activate the separate personal layout:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+GOMAXPROCS=2 go build -p 1 -o "$HOME/.local/bin/ocq-herdr" ./cmd/ocq-herdr
+sh share/herdr/install.sh "$HOME/.config/herdr-app" "$(command -v herdr-app)" --activate
+```
+
+Replace the app-home argument with the actual absolute home if customized. The
+installer requires a running app, checks the version, refuses to overwrite an
+existing OCQ mod or layout, and switches the running window's layout. It does not
+merge the previous layout's customizations. If installation or switching fails,
+inspect the retained files and window before retrying. The dispatcher runs
+independently of the panel. See [Herdr setup and limitations](docs/project-control-plane.md#current-herdr-terminal-workspace).
+
+## Developing
+
+The repository pins Go dependencies in `go.mod` and `go.sum`. SQL schemas and
+queries live in `internal/core/sql`; the generated Go query package lives in
+`internal/core/dbquery`. After changing SQL, regenerate with **sqlc v1.30.0** by
+running `sqlc generate` from the repository root. Goose runs the locked,
+transactional migration in the application; schema initialization and SQLite
+connection safety checks remain OCQ's responsibility. See
+[command-core development notes](docs/command-core.md#build-and-use) for migration
+and generation details and [acceptance instructions](docs/command-core.md#real-acceptance-evidence).
+
+Optional [systemd user supervision](docs/supervision.md) is command-only and is
+not installed or enabled automatically.
+
+## License
+
+[MIT](LICENSE).

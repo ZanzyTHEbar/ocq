@@ -1,9 +1,134 @@
 import { View, div } from "gpui-kit";
-import { h_flex, v_flex } from "gpui-base";
+import { h_flex, v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { exec, nextCommand, spaces, theme } from "herdr";
+import { connect } from "net";
+import { createHash, randomBytes } from "crypto";
+import { Buffer } from "buffer";
 
 function emptyCollection() {
-  return { items: [], readTimes: {}, cursor: "0", readAt: null, loaded: false, loading: false, hasMore: false, error: null };
+  return { items: [], history: [], recent: [], readTimes: {}, cursor: "0", refreshCursor: "0", readAt: null, recentReadAt: null, loaded: false, loading: false, recentLoading: false, refreshingHistory: false, hasMore: false, error: null, recentError: null };
+}
+
+function readOrder(value) {
+  return (value || "").replace(/(?:\.(\d+))?Z$/, (_match, fraction) => `.${(fraction || "").padEnd(9, "0")}Z`);
+}
+
+// The shell has synchronous hashes, not a usable async webcrypto.subtle.
+function composeProof(capability, nonce, role) {
+  const key = Buffer.from(capability, "hex"), inner = new Uint8Array(64), outer = new Uint8Array(64);
+  for (let i = 0; i < 64; i++) { const b = i < key.length ? key[i] : 0; inner[i] = b ^ 0x36; outer[i] = b ^ 0x5c; }
+  const digest = createHash("sha256").update(inner).update(`ocq-compose-v1:${role}:${nonce}`).digest();
+  return createHash("sha256").update(outer).update(digest).digest("hex");
+}
+
+function composeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let difference = 0;
+  for (let i = 0; i < a.length; i++) difference |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return difference === 0;
+}
+
+function composeDecode(bytes) {
+  const text = Buffer.from(bytes).toString("utf8"), encoded = Buffer.from(text, "utf8");
+  if (encoded.length !== bytes.length) throw new Error("Invalid UTF-8 frame");
+  for (let i = 0; i < bytes.length; i++) if (encoded[i] !== bytes[i]) throw new Error("Invalid UTF-8 frame");
+  return text;
+}
+
+function socketFrames(socket) {
+  let pending = [];
+  async function more() {
+      const chunk = await socket.read(4096);
+      if (chunk === null || chunk.length === 0) throw new Error("Connection closed");
+      for (const byte of chunk) pending.push(byte);
+      if (pending.length > 135168) throw new Error("Frame too large");
+  }
+  return {
+    async line(limit = 131072) {
+      for (;;) {
+        const end = pending.indexOf(10);
+        if (end >= 0) { if (end > limit) throw new Error("Frame too large"); const frame = pending.slice(0, end); pending = pending.slice(end + 1); return composeDecode(frame); }
+        if (pending.length > limit) throw new Error("Frame too large");
+        await more();
+      }
+    },
+    async bytes(count) {
+      if (!Number.isInteger(count) || count < 0 || count > 131072) throw new Error("Invalid frame size");
+      while (pending.length < count) await more();
+      const frame = pending.slice(0, count); pending = pending.slice(count); return frame;
+    },
+  };
+}
+
+// The bridge has already run the core's duplicate-key and schema validation on
+// these retained bytes. The panel supports only these exact spellings and shapes;
+// unsupported wrappers, aliases, roles or unsafe numbers are never summarized.
+function intakeObject(value, allowed) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("unsupported object");
+  for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error("unsupported field");
+  return value;
+}
+
+function intakeEmbedded(value) {
+  if (typeof value === "string") value = JSON.parse(value);
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.prototype.hasOwnProperty.call(value, "canonical")) throw new Error("unsupported embedded representation");
+  return value;
+}
+
+function visibleString(value) {
+  const invisible = /[\p{Cc}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]/u;
+  const s = JSON.stringify(value);
+  return Array.from(s, (c) => invisible.test(c) ? Array.from({ length: c.length }, (_, n) => `\\u${c.charCodeAt(n).toString(16).padStart(4, "0")}`).join("") : c).join("");
+}
+
+function intakeStructured(kind, raw) {
+  const parsed = JSON.parse(raw), sections = [];
+  const walk = (label, value) => {
+    if (typeof value === "string") {
+      if (composeDecode(Buffer.from(value, "utf8")) !== value) throw new Error("unsupported Unicode");
+      sections.push({ title: label, text: visibleString(value) });
+    } else if (value === null || typeof value === "boolean") sections.push({ title: label, text: String(value) });
+    else if (typeof value === "number") {
+      if (!Number.isSafeInteger(value) || Object.is(value, -0)) throw new Error("unsupported number");
+      sections.push({ title: label, text: String(value) });
+    } else if (Array.isArray(value)) {
+      if (!value.length) sections.push({ title: label, text: "[]" });
+      else value.forEach((item, n) => walk(`${label} [${n + 1}]`, item));
+    } else if (value && typeof value === "object") {
+      const keys = Object.keys(value);
+      if (!keys.length) sections.push({ title: label, text: "{}" });
+      else for (const key of keys) walk(`${label} · ${key}`, value[key]);
+    } else throw new Error("unsupported value");
+  };
+  const fieldList = (label, object, skip = []) => {
+    for (const key of Object.keys(object)) if (!skip.includes(key)) walk(`${label} · ${key}`, object[key]);
+  };
+  const model = (value) => intakeObject(value, ["id", "providerID", "variant"]);
+  const permissions = (value) => {
+    if (!Array.isArray(value)) throw new Error("unsupported permissions");
+    for (const rule of value) intakeObject(rule, ["action", "resource", "effect"]);
+  };
+  if (kind === "registration") {
+    const request = intakeObject(parsed, ["version", "key", "project_id", "label", "expected_revision", "repo", "commit_anchor", "elephant_session_id", "expected_opencode_project_id", "expected_opencode_directory", "auth_ref", "handoff_manifest_digest", "handoff_manifest"]);
+    const handoff = intakeObject(intakeEmbedded(request.handoff_manifest), ["version", "kind", "project_id", "source", "observed_at", "intent", "decisions", "risks", "outstanding_job_ids", "outstanding_event_ids", "outstanding_manifest_digests", "notes"]);
+    if (handoff.kind !== "handoff") throw new Error("unsupported manifest");
+    fieldList("Registration and binding", request, ["handoff_manifest"]);
+    fieldList("Handoff", handoff);
+  } else if (kind === "submission") {
+    const request = intakeObject(parsed, ["version", "key", "project_id", "binding_revision", "role", "lane_id", "fsfork_driver", "request", "brief_digest", "brief_manifest_digest", "brief_manifest", "target_job_id", "target_result_digest", "referenced_manifests"]);
+    if (request.role !== "implementation" || (request.referenced_manifests && request.referenced_manifests.length)) throw new Error("unsupported submission representation");
+    const agent = intakeObject(intakeEmbedded(request.request), ["version", "kind", "repo", "base", "prompt", "agent", "model", "permissions", "provision_policy", "memory_bytes"]);
+    model(agent.model); permissions(agent.permissions);
+    const brief = intakeObject(intakeEmbedded(request.brief_manifest), ["version", "kind", "project_id", "source", "observed_at", "goal", "scope", "exclusions", "acceptance_criteria", "base", "agent", "model", "permissions", "allowed_actions", "context_references"]);
+    if (brief.kind !== "brief") throw new Error("unsupported manifest");
+    model(brief.model); permissions(brief.permissions);
+    fieldList("Submission and binding", request, ["request", "brief_manifest"]);
+    if (!request.lane_id) walk("Submission and binding · effective lane_id (derived from key)", `lane-${createHash("sha256").update(request.key).digest("hex").slice(0, 16)}`);
+    if (!request.fsfork_driver) walk("Submission and binding · effective fsfork_driver (default)", "git_worktree");
+    fieldList("Agent request", agent);
+    fieldList("Brief", brief);
+  } else throw new Error("unsupported kind");
+  return sections;
 }
 
 // The bridge is a short-lived Go process. OCQ's database remains authoritative;
@@ -31,6 +156,24 @@ export default class OCQ extends View {
     this.collections = { inbox: emptyCollection(), results: emptyCollection() };
     this.mailActions = {};
     this.mailConfirmation = null;
+    this.compose = { screen: false, state: "loading", id: null, preview: null, working: false, error: null };
+    this.composeSubject = InputState.new({ placeholder: "Subject" });
+    this.composeBody = TextareaState.new({ placeholder: "Message", rows: 3 });
+    this.composeInputFocused = false;
+    for (const input of [this.composeSubject, this.composeBody]) {
+      input.on("change", (_e, cx) => cx.notify());
+      input.on("focus", (_e, cx) => { this.composeInputFocused = true; cx.notify(); });
+      input.on("blur", (_e, cx) => { this.composeInputFocused = false; cx.notify(); });
+    }
+    this.composeSubject.on("submit", () => this.composeBody.focus());
+    this.composeBody.on("submit", () => this.handle.focus());
+    this.intake = { screen: false, state: "loading", id: null, kind: "registration", preview: null, page: 0, working: false, error: null, context: null, confirm: false, uncertainID: null, observation: null };
+    this.intakeInput = TextareaState.new({ placeholder: "Paste an exact registration or submission JSON envelope", rows: 8 });
+    this.intakeInputFocused = false;
+    this.intakeInput.on("change", (_e, cx) => cx.notify());
+    this.intakeInput.on("focus", (_e, cx) => { this.intakeInputFocused = true; cx.notify(); });
+    this.intakeInput.on("blur", (_e, cx) => { this.intakeInputFocused = false; cx.notify(); });
+    this.intakeInput.on("submit", () => this.handle.focus());
     this.spaceID = spaces().find((s) => s.active)?.id ?? null;
     this.machine = spaces().find((s) => s.active)?.machine ?? null;
     this.folder = spaces().find((s) => s.active)?.folder ?? null;
@@ -44,7 +187,8 @@ export default class OCQ extends View {
       }
     });
     this.refresh(cx);
-    cx.timer.every(15000, (cx) => this.refresh(cx));
+    this.refreshCompose(cx);
+    cx.timer.every(15000, (cx) => { this.refresh(cx); this.refreshCompose(cx); });
   }
 
   clearInspection() {
@@ -61,17 +205,24 @@ export default class OCQ extends View {
     this.expandedMessage = null;
     this.collections = { inbox: emptyCollection(), results: emptyCollection() };
     this.mailConfirmation = null;
+    this.compose.screen = false;
+    this.compose.preview = null;
+    this.compose.context = null;
+    this.intake.screen = false;
+    this.intake.preview = null;
+    this.intake.context = null;
+    this.intake.confirm = false;
   }
 
-  refresh(cx) {
+  refresh(cx, notify = true) {
     if (this.loading) return;
     const active = spaces().find((s) => s.active);
     if (!active) {
       this.error = null;
-      cx.notify();
+      if (notify) cx.notify();
       return;
     }
-    if (active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder) { cx.notify(); return; }
+    if (active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder) { if (notify) cx.notify(); return; }
     const generation = ++this.generation;
     const machine = this.machine;
     const folder = this.folder;
@@ -101,7 +252,10 @@ export default class OCQ extends View {
         this.board = board;
         if (selected) {
           for (const kind of ["inbox", "results"]) {
-            if (!this.collections[kind].loaded && !this.collections[kind].loading) this.loadCollection(kind, false, cx);
+            const collection = this.collections[kind];
+            if (!collection.recentLoading) this.loadRecent(kind, cx);
+            if (!collection.loading && !collection.loaded) this.loadCollection(kind, false, cx);
+            else if (!collection.loading && collection.loaded && collection.history.length) this.refreshHistory(kind, cx);
           }
         }
       } catch (e) {
@@ -113,7 +267,101 @@ export default class OCQ extends View {
         cx.notify();
       }
     });
-    cx.notify();
+    if (notify) cx.notify();
+  }
+
+  itemID(kind, item) { return kind === "inbox" ? item.id : item.event.id; }
+
+  combineCollection(kind, collection) {
+    const latest = new Set(collection.recent.map((item) => this.itemID(kind, item)));
+    const items = collection.recent.slice().reverse().concat(collection.history.filter((item) => !latest.has(this.itemID(kind, item))));
+    // Keep an item being inspected reachable if it rolls out of the recent window.
+    if (this.keyboardMode && this.keyboardTarget.id && !items.some((item) => this.itemID(kind, item) === this.keyboardTarget.id)) {
+      const selected = collection.items.find((item) => this.itemID(kind, item) === this.keyboardTarget.id);
+      if (selected) items.push(selected);
+    }
+    collection.items = items;
+    const retained = new Set(items.map((item) => this.itemID(kind, item)));
+    for (const id of Object.keys(collection.readTimes)) if (!retained.has(id)) delete collection.readTimes[id];
+  }
+
+  loadRecent(kind, cx) {
+    const active = spaces().find((s) => s.active);
+    if (!this.selected || !active || active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder) return;
+    const collection = this.collections[kind], projectID = this.selected, machine = this.machine;
+    if (collection.recentLoading) return;
+    collection.recentLoading = true;
+    cx.spawn(async (cx) => {
+      try {
+        const response = await exec("ocq-herdr", [`recent-${kind}`, projectID], { on: machine });
+        if (response.code !== 0) throw new Error(response.stderr || `Cannot read recent ${kind}`);
+        const page = JSON.parse(response.stdout), items = kind === "inbox" ? page.messages : page.items;
+        if (!Array.isArray(items) || !page.read_at) throw new Error("Invalid recent collection response");
+        if (this.collections[kind] !== collection) return;
+        const previous = new Map(collection.items.map((item) => [this.itemID(kind, item), item]));
+        collection.recent = items.map((item) => {
+          const id = this.itemID(kind, item);
+          return readOrder(collection.readTimes[id]) > readOrder(page.read_at) && previous.has(id) ? previous.get(id) : item;
+        });
+        collection.recentReadAt = page.read_at;
+        collection.recentError = null;
+        const updates = new Map(items.map((item) => [this.itemID(kind, item), item]));
+        collection.history = collection.history.map((item) => {
+          const id = this.itemID(kind, item);
+          return updates.has(id) && readOrder(collection.readTimes[id]) <= readOrder(page.read_at) ? updates.get(id) : item;
+        });
+        for (const item of items) {
+          const id = this.itemID(kind, item);
+          if (readOrder(collection.readTimes[id]) < readOrder(page.read_at)) collection.readTimes[id] = page.read_at;
+        }
+        this.combineCollection(kind, collection);
+      } catch (e) {
+        if (this.collections[kind] === collection) collection.recentError = String(e);
+      } finally {
+        if (this.collections[kind] === collection) collection.recentLoading = false;
+        cx.notify();
+      }
+    });
+  }
+
+  // Refresh one already-loaded historical page per cycle; recent activity has
+  // its own bounded read and never waits for this scan to reach the tail.
+  refreshHistory(kind, cx) {
+    const collection = this.collections[kind];
+    if (collection.refreshingHistory || !collection.history.length) return;
+    const projectID = this.selected, machine = this.machine, cursor = collection.refreshCursor;
+    const lastID = this.itemID(kind, collection.history[collection.history.length - 1]);
+    collection.refreshingHistory = true;
+    cx.spawn(async (cx) => {
+      try {
+        const response = await exec("ocq-herdr", [kind, projectID, cursor], { on: machine });
+        if (response.code !== 0) throw new Error(response.stderr || `Cannot refresh ${kind}`);
+        const page = JSON.parse(response.stdout), items = kind === "inbox" ? page.messages : page.items;
+        if (!Array.isArray(items) || typeof page.has_more !== "boolean" || typeof page.cursor !== "string" || !page.read_at) throw new Error("Invalid history refresh response");
+        if (this.collections[kind] !== collection) return;
+        const updates = new Map(items.map((item) => [this.itemID(kind, item), item]));
+        collection.history = collection.history.map((item) => {
+          const id = this.itemID(kind, item);
+          return updates.has(id) && readOrder(collection.readTimes[id]) <= readOrder(page.read_at) ? updates.get(id) : item;
+        });
+        collection.recent = collection.recent.map((item) => {
+          const id = this.itemID(kind, item);
+          return updates.has(id) && readOrder(collection.readTimes[id]) <= readOrder(page.read_at) ? updates.get(id) : item;
+        });
+        for (const item of items) {
+          const id = this.itemID(kind, item);
+          if (readOrder(collection.readTimes[id]) < readOrder(page.read_at)) collection.readTimes[id] = page.read_at;
+        }
+        collection.refreshCursor = !page.has_more || page.cursor === cursor || updates.has(lastID) ? "0" : page.cursor;
+        collection.error = null;
+        this.combineCollection(kind, collection);
+      } catch (e) {
+        if (this.collections[kind] === collection) collection.error = String(e);
+      } finally {
+        if (this.collections[kind] === collection) collection.refreshingHistory = false;
+        cx.notify();
+      }
+    });
   }
 
   loadCollection(kind, reset, cx) {
@@ -121,6 +369,7 @@ export default class OCQ extends View {
     if (!this.selected || !active || active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder) return;
     if (reset) this.collections[kind] = emptyCollection();
     const collection = this.collections[kind];
+    if (reset) this.loadRecent(kind, cx);
     if (collection.loading) return;
     const projectID = this.selected, machine = this.machine;
     collection.loading = true;
@@ -130,12 +379,25 @@ export default class OCQ extends View {
         const response = await exec("ocq-herdr", [kind, projectID, collection.cursor], { on: machine });
         if (response.code !== 0) throw new Error(response.stderr || `Cannot read ${kind}`);
         const page = JSON.parse(response.stdout);
+        if (typeof page.has_more !== "boolean") throw new Error("Update ocq-herdr on this machine to read paged data safely.");
         if (this.collections[kind] !== collection) return;
         const items = kind === "inbox" ? page.messages : page.items;
-        collection.items = collection.items.concat(items);
-        for (const item of items) collection.readTimes[kind === "inbox" ? item.id : item.event.id] = page.read_at;
+        const updates = new Map(items.map((item) => [this.itemID(kind, item), item]));
+        collection.recent = collection.recent.map((item) => {
+          const id = this.itemID(kind, item);
+          return updates.has(id) && readOrder(collection.readTimes[id]) <= readOrder(page.read_at) ? updates.get(id) : item;
+        });
+        collection.history = collection.history.concat(items.map((item) => {
+          const id = this.itemID(kind, item);
+          return readOrder(collection.readTimes[id]) > readOrder(page.read_at) ? collection.items.find((existing) => this.itemID(kind, existing) === id) || item : item;
+        }));
+        this.combineCollection(kind, collection);
+        for (const item of items) {
+          const id = this.itemID(kind, item);
+          if (readOrder(collection.readTimes[id]) < readOrder(page.read_at)) collection.readTimes[id] = page.read_at;
+        }
         collection.cursor = page.cursor;
-        collection.hasMore = items.length === 20;
+        collection.hasMore = page.has_more;
         collection.readAt = page.read_at;
         collection.loaded = true;
       } catch (e) {
@@ -159,6 +421,442 @@ export default class OCQ extends View {
     this.refresh(cx);
   }
 
+  composeLocal() {
+    const active = spaces().find((s) => s.active);
+    return Boolean(active && active.machine === null && this.machine === null && active.id === this.spaceID && active.folder === this.folder);
+  }
+
+  composeContext(lane) {
+    if (!this.composeLocal() || !this.selected || !lane?.lane_id || !lane?.owner_job_id) return null;
+    return { space: this.spaceID, folder: this.folder, project: this.selected, lane: lane.lane_id, job: lane.owner_job_id };
+  }
+
+  composeContextCurrent(context) {
+    return Boolean(context && this.composeLocal() && context.space === this.spaceID && context.folder === this.folder && context.project === this.selected &&
+      (this.board?.project?.lanes ?? []).some((lane) => lane.lane_id === context.lane && lane.owner_job_id === context.job));
+  }
+
+  composePreviewPages(request) {
+    const pages = [];
+    for (const [label, value] of [
+      ["Machine", "this computer"], ["Project", request.ProjectID], ["Lane", request.LaneID], ["Job", request.JobID],
+      ["From", request.From], ["To", request.To], ["Kind", request.Kind],
+      ["Manifest", request.Manifest || "none"], ["Reply to", request.ReplyTo || "none"], ["Worktree (empty uses lane default)", request.FsforkPath ?? ""],
+      ["Subject", request.Subject], ["Message", request.Body || ""],
+    ]) {
+      const tokens = visibleString(value).match(/\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])|[\s\S]/gu) || [];
+      for (let start = 0; start < tokens.length;) {
+        let end = start, length = 0;
+        while (end < tokens.length && length + tokens[end].length <= 160) length += tokens[end++].length;
+        pages.push(`${label}${start ? " (continued)" : ""}:\n${tokens.slice(start, end).join("")}`);
+        start = end;
+      }
+    }
+    return pages;
+  }
+
+  refreshCompose(cx) {
+    const c = this.compose;
+    if (!this.composeLocal() || c.working) return;
+    c.working = true;
+    cx.spawn(async (cx) => {
+      try {
+        const result = await exec("ocq-herdr", ["compose-status"], { on: null });
+        if (result.code !== 0) throw new Error("status unavailable");
+        const status = JSON.parse(result.stdout);
+        if (!["idle", "busy", "prepared", "armed", "dispatch_intent", "completed", "cancelled", "blocked"].includes(status.state)) throw new Error("invalid status");
+        if (c.state === "uncertain") {
+          if (status.id === c.id && ["prepared", "armed"].includes(status.state)) {
+            if (c.recoveryState !== status.state) c.preview = null;
+            c.recoveryState = status.state;
+            c.error = "The exact intent is unattempted now. A delayed claim or send may still race; preview and explicitly cancel under the journal lock. Do not resend.";
+            return;
+          }
+          c.recoveryState = null; c.preview = null;
+          if (status.id !== c.id || !["dispatch_intent", "completed", "cancelled"].includes(status.state)) {
+            c.error = "Send outcome remains uncertain. A busy, unavailable or different journal does not authorize a retry.";
+            return;
+          }
+        }
+        if (c.id !== (status.id ?? null) || c.state !== status.state) c.observation = null;
+        c.state = status.state; c.id = status.id ?? null; c.observation = status.observation ?? null; c.recoveryState = null;
+        if (c.preview && (!["prepared", "armed"].includes(status.state) || c.preview.id !== status.id)) c.preview = null;
+        c.error = null;
+      } catch (_e) { if (c.state !== "uncertain") c.state = "blocked"; c.preview = null; c.error = "Compose status unavailable. Do not send; check the local store."; }
+      finally { c.working = false; cx.notify(); }
+    });
+  }
+
+  openCompose(lane, cx) {
+    const c = this.compose;
+    c.screen = true; c.confirm = false; c.error = null;
+    if (lane && c.state === "idle") {
+      c.context = this.composeContext(lane);
+      if (c.context) {
+        this.composeSubject.set_value(""); this.composeBody.set_value("");
+        const context = c.context;
+        cx.timer.after(100, () => { if (c.screen && c.context === context && c.state === "idle" && this.composeContextCurrent(context)) this.composeSubject.focus(); });
+      }
+    } else this.handle.focus();
+    this.keyboardMode = false;
+    this.refreshCompose(cx);
+    cx.notify();
+  }
+
+  async composeExchange(command, id, payload, context, cx) {
+    const launch = randomBytes(32).toString("hex");
+    const args = command === "compose-preview" ? [command, id, launch] : [command, launch];
+    const worker = exec("ocq-herdr", args, { on: null, timeout: 25000 }).then((value) => value, () => null);
+    let socket = null;
+    try {
+      let rendezvous = null;
+      for (let i = 0; i < 100; i++) {
+        if (!this.composeContextCurrent(context)) throw new Error("context changed");
+        const result = await exec("ocq-herdr", ["compose-rendezvous", launch], { on: null });
+        if (result.code === 0) { rendezvous = JSON.parse(result.stdout); break; }
+        await cx.sleep(50);
+      }
+      if (!rendezvous || rendezvous.launch !== launch || !/^[0-9a-f]{64}$/.test(rendezvous.capability) || !Number.isInteger(rendezvous.port) || rendezvous.port < 1 || rendezvous.port > 65535) throw new Error("rendezvous unavailable");
+      socket = await connect("127.0.0.1", rendezvous.port);
+      const frames = socketFrames(socket), line = () => frames.line(), nonce = randomBytes(32).toString("hex");
+      await socket.write(nonce + "\n");
+      if (!composeEqual(await line(), composeProof(rendezvous.capability, nonce, "server"))) throw new Error("server authentication failed");
+      await socket.write(composeProof(rendezvous.capability, nonce, "client") + "\n");
+      if (await line() !== "READY" || !this.composeContextCurrent(context)) throw new Error("context or client authentication failed");
+      let response;
+      if (command === "compose-receive") {
+        await socket.write(payload + "\n");
+        response = await line();
+        if (!/^PREPARED [0-9a-f]{64}$/.test(response)) throw new Error("preparation uncertain");
+      } else response = await line();
+      socket.close(); socket = null;
+      const done = await worker;
+      if (!done || done.code !== 0 || !this.composeContextCurrent(context)) throw new Error("compose exchange uncertain");
+      if (command === "compose-preview") {
+        const status = JSON.parse(done.stdout);
+        if (status.id !== id || !["prepared", "armed"].includes(status.state)) throw new Error("preview status mismatch");
+        return { response, status };
+      }
+      return response;
+    } finally { if (socket) socket.close(); }
+  }
+
+  prepareCompose(cx) {
+    const c = this.compose, context = c.context;
+    if (c.working || c.state !== "idle" || !this.composeContextCurrent(context)) return;
+    const subject = this.composeSubject.value(), body = this.composeBody.value();
+    try {
+      if (!subject || Buffer.from(subject, "utf8").length > 512 || Buffer.from(body, "utf8").length > 16384 || composeDecode(Buffer.from(subject, "utf8")) !== subject || composeDecode(Buffer.from(body, "utf8")) !== body || subject.includes("\0") || body.includes("\0")) throw new Error("invalid text");
+    } catch (_e) { c.error = "Enter a subject and valid UTF-8 text within the size limits."; cx.notify(); return; }
+    const payload = JSON.stringify({ ProjectID: context.project, LaneID: context.lane, JobID: context.job, From: `lane:${context.lane}`, To: `integrator:${context.project}`, Kind: "lane.blocked", Subject: subject, Body: body });
+    c.working = true; c.error = null; c.observation = null;
+    cx.spawn(async (cx) => {
+      try {
+        const reply = await this.composeExchange("compose-receive", null, payload, context, cx);
+        c.id = reply.slice(9); c.state = "prepared"; c.preview = null;
+      } catch (_e) { c.state = "blocked"; c.error = "Preparation outcome unknown. Refresh journal status before doing anything else."; }
+      finally { c.working = false; this.handle.focus(); cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  previewCompose(cx) {
+    const c = this.compose, id = c.id, initialState = c.state, initialRecovery = c.recoveryState, generation = this.detailGeneration;
+    if (c.working || !(["prepared", "armed"].includes(c.state) || (c.state === "uncertain" && ["prepared", "armed"].includes(c.recoveryState))) || !id || !this.composeLocal() || !this.selected) return;
+    // The selected project must be explicit; the returned lane/job is checked
+    // against the current stored board before it can be confirmed.
+    const context = { space: this.spaceID, folder: this.folder, project: this.selected };
+    const current = () => c.screen && c.id === id && c.state === initialState && c.recoveryState === initialRecovery && generation === this.detailGeneration && this.composeLocal() && context.space === this.spaceID && context.folder === this.folder && context.project === this.selected;
+    c.working = true; c.error = null; c.preview = null; c.confirm = false;
+    cx.spawn(async (cx) => {
+      try {
+        // Recovery does not know the lane until the private request is read.
+        const lane = (this.board?.project?.lanes ?? [])[0];
+        if (!current() || !lane) throw new Error("no selected project lanes");
+        const transport = { ...context, lane: lane.lane_id, job: lane.owner_job_id };
+        const { response, status } = await this.composeExchange("compose-preview", id, null, transport, cx);
+        if (!current() || ((initialState === "armed" || initialRecovery === "armed") && status.state !== "armed")) throw new Error("preview state changed");
+        const request = JSON.parse(response);
+        const actual = { ...context, lane: request.LaneID, job: request.JobID };
+        const route = request.Kind === "lane.blocked"
+          ? (request.From === `lane:${actual.lane}` || request.From === `job:${actual.job}`) && request.To === `integrator:${context.project}`
+          : request.Kind === "lane.assigned" && request.From.startsWith("integrator:") && (this.board?.project?.lanes ?? []).some((lane) => request.To === `lane:${lane.lane_id}`);
+        if (!current() || !this.composeContextCurrent(actual) || request.ProjectID !== context.project || !route) throw new Error("context mismatch");
+        if (initialState === "uncertain") c.recoveryState = status.state;
+        else c.state = status.state;
+        c.context = actual; c.preview = { id, state: status.state, request }; c.page = 0; c.confirm = false;
+      } catch (_e) {
+        if (current() && c.state !== "uncertain") c.state = "blocked";
+        c.error = "Preview unavailable or belongs to another project/lane. Refresh journal status; nothing was sent.";
+      }
+      finally { c.working = false; this.handle.focus(); cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  composeAction(action, cx) {
+    const c = this.compose, id = c.id, preview = c.preview, wasUncertain = c.state === "uncertain";
+    if (c.working || !id || !this.composeLocal()) return;
+    if (action === "dispatch" && (c.state !== "prepared" || !c.confirm || c.preview?.id !== id || c.preview.state !== "prepared" || c.page !== this.composePreviewPages(c.preview.request).length - 1 || !this.composeContextCurrent(c.context))) return;
+    if (action === "cancel" && !((["prepared", "armed"].includes(c.state) || (wasUncertain && ["prepared", "armed"].includes(c.recoveryState))) && preview?.id === id && this.composeContextCurrent(c.context))) return;
+    if (action === "reconcile" && !["dispatch_intent", "uncertain"].includes(c.state)) return;
+    if (action === "retire" && !["completed", "cancelled"].includes(c.state)) return;
+    c.working = true; c.confirm = false; c.error = null;
+    if (action === "dispatch") { c.state = "uncertain"; c.recoveryState = null; c.preview = null; }
+    cx.spawn(async (cx) => {
+      try {
+        if (action === "dispatch") {
+          // The send process is never launched until this separate, durable
+          // claim has been acknowledged. A delayed claim cannot send by itself.
+          const claim = await exec("ocq-herdr", ["compose-arm", id], { on: null, timeout: 30000 });
+          if (claim.code !== 0) throw new Error("claim outcome unavailable");
+          const armed = JSON.parse(claim.stdout);
+          if (armed.id !== id || armed.state !== "armed") throw new Error("claim identity mismatch");
+          if (!this.composeContextCurrent(c.context)) {
+            c.state = "armed";
+            c.error = "Context changed. Send was not launched by this view; revoke the claim before starting over.";
+            return;
+          }
+        }
+        if (action === "cancel" && (c.id !== id || c.preview !== preview || !this.composeContextCurrent(c.context))) throw new Error("context changed");
+        const result = await exec("ocq-herdr", [`compose-${action}`, id], { on: null, timeout: 30000 });
+        if (result.code !== 0) throw new Error("action unavailable");
+        const status = JSON.parse(result.stdout);
+        if (status.id !== id) throw new Error("identity mismatch");
+        if (action === "retire" && status.state === "retired") { c.state = "idle"; c.id = null; c.preview = null; c.context = null; c.observation = null; }
+        else if (["dispatch_intent", "completed", "cancelled"].includes(status.state)) { c.state = status.state; c.observation = status.observation; c.preview = null; c.recoveryState = null; }
+        else throw new Error("unexpected state");
+      } catch (_e) { c.error = action === "dispatch" || action === "reconcile" || wasUncertain ? "Outcome uncertain. Refresh and check the stored intent; do not resend." : "Action outcome unavailable. Refresh journal status."; if (wasUncertain) { c.state = "uncertain"; c.recoveryState = null; c.preview = null; } else if (action !== "dispatch" && action !== "reconcile") c.state = "blocked"; }
+      finally { c.working = false; cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  intakeCurrent(context) {
+    return Boolean(context && this.intake.context === context && this.intake.screen && this.composeLocal() && context.space === this.spaceID && context.folder === this.folder && context.selection === this.selected);
+  }
+
+  intakeMatches(kind, raw, context) {
+    const request = JSON.parse(raw);
+    if (!request || typeof request !== "object" || Array.isArray(request) || typeof request.project_id !== "string" || !/^proj-[A-Za-z0-9_-]+$/.test(request.project_id)) return false;
+    if (kind === "registration") return request.repo === context.folder && request.expected_opencode_directory === context.folder && (context.newProject ? request.expected_revision === 0 : (!context.project || request.project_id === context.project));
+    if (kind !== "submission" || !context.project || request.project_id !== context.project || this.board?.project?.current_binding?.repo_root !== context.folder) return false;
+    let embedded = request.request;
+    for (let n = 0; n < 4; n++) {
+      if (typeof embedded === "string") embedded = JSON.parse(embedded);
+      else if (embedded && typeof embedded === "object" && !Array.isArray(embedded) && Object.prototype.hasOwnProperty.call(embedded, "canonical") && !Object.prototype.hasOwnProperty.call(embedded, "version")) embedded = embedded.canonical;
+      else break;
+    }
+    return Boolean(embedded && typeof embedded === "object" && !Array.isArray(embedded) && embedded.repo === context.folder);
+  }
+
+  // Reversible ASCII rendering: each page is a slice of one JSON string
+  // literal, so whitespace, control characters and Unicode remain explicit.
+  intakePages(raw) {
+    const escaped = JSON.stringify(raw).replace(/[ \u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    const pages = [];
+    for (let i = 0; i < escaped.length; i += 120) pages.push(escaped.slice(i, i + 120).match(/.{1,40}/g).join("\n"));
+    return pages;
+  }
+
+  intakeReviewPages(kind, raw) {
+    const pages = [];
+    for (const section of intakeStructured(kind, raw)) {
+      const chars = Array.from(section.text);
+      const count = Math.max(1, Math.ceil(chars.length / 160));
+      for (let n = 0; n < count; n++) pages.push({ title: section.title, text: chars.slice(n * 160, (n + 1) * 160).join(""), part: n + 1, parts: count });
+    }
+    if (!pages.length) throw new Error("empty review");
+    return pages;
+  }
+
+  openIntake(cx, newProject = false) {
+    const i = this.intake;
+    if (i.working) return;
+    i.screen = true; i.context = { space: this.spaceID, folder: this.folder, selection: this.selected, project: newProject ? null : this.selected, newProject };
+    if (newProject) i.kind = "registration";
+    i.preview = null; i.error = null; i.state = "loading"; i.id = null; i.confirm = false; i.observation = null;
+    this.keyboardMode = false; this.handle.focus();
+    this.refreshIntake(cx); cx.notify();
+  }
+
+  refreshIntake(cx) {
+    const i = this.intake, context = i.context;
+    if (i.working || !this.intakeCurrent(context)) return;
+    i.working = true;
+    cx.spawn(async (cx) => {
+      try {
+        const result = await exec("ocq-herdr", ["intake-status"], { on: null });
+        if (!this.intakeCurrent(context) || result.code !== 0) throw new Error("status unavailable");
+        const status = JSON.parse(result.stdout);
+        if (!["idle", "prepared", "armed", "attempted", "completed", "cancelled", "blocked"].includes(status.state)) throw new Error("invalid status");
+        if (i.uncertainID && status.id !== i.uncertainID) throw new Error("uncertain intent changed");
+        if (i.id !== (status.id ?? null) || i.state !== status.state) i.preview = null;
+        i.state = status.state; i.id = status.id ?? null; i.confirm = false; i.observation = status.observation ?? null;
+        i.error = i.uncertainID && status.state === "prepared" ? "Claim response was lost. Do not confirm again; preview and cancel this unattempted intent." : null;
+      } catch (_e) { if (this.intakeCurrent(context)) { i.state = "blocked"; i.preview = null; i.error = "Status unavailable. Refresh before preparing; do not retry an uncertain operation."; } }
+      finally { i.working = false; cx.notify(); }
+    });
+  }
+
+  async intakeExchange(mode, kind, id, raw, context, cx) {
+    if (!this.intakeCurrent(context)) throw new Error("context changed");
+    const launch = randomBytes(32).toString("hex");
+    const command = mode === "receive" ? ["intake-receive-text", kind, launch] : ["intake-preview", id, launch];
+    const worker = exec("ocq-herdr", command, { on: null, timeout: 25000 }).then((value) => value, () => null);
+    let socket = null;
+    try {
+      let rendezvous = null;
+      for (let n = 0; n < 100; n++) {
+        if (!this.intakeCurrent(context)) throw new Error("context changed");
+        const result = await exec("ocq-herdr", ["intake-rendezvous", launch], { on: null });
+        if (result.code === 0) { rendezvous = JSON.parse(result.stdout); break; }
+        await cx.sleep(50);
+      }
+      if (!rendezvous || rendezvous.launch !== launch || !/^[0-9a-f]{64}$/.test(rendezvous.capability) || !Number.isInteger(rendezvous.port) || rendezvous.port < 1 || rendezvous.port > 65535) throw new Error("rendezvous unavailable");
+      socket = await connect("127.0.0.1", rendezvous.port);
+      const frames = socketFrames(socket), nonce = randomBytes(32).toString("hex");
+      await socket.write(nonce + "\n");
+      if (!composeEqual(await frames.line(64), composeProof(rendezvous.capability, nonce, "server"))) throw new Error("server authentication failed");
+      await socket.write(composeProof(rendezvous.capability, nonce, "client") + "\n");
+      if (await frames.line(64) !== "READY" || !this.intakeCurrent(context)) throw new Error("context or authentication changed");
+      let response;
+      if (mode === "receive") {
+        const bytes = Buffer.from(raw, "utf8");
+        if (!bytes.length || bytes.length > 131072 || composeDecode(bytes) !== raw) throw new Error("invalid request");
+        await socket.write(`${bytes.length}\n`);
+        if (!this.intakeCurrent(context)) throw new Error("context changed");
+        await socket.write(raw);
+        response = await frames.line(80);
+        if (!/^PREPARED [0-9a-f]{64}$/.test(response)) throw new Error("preparation uncertain");
+      } else {
+        const header = await frames.bytes(5);
+        const length = header[1] * 16777216 + header[2] * 65536 + header[3] * 256 + header[4];
+        if ((header[0] !== 82 && header[0] !== 83) || !length || length > 131072) throw new Error("invalid preview frame");
+        response = { kind: header[0] === 82 ? "registration" : "submission", raw: composeDecode(await frames.bytes(length)) };
+      }
+      socket.close(); socket = null;
+      const done = await worker;
+      if (!done || done.code !== 0 || !this.intakeCurrent(context)) throw new Error("exchange uncertain");
+      if (mode === "preview") {
+        const status = JSON.parse(done.stdout);
+        if (status.id !== id || !["prepared", "armed", "attempted", "completed", "cancelled"].includes(status.state)) throw new Error("preview state changed");
+        response.state = status.state;
+      }
+      return response;
+    } finally { if (socket) socket.close(); }
+  }
+
+  prepareIntake(cx) {
+    const i = this.intake, context = i.context, raw = this.intakeInput.value(), kind = i.kind;
+    if (i.working || i.state !== "idle" || !this.intakeCurrent(context)) return;
+    try {
+      const bytes = Buffer.from(raw, "utf8");
+      if (!bytes.length || bytes.length > (kind === "registration" ? 16384 : 131072) || composeDecode(bytes) !== raw || !this.intakeMatches(kind, raw, context)) throw new Error("invalid request or context");
+      if (context.newProject && (kind !== "registration" || this.projects.some((p) => p.project_id === JSON.parse(raw).project_id))) throw new Error("new project already exists");
+      this.intakeReviewPages(kind, raw);
+    } catch (_e) { i.error = "Request is invalid, belongs to another context, or uses an unsupported review representation. Nothing was prepared."; cx.notify(); return; }
+    i.working = true; i.error = null;
+    cx.spawn(async (cx) => {
+      try {
+        const result = await this.intakeExchange("receive", kind, null, raw, context, cx);
+        if (this.intakeCurrent(context)) { i.id = result.slice(9); i.state = "prepared"; i.preview = null; }
+      } catch (_e) { if (this.intakeCurrent(context)) { i.state = "blocked"; i.error = "Preparation outcome unknown. Refresh the journal; do not prepare again until it is resolved."; } }
+      finally { i.working = false; this.handle.focus(); cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  previewIntake(cx) {
+    const i = this.intake, context = i.context, id = i.id;
+    if (i.working || !id || !this.intakeCurrent(context) || !["prepared", "armed", "attempted", "completed", "cancelled"].includes(i.state)) return;
+    i.working = true; i.preview = null; i.error = null;
+    cx.spawn(async (cx) => {
+      try {
+        const result = await this.intakeExchange("preview", null, id, null, context, cx);
+        if (!this.intakeCurrent(context) || !this.intakeMatches(result.kind, result.raw, context)) throw new Error("context mismatch");
+        const rawPages = this.intakePages(result.raw).map((text) => ({ title: "Exact raw JSON string", text }));
+        let review = null;
+        try { review = this.intakeReviewPages(result.kind, result.raw); } catch (_e) { /* Keep exact raw view, never invent a summary. */ }
+        i.state = result.state; i.preview = { id, kind: result.kind, raw: result.raw, state: result.state, review, rawPages, pages: review || rawPages, view: review ? "review" : "raw", openedThrough: 0 }; i.page = 0; i.confirm = false;
+        if (!review) i.error = "This envelope representation is not supported for structured review. Exact raw view only; dispatch remains unavailable.";
+      } catch (_e) { if (this.intakeCurrent(context)) i.error = "Preview unavailable or belongs to another project or folder. Nothing was dispatched."; }
+      finally { i.working = false; this.handle.focus(); cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  advanceIntakePage(delta, cx) {
+    const i = this.intake, preview = i.preview;
+    if (!preview || i.working || !this.intakeCurrent(i.context)) return;
+    const next = Math.max(0, Math.min(preview.pages.length - 1, i.page + delta));
+    if (preview.view === "review" && delta === 1 && i.page === preview.openedThrough && next === i.page + 1) preview.openedThrough = next;
+    i.page = next;
+    cx.notify();
+  }
+
+  canConfirmIntake() {
+    const i = this.intake, p = i.preview;
+    return Boolean(!i.working && !i.uncertainID && this.intakeCurrent(i.context) && i.state === "prepared" && p?.id === i.id && p.state === "prepared" && p.review && p.view === "review" && i.page === p.review.length - 1 && p.openedThrough === p.review.length - 1 && this.intakeMatches(p.kind, p.raw, i.context));
+  }
+
+  confirmIntake(cx) {
+    const i = this.intake, context = i.context, preview = i.preview, id = i.id;
+    if (!i.confirm || !this.canConfirmIntake()) return;
+    i.working = true; i.error = null;
+    cx.spawn(async (cx) => {
+      let armLaunched = false;
+      try {
+        const exact = await this.intakeExchange("preview", null, id, null, context, cx);
+        if (!this.intakeCurrent(context) || !i.confirm || i.preview !== preview || i.id !== id || exact.state !== "prepared" || exact.kind !== preview.kind || exact.raw !== preview.raw || !this.intakeMatches(exact.kind, exact.raw, context)) throw new Error("preview changed");
+        i.uncertainID = id; armLaunched = true;
+        const claim = await exec("ocq-herdr", ["intake-arm", id], { on: null, timeout: 30000 });
+        if (!claim || claim.code !== 0) throw new Error("claim outcome unknown");
+        const armed = JSON.parse(claim.stdout);
+        if (armed.id !== id || armed.state !== "armed") throw new Error("claim identity mismatch");
+        if (!this.intakeCurrent(context) || !i.confirm || i.preview !== preview || i.id !== id) return;
+        i.confirm = false; i.state = "armed";
+        const result = await exec("ocq-herdr", ["intake-dispatch", id], { on: null, timeout: 30000 });
+        if (!result || result.code !== 0 || !this.intakeCurrent(context) || i.preview !== preview || i.id !== id) throw new Error("dispatch outcome unknown");
+        const status = JSON.parse(result.stdout);
+        if (status.id !== id || !["attempted", "completed", "blocked"].includes(status.state)) throw new Error("dispatch identity mismatch");
+        i.state = status.state; i.observation = status.observation ?? null; i.preview = null;
+        if (status.state === "completed") i.uncertainID = null;
+        else i.error = "Outcome uncertain. Check the exact stored receipt; do not retry.";
+      } catch (_e) {
+        if (this.intakeCurrent(context) && i.id === id) {
+          i.confirm = false; i.preview = null; i.state = "blocked";
+          i.error = armLaunched ? "Claim or dispatch outcome unknown. Refresh and check the retained intent; do not retry." : "Exact preview or context could not be rechecked. Nothing was claimed.";
+        }
+      } finally { i.working = false; cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  intakeAction(action, cx) {
+    const i = this.intake, context = i.context, id = i.id;
+    if (i.working || !this.intakeCurrent(context) || i.preview?.id !== id || i.preview?.state !== i.state) return;
+    if (action === "cancel" && !["prepared", "armed"].includes(i.state)) return;
+    if (action === "reconcile" && !["attempted", "completed"].includes(i.state)) return;
+    if (action === "retire" && !["cancelled", "completed"].includes(i.state)) return;
+    if (!["cancel", "reconcile", "retire"].includes(action)) return;
+    i.working = true; i.error = null;
+    cx.spawn(async (cx) => {
+      try {
+        if (!this.intakeCurrent(context) || i.id !== id || i.preview?.id !== id || i.preview?.state !== i.state) throw new Error("context changed");
+        const result = await exec("ocq-herdr", [`intake-${action}`, id], { on: null, timeout: 30000 });
+        if (result.code !== 0 || !this.intakeCurrent(context)) throw new Error("action unavailable");
+        const status = JSON.parse(result.stdout);
+        const expected = action === "cancel" ? ["cancelled"] : action === "retire" ? ["retired"] : ["attempted", "completed", "blocked"];
+        if (status.id !== id || !expected.includes(status.state)) throw new Error("identity mismatch");
+        if (action === "retire") { i.state = "idle"; i.id = null; i.preview = null; i.uncertainID = null; i.observation = null; }
+        else { i.state = status.state; i.preview.state = status.state; i.observation = status.observation ?? null; if (["completed", "cancelled"].includes(status.state)) i.uncertainID = null; }
+      } catch (_e) { if (this.intakeCurrent(context)) { i.state = "blocked"; i.preview = null; i.error = "Action outcome unavailable. Refresh the journal before proceeding."; } }
+      finally { i.working = false; cx.notify(); }
+    });
+    cx.notify();
+  }
+
   targets() {
     const projects = this.projects.length > 1 ? this.projects.map((p) => ({
       kind: "project", id: p.project_id, label: `Project: ${p.label} · ${p.project_id}`,
@@ -180,6 +878,7 @@ export default class OCQ extends View {
     const lanes = (this.board?.project?.lanes ?? []).map((lane) => ({
       kind: "lane", id: lane.lane_id, label: `Lane: ${lane.role} · ${lane.lane_id}`,
     }));
+    const composeLanes = (this.board?.project?.lanes ?? []).map((lane) => ({ kind: "compose-lane", id: lane.lane_id, label: `Compose update from lane ${lane.lane_id}` }));
     const manifests = [];
     const addManifest = (id, label) => {
       if (id && !manifests.some((m) => m.id === id)) manifests.push({ kind: "manifest", id, label: `Manifest: ${label} · ${id}` });
@@ -200,11 +899,52 @@ export default class OCQ extends View {
       if (this.collections[kind].hasMore) controls.push({ kind: "more", id: kind, label: `Load more ${kind}` });
     }
     const summary = this.board ? [{ kind: "summary", label: "Project overview and binding" }] : [];
-    return [{ kind: "refresh", label: "Refresh board" }, ...projects, ...summary, ...jobs, ...lanes, ...manifests, ...controls, ...results, ...messages];
+    return [{ kind: "refresh", label: "Refresh board" }, { kind: "compose", label: "Compose and recovery" }, { kind: "intake", label: "Prepare project intake" }, ...projects, ...summary, ...jobs, ...lanes, ...composeLanes, ...manifests, ...controls, ...results, ...messages];
   }
 
   key(e, cx) {
     if (e.modifiers.control || e.modifiers.alt || e.modifiers.platform) return;
+    if (this.intake.screen) {
+      if (this.intakeInputFocused) {
+        if (e.key === "escape") { this.handle.focus(); cx.stop_propagation(); }
+        return;
+      }
+      const i = this.intake;
+      if (i.confirm) {
+        if (e.key === "escape" && !i.working) { i.confirm = false; cx.stop_propagation(); cx.notify(); }
+        return;
+      }
+      if (e.key === "escape") i.screen = false;
+      else if (!e.is_held && e.key === "r") this.refreshIntake(cx);
+      else if (!e.is_held && e.key === "p") this.prepareIntake(cx);
+      else if (!e.is_held && e.key === "v") this.previewIntake(cx);
+      else if (!e.is_held && e.key === "c") this.intakeAction("cancel", cx);
+      else if (!e.is_held && e.key === "t") this.intakeAction("retire", cx);
+      else if (!e.is_held && e.key === "left" && i.preview) this.advanceIntakePage(-1, cx);
+      else if (!e.is_held && e.key === "right" && i.preview) this.advanceIntakePage(1, cx);
+      else return;
+      cx.stop_propagation(); cx.notify(); return;
+    }
+    if (this.compose.screen) {
+      if (this.composeInputFocused) {
+        if (e.key === "escape") { this.handle.focus(); cx.stop_propagation(); }
+        return;
+      }
+      const c = this.compose;
+      if (e.key === "escape") { if (c.confirm) c.confirm = false; else c.screen = false; }
+      else if (!e.is_held && e.key === "r") this.refreshCompose(cx);
+      else if (!e.is_held && e.key === "p" && c.state === "idle") this.prepareCompose(cx);
+      else if (!e.is_held && e.key === "v") this.previewCompose(cx);
+      else if (!e.is_held && e.key === "c") this.composeAction("cancel", cx);
+      else if (!e.is_held && e.key === "k") this.composeAction("reconcile", cx);
+      else if (!e.is_held && e.key === "t") this.composeAction("retire", cx);
+      else if (e.key === "left" && c.preview && !c.confirm) c.page = Math.max(0, c.page - 1);
+      else if (e.key === "right" && c.preview && !c.confirm) c.page = Math.min(this.composePreviewPages(c.preview.request).length - 1, c.page + 1);
+      else if (!e.is_held && e.key === "s" && c.state === "prepared" && c.preview?.state === "prepared" && !c.confirm && c.page === this.composePreviewPages(c.preview.request).length - 1) c.confirm = true;
+      else if (!e.is_held && e.key === "y" && c.confirm) this.composeAction("dispatch", cx);
+      else return;
+      cx.stop_propagation(); cx.notify(); return;
+    }
     if (this.mailConfirmation) {
       if (e.key === "escape" || e.key === "n") { this.mailConfirmation = null; cx.notify(); }
       else if (e.key === "y" && !e.is_held) this.confirmArchive(cx);
@@ -226,6 +966,9 @@ export default class OCQ extends View {
       this.keyboardMode = true;
       const target = targets[index];
       if (target.kind === "refresh") this.refresh(cx);
+      else if (target.kind === "compose") this.openCompose(null, cx);
+      else if (target.kind === "intake") this.openIntake(cx);
+      else if (target.kind === "compose-lane") this.openCompose((this.board?.project?.lanes ?? []).find((lane) => lane.lane_id === target.id), cx);
       else if (target.kind === "project") this.select(target.id, cx);
       else if (target.kind === "job") this.inspect(target.id, cx);
       else if (target.kind === "manifest") this.inspectManifest(target.id, cx);
@@ -393,7 +1136,9 @@ export default class OCQ extends View {
         state.readAt = observed.read_at;
         if (this.mailContextCurrent(context)) {
           const inbox = this.collections.inbox;
-          inbox.items = inbox.items.map((m) => m.id === item.id ? item : m);
+          inbox.history = inbox.history.map((m) => m.id === item.id ? item : m);
+          inbox.recent = inbox.recent.map((m) => m.id === item.id ? item : m);
+          this.combineCollection("inbox", inbox);
           inbox.readTimes[item.id] = observed.read_at;
         }
       }
@@ -423,7 +1168,7 @@ export default class OCQ extends View {
     else if (target.kind === "mail-check") value = "Activate to read back the exact message. An absent change does not prove a delayed request cannot still complete.";
     else if (target.kind === "result") value = this.collections.results.items.find((r) => r.event.id === target.id);
     else if (target.kind === "lane") value = this.board?.project?.lanes?.find((lane) => lane.lane_id === target.id);
-    else value = target.kind === "refresh" ? "Activate to refresh the stored project board." : `Activate to ${target.label.toLowerCase()}.`;
+    else value = target.kind === "refresh" ? "Activate to refresh the stored project board." : target.kind === "compose" ? "Activate to open local compose and recovery. Choose a lane to start a new update." : `Activate to ${target.label.toLowerCase()}.`;
     const pages = [];
     const addText = (title, text) => {
       const chars = Array.from(text);
@@ -535,12 +1280,118 @@ export default class OCQ extends View {
       this.keyboardTarget = { kind: "refresh" };
       this.keyboardPage = 0;
       this.clearInspection();
-      this.refresh(cx);
+      this.refresh(cx, false);
     }
     const t = theme();
     const button = (id, text, action) => div().id(id).role("button").accessibility_label(text).px(8).py(4).rounded(5)
       .text_color(t.foreground).hover((s) => s.bg(t.hover)).cursor_pointer()
       .on_click((_e, cx) => action(cx)).child(text);
+    if (this.intake.screen) {
+      const i = this.intake, local = this.intakeCurrent(i.context), preview = i.preview;
+      const stateText = { loading: "Checking journal…", idle: "No retained intake.", prepared: "Prepared, not dispatched. Preview the retained request.", armed: "Already claimed. A delayed dispatch may still start; do not send again.", attempted: "Outcome uncertain. A missing receipt does not authorize retry.", completed: "Exact receipt was matched. The request remains retained.", cancelled: "Cancelled before attempt. The request remains retained.", blocked: "Journal unavailable or blocked. Do not prepare another request." };
+      if (local && preview && i.confirm) {
+        return v_flex().id("ocq-intake-confirmation").size_full().min_h(0).p(14).gap(8).bg(t.background).text_color(t.foreground)
+          .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+          .child(div().flex_none().font_semibold().child("Confirm project intake"))
+          .child(v_flex().id("ocq-intake-confirmation-content").flex_1().min_h(0).overflow_y_scroll().gap(10)
+            .child(div().text_color(t.blocked).child(preview.kind === "submission" ? "This submits the exact retained request. An already-running dispatcher may start the queued work. A lost response is uncertain; do not retry." : "This registers the exact retained project request and can create or change a binding. A lost response is uncertain; do not retry."))
+            .child(div().child(`Project: ${JSON.parse(preview.raw).project_id}\nFolder: ${i.context.folder}\nIntent: ${i.id}`))
+            .child(div().text_size(12).text_color(t.muted).child("Opening pages records navigation, not comprehension. The request is rechecked before a durable claim and one dispatch. Final confirmation requires a pointer press."))
+            .when(i.working, (e) => e.child(div().child("Checking and claiming the retained request…")))
+            .when(!i.working && this.canConfirmIntake(), (e) => e.child(div().id("ocq-intake-confirm-once").px(8).py(8).rounded(5).text_color(t.foreground).hover((s) => s.bg(t.hover)).cursor_pointer()
+              .on_mouse_down("left", (_e, cx) => this.confirmIntake(cx)).child("Press to confirm once")))
+            .when(!i.working, (e) => e.child(button("ocq-intake-confirm-back", "Back to fields", (cx) => { i.confirm = false; cx.notify(); }))));
+      }
+      if (local && preview) {
+        const page = preview.pages[i.page];
+        return v_flex().id("ocq-intake-review").size_full().min_h(0).p(14).gap(8).bg(t.background).text_color(t.foreground)
+          .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+          .child(h_flex().flex_none().items_center().gap(8)
+            .child(div().font_semibold().child(`${preview.kind} · ${preview.view === "review" ? "field" : "raw"} ${i.page + 1}/${preview.pages.length}`))
+            .child(div().flex_1()).child(button("ocq-intake-review-back", "Back", (cx) => { i.preview = null; cx.notify(); })))
+          .child(v_flex().id(`ocq-intake-page-${preview.view}-${i.page}`).flex_1().min_h(0).overflow_y_scroll().gap(8)
+            .child(div().text_size(12).text_color(t.muted).child(preview.view === "raw" ? "Exact JSON string: join lines and pages to recover the retained text." : "Scroll to see the entire field. Controls and invisible characters are escaped. Opening pages is not confirmation."))
+            .child(div().font_semibold().child(page.title + (page.parts > 1 ? ` · ${page.part}/${page.parts}` : "")))
+            .child(div().child(page.text))
+            .when(Boolean(i.error), (e) => e.child(div().text_color(t.ansi1).child(i.error)))
+            .when(Boolean(i.observation), (e) => e.child(div().text_size(12).text_color(t.muted).child(`Last observation: ${i.observation}`)))
+            .when(this.canConfirmIntake(), (e) => e.child(button("ocq-intake-review-confirm", "Review confirmation…", (cx) => { if (this.canConfirmIntake()) i.confirm = true; cx.notify(); })))
+            .when(!i.working && preview.id === i.id && preview.state === i.state && ["prepared", "armed"].includes(i.state), (e) => e.child(button("ocq-intake-cancel", "Cancel before attempt", (cx) => this.intakeAction("cancel", cx))))
+            .when(!i.working && preview.id === i.id && preview.state === i.state && ["attempted", "completed"].includes(i.state), (e) => e.child(button("ocq-intake-reconcile", "Check exact stored receipt", (cx) => this.intakeAction("reconcile", cx))))
+            .when(!i.working && preview.id === i.id && preview.state === i.state && ["cancelled", "completed"].includes(i.state), (e) => e.child(button("ocq-intake-retire", "Retire retained intent", (cx) => this.intakeAction("retire", cx)))))
+          .child(h_flex().flex_none().gap(8)
+            .child(button("ocq-intake-previous", "Previous", (cx) => this.advanceIntakePage(-1, cx)))
+            .child(button("ocq-intake-next", "Next", (cx) => this.advanceIntakePage(1, cx)))
+            .child(div().flex_1())
+            .when(Boolean(preview.review), (e) => e.child(button("ocq-intake-switch-view", preview.view === "review" ? "Exact raw" : "Fields", (cx) => {
+              if (preview.view === "review") { preview.view = "raw"; preview.pages = preview.rawPages; }
+              else if (preview.review) { preview.view = "review"; preview.pages = preview.review; }
+              i.page = 0; cx.notify();
+            }))))
+          .child(div().flex_none().text_size(12).text_color(t.muted).child("←/→ pages · Esc close"));
+      }
+      return v_flex().id("ocq-intake").size_full().min_h(0).overflow_y_scroll().p(14).gap(8).bg(t.background).text_color(t.foreground)
+        .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+        .child(h_flex().items_center().gap(8).child(div().font_semibold().child("Project intake · prepare and preview"))
+          .child(div().flex_1()).child(button("ocq-intake-close", "Close", (cx) => { i.screen = false; cx.notify(); })))
+        .child(div().text_color(local ? t.muted : t.blocked).child(local ? `This computer · ${i.context.folder} · ${i.context.newProject ? "new project registration only" : (i.context.project || "no selected project")}` : "Local context unavailable or changed. Remote intake is unavailable."))
+        .when(local && !i.working, (e) => e.child(button("ocq-intake-context", i.context.newProject ? "Use selected project context" : "Register a new project…", (cx) => this.openIntake(cx, !i.context.newProject))))
+        .when(local, (e) => e.child(div().child(stateText[i.state] || "Journal status unavailable.")))
+        .when(Boolean(i.id), (e) => e.child(div().text_size(12).text_color(t.muted).child(`Intent: ${i.id}`)))
+        .when(Boolean(i.error), (e) => e.child(div().text_color(t.ansi1).child(i.error)))
+        .when(local && !i.working, (e) => e.child(button("ocq-intake-refresh", "Refresh journal", (cx) => this.refreshIntake(cx))))
+        .when(local && i.state === "idle", (e) => e.child(v_flex().gap(6)
+          .child(div().child("Paste the complete exact JSON envelope. Typing does not prepare or dispatch."))
+          .child(h_flex().gap(8)
+            .child(button("ocq-intake-registration", i.kind === "registration" ? "Registration ✓" : "Registration", (cx) => { i.kind = "registration"; cx.notify(); }))
+            .when(!i.context.newProject, (e) => e.child(button("ocq-intake-submission", i.kind === "submission" ? "Submission ✓" : "Submission", (cx) => { i.kind = "submission"; cx.notify(); }))))
+          .child(Textarea.new(this.intakeInput).id("ocq-intake-input").accessibility_label("Exact intake JSON envelope").h(150).px(8).border_1().border_color(t.border).text_color(t.foreground))
+          .when(!i.working, (e) => e.child(button("ocq-intake-prepare", "Prepare retained request", (cx) => this.prepareIntake(cx))))))
+        .when(local && !i.working && Boolean(i.id), (e) => e.child(button("ocq-intake-preview", "Preview exact retained request", (cx) => this.previewIntake(cx))))
+        .child(div().text_size(12).text_color(t.muted).child("R refresh · P prepare · V preview · C cancel · T retire · ←/→ pages · Esc close"));
+    }
+    if (this.compose.screen) {
+      const c = this.compose, local = this.composeLocal(), request = c.preview?.request;
+      const previewPages = request ? this.composePreviewPages(request) : [];
+      const stateText = { loading: "Checking local journal…", idle: "No retained compose intent.", busy: "Another compose operation holds the journal. Refresh later.", prepared: "Prepared locally. A confirmation from another view may still be pending. Preview before confirming.", armed: "Send confirmed and durably claimed. A send process may be delayed; do not confirm again. You can revoke only before an attempt begins.", dispatch_intent: "Send outcome uncertain. Check the stored receipt; never resend automatically.", uncertain: "Send outcome uncertain. Check the stored receipt; never resend automatically.", completed: "Stored receipt matched. Retire to prepare another message.", cancelled: c.observation === "revoked_before_attempt" ? "Claim revoked before any attempt. A delayed send process will be refused. Retire to prepare another message." : "Prepared message cancelled. A delayed confirmation will be refused. Retire to prepare another message.", blocked: "Journal blocked or unverifiable. Do not send; investigate the local store." };
+      return v_flex().id("ocq-compose").size_full().min_h(0).overflow_y_scroll().p(14).gap(8).bg(t.background).text_color(t.foreground)
+        .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+        .child(h_flex().items_center().gap(8).child(div().font_semibold().child("Compose · local only")).child(div().flex_1())
+          .child(button("ocq-compose-close", "Close", (cx) => { c.screen = false; cx.notify(); })))
+        .child(div().text_color(local ? t.muted : t.blocked).child(local ? "This computer only · journal survives panel copies" : "Remote compose unavailable. Switch to a local space; nothing will be redirected."))
+        .when(local, (e) => e.child(div().text_color(["blocked", "uncertain", "armed", "dispatch_intent"].includes(c.state) ? t.blocked : t.foreground).child(stateText[c.state] || "Compose state unavailable.")))
+        .when(Boolean(c.error), (e) => e.child(div().text_color(t.ansi1).child(c.error)))
+        .when(Boolean(c.observation), (e) => e.child(div().text_size(12).text_color(t.muted).child(`Last observation: ${c.observation}`)))
+        .when(Boolean(c.id), (e) => e.child(div().text_size(12).text_color(t.muted).child(`Intent: ${c.id}`)))
+        .when(local && !c.working, (e) => e.child(button("ocq-compose-refresh", "Refresh journal status", (cx) => this.refreshCompose(cx))))
+        .when(local && c.state === "idle" && Boolean(c.context), (e) => e.child(v_flex().gap(6)
+          .child(div().child(`Project: ${c.context?.project}\nLane: ${c.context?.lane}\nOwner job: ${c.context?.job}\nTo: integrator:${c.context?.project}`))
+          .child(div().child("Subject"))
+          .child(Input.new(this.composeSubject).id("ocq-compose-subject").accessibility_label("Message subject").h(34).px(8).border_1().border_color(t.border).text_color(t.foreground))
+          .child(div().child("Message"))
+          .child(Textarea.new(this.composeBody).id("ocq-compose-body").accessibility_label("Message body").h(70).px(8).border_1().border_color(t.border).text_color(t.foreground))
+          .child(div().text_size(12).text_color(t.muted).child("Typing does not send. Enter moves to the message; Ctrl+Enter leaves it, then P prepares."))
+          .when(!c.working, (e) => e.child(button("ocq-compose-prepare", "Prepare message", (cx) => this.prepareCompose(cx))))))
+        .when(local && c.state === "idle" && !c.context, (e) => e.child(div().text_color(t.muted).child("Close and choose a lane to compose an update to the integrator.")))
+        .when(local && !c.working && !request && (["prepared", "armed"].includes(c.state) || (c.state === "uncertain" && ["prepared", "armed"].includes(c.recoveryState))), (e) => e.child(button("ocq-compose-preview", "Preview exact retained message", (cx) => this.previewCompose(cx))))
+        .when(Boolean(local && request), (e) => e.child(v_flex().flex_1().min_h(0).gap(6)
+          .child(div().font_semibold().child(`Retained preview · ${c.page + 1}/${previewPages.length}`))
+          .child(div().text_size(12).text_color(t.muted).child("Quoted fields escape controls and invisible characters; continuations preserve their order."))
+          .child(div().flex_1().min_h(0).overflow_y_scroll().child(previewPages[c.page]))
+          .when(!c.confirm, (e) => e.child(h_flex().gap(8)
+            .child(button("ocq-compose-previous", "Previous", (cx) => { c.page = Math.max(0, c.page - 1); cx.notify(); }))
+            .child(button("ocq-compose-next", "Next", (cx) => { c.page = Math.min(previewPages.length - 1, c.page + 1); cx.notify(); }))))
+          .when(!c.working && !c.confirm, (e) => e.child(h_flex().gap(8)
+            .child(button("ocq-compose-cancel", "Cancel before attempt", (cx) => this.composeAction("cancel", cx)))
+            .when(c.state === "prepared" && c.preview?.state === "prepared" && c.page === previewPages.length - 1, (e) => e.child(button("ocq-compose-review", "Review send…", (cx) => { c.confirm = true; cx.notify(); })))))
+          .when(!c.working && c.state === "prepared" && c.preview?.state === "prepared" && c.confirm, (e) => e.child(v_flex().gap(6)
+            .child(div().text_color(t.blocked).child("Send this exact retained message once? A lost response remains uncertain."))
+            .child(h_flex().gap(8).child(button("ocq-compose-back", "Back", (cx) => { c.confirm = false; cx.notify(); }))
+              .child(button("ocq-compose-confirm", "Confirm send once", (cx) => this.composeAction("dispatch", cx))))))))
+        .when(local && !c.working && ["dispatch_intent", "uncertain"].includes(c.state), (e) => e.child(button("ocq-compose-reconcile", "Check stored receipt", (cx) => this.composeAction("reconcile", cx))))
+        .when(local && !c.working && ["completed", "cancelled"].includes(c.state), (e) => e.child(button("ocq-compose-retire", "Retire retained intent", (cx) => this.composeAction("retire", cx))))
+        .when(local, (e) => e.child(div().text_size(12).text_color(t.muted).child("←/→ preview pages · R refresh · P prepare · V preview · C cancel · S review · Y confirm · K check · T retire")));
+    }
     if (this.mailConfirmation) {
       const confirmation = this.mailConfirmation;
       return v_flex().id("ocq-archive-confirmation").size_full().min_h(0).p(14).gap(10).bg(t.background)
@@ -569,6 +1420,8 @@ export default class OCQ extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("OCQ"))
         .child(div().flex_1())
+        .child(button("ocq-intake-open", "Project intake", (cx) => this.openIntake(cx)))
+        .child(button("ocq-compose-open", "Compose", (cx) => this.openCompose(null, cx)))
         .child(button("ocq-refresh", this.loading ? "Refreshing…" : "Refresh", (cx) => this.refresh(cx))))
       .child(div().px(14).py(5).text_size(12).text_color(t.muted)
         .child(`↑/↓ select · Enter activate · ${keyboardTarget.label}`))
@@ -635,8 +1488,10 @@ export default class OCQ extends View {
           .child(div().pt(8).font_semibold().child("Lanes"))
           .when((project?.lanes ?? []).length === 0, (e) => e.child(div().text_color(t.dim).child("No lanes.")))
           .children((project?.lanes ?? []).map((lane) => button(`ocq-lane-${lane.lane_id}`, `${lane.role} · ${lane.job_state} · ${lane.lane_id}`, (cx) => this.openTarget("lane", lane.lane_id, cx))))
+          .when(this.composeLocal() && this.compose.state === "idle", (e) => e.children((project?.lanes ?? []).map((lane) => button(`ocq-compose-lane-${lane.lane_id}`, `Compose update · ${lane.lane_id}`, (cx) => this.openCompose(lane, cx)))))
           .child(div().pt(8).font_semibold().child("Completion history"))
-          .child(div().text_size(12).text_color(t.muted).child(`Stored pages · latest read ${this.collections.results.readAt || "not yet read"}; each page is a separate snapshot`))
+          .child(div().text_size(12).text_color(t.muted).child(`Recent 20 · ${this.collections.results.recentReadAt || "not yet read"}; historical pages refresh separately`))
+          .when(Boolean(this.collections.results.recentError), (e) => e.child(div().text_color(t.ansi1).child(`Recent results read failed: ${this.collections.results.recentError}`)))
           .when(Boolean(this.collections.results.error), (e) => e.child(div().text_color(t.ansi1).child(`Results read failed: ${this.collections.results.error}`)))
           .when(this.collections.results.loading, (e) => e.child(div().child("Loading results…")))
           .when(this.collections.results.loaded && !this.collections.results.items.length, (e) => e.child(div().text_color(t.dim).child("No completion events.")))
@@ -646,7 +1501,8 @@ export default class OCQ extends View {
           .when(this.collections.results.hasMore, (e) => e.child(button("ocq-results-more", "Load more results", (cx) => this.loadCollection("results", false, cx))))
           .child(button("ocq-results-reload", "Reload results", (cx) => this.loadCollection("results", true, cx)))
           .child(div().pt(8).font_semibold().child("Inbox · all recipients"))
-          .child(div().text_size(12).text_color(t.muted).child(`Stored pages · latest read ${this.collections.inbox.readAt || "not yet read"}; includes read and archived mail`))
+          .child(div().text_size(12).text_color(t.muted).child(`Recent 20 · ${this.collections.inbox.recentReadAt || "not yet read"}; includes read and archived mail; historical pages refresh separately`))
+          .when(Boolean(this.collections.inbox.recentError), (e) => e.child(div().text_color(t.ansi1).child(`Recent inbox read failed: ${this.collections.inbox.recentError}`)))
           .when(Boolean(this.collections.inbox.error), (e) => e.child(div().text_color(t.ansi1).child(`Inbox read failed: ${this.collections.inbox.error}`)))
           .when(this.collections.inbox.loading, (e) => e.child(div().child("Loading inbox…")))
           .when(this.collections.inbox.loaded && !this.collections.inbox.items.length, (e) => e.child(div().text_color(t.dim).child("No messages.")))

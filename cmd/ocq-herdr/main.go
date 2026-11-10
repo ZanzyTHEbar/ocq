@@ -26,28 +26,28 @@ func run(args []string) error {
 	root := &cobra.Command{
 		Use: "ocq-herdr", Short: "OCQ views and explicit inbox actions for Herdr", SilenceErrors: true, SilenceUsage: true,
 		RunE: func(*cobra.Command, []string) error {
-			return faults.New(faults.CodeValidationFailed, "usage: ocq-herdr projects | board PROJECT | job PROJECT JOB | inbox PROJECT AFTER | mail PROJECT MESSAGE SEQUENCE | mail-ack PROJECT MESSAGE SEQUENCE read|archive | results PROJECT AFTER | manifest PROJECT DIGEST")
+			return faults.New(faults.CodeValidationFailed, "usage: ocq-herdr projects | board PROJECT | job PROJECT JOB | recent-inbox PROJECT | inbox PROJECT AFTER | mail PROJECT MESSAGE SEQUENCE | mail-ack PROJECT MESSAGE SEQUENCE read|archive | recent-results PROJECT | results PROJECT AFTER | manifest PROJECT DIGEST | compose-receive LAUNCH | compose-preview ID LAUNCH | compose-rendezvous LAUNCH | compose-status | compose-dispatch-intent ID | compose-arm ID | compose-dispatch ID | compose-reconcile ID | compose-cancel ID | compose-retire ID | intake-receive KIND LAUNCH | intake-receive-text KIND LAUNCH | intake-preview ID LAUNCH | intake-rendezvous LAUNCH | intake-status | intake-arm ID | intake-dispatch ID | intake-reconcile ID | intake-cancel ID | intake-retire ID")
 		},
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.AddCommand(palette()...)
+	root.AddCommand(composeCommands()...)
+	root.AddCommand(intakeCommands()...)
 	root.SetArgs(args)
 	return root.Execute()
 }
 
 type readView func(*core.Reader, []string) (any, error)
 
+const pageSize = 20
+
 func palette() []*cobra.Command {
 	return []*cobra.Command{
 		viewCommand("projects", 0, func(r *core.Reader, _ []string) (any, error) { return r.Projects() }),
 		viewCommand("board PROJECT", 1, func(r *core.Reader, args []string) (any, error) { return r.Board(args[0]) }),
 		viewCommand("job PROJECT JOB", 2, func(r *core.Reader, args []string) (any, error) { return r.Job(args[0], args[1]) }),
-		viewCommand("inbox PROJECT AFTER", 2, func(r *core.Reader, args []string) (any, error) {
-			after, err := cursor(args[1])
-			if err != nil {
-				return nil, err
-			}
-			page, err := r.Inbox(args[0], "all", false, after, 20)
+		viewCommand("recent-inbox PROJECT", 1, func(r *core.Reader, args []string) (any, error) {
+			page, err := r.RecentInbox(args[0], pageSize)
 			if err != nil {
 				return nil, err
 			}
@@ -58,8 +58,35 @@ func palette() []*cobra.Command {
 			return struct {
 				core.ProjectInboxOutput
 				Messages []inboxMessage `json:"messages"`
+			}{page, messages}, nil
+		}),
+		viewCommand("recent-results PROJECT", 1, func(r *core.Reader, args []string) (any, error) {
+			return r.RecentResults(args[0], pageSize)
+		}),
+		viewCommand("inbox PROJECT AFTER", 2, func(r *core.Reader, args []string) (any, error) {
+			after, err := cursor(args[1])
+			if err != nil {
+				return nil, err
+			}
+			page, err := r.Inbox(args[0], "all", false, after, pageSize+1)
+			if err != nil {
+				return nil, err
+			}
+			hasMore := len(page.Messages) > pageSize
+			if hasMore {
+				page.Messages = page.Messages[:pageSize]
+				page.NextSequence = page.Messages[len(page.Messages)-1].Sequence
+			}
+			messages := make([]inboxMessage, 0, len(page.Messages))
+			for _, message := range page.Messages {
+				messages = append(messages, inboxMessage{message, strconv.FormatInt(message.Sequence, 10)})
+			}
+			return struct {
+				core.ProjectInboxOutput
+				Messages []inboxMessage `json:"messages"`
 				Cursor   string         `json:"cursor"`
-			}{page, messages, strconv.FormatInt(page.NextSequence, 10)}, nil
+				HasMore  bool           `json:"has_more"`
+			}{page, messages, strconv.FormatInt(page.NextSequence, 10), hasMore}, nil
 		}),
 		viewCommand("mail PROJECT MESSAGE SEQUENCE", 3, func(r *core.Reader, args []string) (any, error) {
 			return readMail(r, args[0], args[1], args[2])
@@ -69,14 +96,20 @@ func palette() []*cobra.Command {
 			if err != nil {
 				return nil, err
 			}
-			page, err := r.Results(args[0], after, 20)
+			page, err := r.Results(args[0], after, pageSize+1)
 			if err != nil {
 				return nil, err
 			}
+			hasMore := len(page.Items) > pageSize
+			if hasMore {
+				page.Items = page.Items[:pageSize]
+				page.NextSequence = page.Items[len(page.Items)-1].Event.Sequence
+			}
 			return struct {
 				core.ProjectResultsOutput
-				Cursor string `json:"cursor"`
-			}{page, strconv.FormatInt(page.NextSequence, 10)}, nil
+				Cursor  string `json:"cursor"`
+				HasMore bool   `json:"has_more"`
+			}{page, strconv.FormatInt(page.NextSequence, 10), hasMore}, nil
 		}),
 		viewCommand("manifest PROJECT DIGEST", 2, func(r *core.Reader, args []string) (any, error) {
 			manifest, err := r.Manifest(args[0], args[1])

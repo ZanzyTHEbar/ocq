@@ -157,25 +157,7 @@ func buildDeterministicReviewPrompt(base, targetResultDigest, criteria, rules, d
 	return buf.String()
 }
 
-func (s *scenario) runProjectAcceptance(legacy1, legacy2 string) {
-	const projectID = "proj-control-plane-proof"
-	observedAt := "2026-11-03T12:00:00Z"
-
-	// 1. Schema 1 -> 2 -> 3 -> 4 additive migration & non-initializing read guard
-	missingStateDir := filepath.Join(s.root, "nonexistent-state")
-	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
-	_, err := exec.CommandContext(ctx, s.bin, "--state-dir", missingStateDir, "project", "show", projectID).CombinedOutput()
-	cancel()
-	check(err != nil, "project show against nonexistent state dir must fail closed")
-	_, statErr := os.Stat(missingStateDir)
-	check(os.IsNotExist(statErr), "project show created nonexistent state directory")
-	ctx, cancel = context.WithTimeout(s.ctx, 15*time.Second)
-	_, err = exec.CommandContext(ctx, s.bin, "--state-dir", missingStateDir, "project", "list").CombinedOutput()
-	cancel()
-	check(err != nil, "project list against nonexistent state dir must fail closed")
-	_, statErr = os.Stat(missingStateDir)
-	check(os.IsNotExist(statErr), "project list created nonexistent state directory")
-
+func (s *scenario) runProjectMigration(legacy1, legacy2, projectID string) {
 	oldCLI := func(bin string, args ...string) []byte {
 		cCtx, cCancel := context.WithTimeout(s.ctx, 15*time.Second)
 		defer cCancel()
@@ -237,6 +219,58 @@ func (s *scenario) runProjectAcceptance(legacy1, legacy2 string) {
 		must(err)
 	}
 	s.note("PASS Schema 1->2->3->4->5 additive migration, non-initializing read guard on nonexistent/Schema1/Schema2 DBs, v1 receipts preserved, legacy jobs unattributed")
+}
+
+func (s *scenario) runProjectAcceptance(legacy1, legacy2 string) {
+	const projectID = "proj-control-plane-proof"
+	observedAt := "2026-11-03T12:00:00Z"
+
+	// Projection reads must not initialize a missing store in either mode.
+	missingStateDir := filepath.Join(s.root, "nonexistent-state")
+	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
+	_, err := exec.CommandContext(ctx, s.bin, "--state-dir", missingStateDir, "project", "show", projectID).CombinedOutput()
+	cancel()
+	check(err != nil, "project show against nonexistent state dir must fail closed")
+	_, statErr := os.Stat(missingStateDir)
+	check(os.IsNotExist(statErr), "project show created nonexistent state directory")
+	ctx, cancel = context.WithTimeout(s.ctx, 15*time.Second)
+	_, err = exec.CommandContext(ctx, s.bin, "--state-dir", missingStateDir, "project", "list").CombinedOutput()
+	cancel()
+	check(err != nil, "project list against nonexistent state dir must fail closed")
+	_, statErr = os.Stat(missingStateDir)
+	check(os.IsNotExist(statErr), "project list created nonexistent state directory")
+
+	if legacy1 != "" {
+		s.runProjectMigration(legacy1, legacy2, projectID)
+	} else {
+		// Keep the unattributed v1 key and acknowledged notices needed by the
+		// project assertions, but create them in a fresh current-schema store.
+		for _, key := range []string{"legacy-proj-a", "legacy-proj-b"} {
+			b, err := s.cli("submit", "--key", key, "--cwd", s.root, "--memory-bytes", "1", "--", "/usr/bin/printf", "%s\n", "legacy-unattributed")
+			must(err)
+			var j job
+			must(json.Unmarshal(b, &j))
+			_, err = s.cli("cancel", j.ID)
+			must(err)
+		}
+		notices, _ := s.pullNotices("100")
+		check(len(notices) == 2, "expected 2 cancelled fixture notifications")
+		for _, n := range notices {
+			_, err = s.cli("ack", n.ID)
+			must(err)
+		}
+	}
+
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(s.state, "queue.db")+"?mode=ro&_pragma=busy_timeout(5000)")
+	must(err)
+	defer db.Close()
+	var schemaVersion, attributed int
+	must(db.QueryRow("PRAGMA user_version").Scan(&schemaVersion))
+	must(db.QueryRow("SELECT COUNT(*) FROM project_jobs").Scan(&attributed))
+	check(schemaVersion == 5 && attributed == 0, "expected schema 5 with unattributed fixture jobs")
+	if legacy1 == "" {
+		s.note("PASS fresh current-schema fixture and non-initializing read guard; migration not tested")
+	}
 
 	// 2. Registration, CAS rebind & B1 receipt-first registration retry
 	wd, err := os.Getwd()

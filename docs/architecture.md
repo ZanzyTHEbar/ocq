@@ -6,56 +6,32 @@ The adapter's session-scoped completion is validated for a real no-tool Plan
 prompt after dispatcher crash and a Build fixture with real read/patch, tool
 permissions and cooperative foreground/background shells; see
 [evidence and boundary](agent-integration.md). Arbitrary tools and detached
-resources are not validated. SQLite remains
-the sole queue authority, and no service is installed. This follows the measured
-[Dagu proof](dagu-proof-of-fit.md), not an unevaluated fallback. The
-[reliability contract](reliability-contract.md) remains the target; unimplemented
-agent/deployment requirements are not claimed as delivered.
+resources are not validated. SQLite remains the sole queue authority, and no
+service is installed. The [reliability contract](reliability-contract.md) remains
+the target; unimplemented agent/deployment requirements are not claimed as delivered.
 
-## Decision: why not a thin external Dagu adapter?
+## Decision: one queue authority
 
-Pinned source: Dagu v2.22.4, commit
-`fd5b67913edc5349b92e7174ea92a112a236abbb`. The independent architectural review
-and approved follow-up selected a narrow Go + SQLite authority for the combined
-requirements, rather than changing upstream Dagu or adding a competing queue.
-
-- **Local mode is not the distributed-worker skipping objection.**
-  [Local eligibility](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/internal/service/scheduler/queue_dispatcher.go#L1400-L1402)
-  returns true. The stronger limitation is that local
-  [free-slot batch selection](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/internal/service/scheduler/queue_dispatcher.go#L608-L628)
-  has no external prelaunch resource/head hook, and the processor
-  [dispatches the batch in goroutines](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/internal/service/scheduler/queue_processor.go#L603-L612).
-  [Local execution handoff](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/internal/service/scheduler/queue_dispatcher.go#L786-L821)
-  is likewise asynchronous.
-- [Queue order](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/internal/persis/store/queue_item.go#L130-L143)
-  is priority/time/ID, not the required immutable admission sequence.
-- [Public engine options/run APIs](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/engine.go#L36-L59)
-  and [custom executors](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/executor.go#L19-L63)
-  expose execution extension points, not this queue-admission protocol.
-  [Preconditions](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/internal/runtime/runner.go#L192-L215)
-  cancel execution when unmet; they do not keep a resource-blocked head awaiting
-  admission outside the slot pool.
-- Durable receipts alone could be adapter metadata. However,
-  [CLI duplicate handling](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/internal/cmd/enqueue.go#L125-L151)
-  and [multi-record intake](https://github.com/dagucloud/dagu/blob/fd5b67913edc5349b92e7174ea92a112a236abbb/internal/intake/queue.go#L90-L121)
-  also require receipt/recovery work. An external wrapper that **withholds, orders,
-  reserves, admits, and reconciles pending jobs** to satisfy the combined contract
-  becomes the scheduler. Keeping Dagu's queue as another authority would violate
-  the single-authority boundary.
+The core uses SQLite as the single authority for durable receipts, strict FIFO
+ordering, resource admission, and recovery of uncertain ownership. An external
+wrapper responsible for withholding, ordering, admitting, and reconciling jobs
+would itself become a scheduler; maintaining a second queue authority would make
+these guarantees harder to establish. OpenCode and Workmux retain their distinct
+execution and worktree responsibilities.
 
 The selected core uses `dbbootstrap` v0.1.1 with `modernc.org/sqlite` v1.61.0
 (pure Go; requires Go 1.26.5), Goose v3.28.0 for its locked migration, and
-sqlc-generated application queries. There is no Dagu runtime
-dependency, HTTP server, plugin framework, or generic backend layer. See
+sqlc-generated application queries. There is no HTTP server, plugin framework,
+or generic backend layer. See
 [command-core semantics and acceptance](command-core.md) for what actually works.
 
 ## Ownership boundaries
 
 - **Queue authority:** ocq's single SQLite database accepts, persists, orders,
   admits, and reconciles command jobs. A singleton flock protects dispatch;
-  short SQLite transactions protect concurrent CLI submissions. Do not run a
-  second Dagu queue alongside it. Its schema-3 outbox stores one atomic terminal
-  notification per job; schema 4 adds the project control plane and schema 5 adds
+  short SQLite transactions protect concurrent CLI submissions. Its schema-3
+  outbox stores one atomic terminal notification per job; schema 4 adds the
+  project control plane and schema 5 adds
   owned lanes plus the local integrator inbox. Local pull/ack delivery is not
   another scheduler or a reason to release capacity. See
   [notification contract](notifications.md) and
@@ -98,9 +74,8 @@ no token dependency may deadlock inside the agent-slot pool.
 
 ## Proof boundary and remaining work
 
-The historical isolated Dagu shell proof is preserved. The command-core acceptance
-uses real CLI processes, SQLite, MemAvailable, and harmless foreground probes to
-check concurrent idempotency, head blocking, singleton dispatch, and crash
+The command-core acceptance uses real CLI processes, SQLite, MemAvailable, and
+harmless foreground probes to check concurrent idempotency, head blocking, singleton dispatch, and crash
 uncertainty without duplicate execution. A SQLite transaction cannot atomically
 spawn a process: durable launch intent precedes spawn; restart turns unresolved
 launching/running jobs into unknown and retains ownership/capacity. There is no

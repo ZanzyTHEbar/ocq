@@ -49,7 +49,11 @@ func insertAgentOwnership(c *sql.Conn, id string) error {
 }
 
 func (s *store) agentOwnership(id string) (*AgentOwnership, error) {
-	a, err := dbquery.New(s.db).AgentOwnershipByJob(context.Background(), id)
+	return agentOwnershipFrom(s.db, id)
+}
+
+func agentOwnershipFrom(q sqlQueryer, id string) (*AgentOwnership, error) {
+	a, err := dbquery.New(q).AgentOwnershipByJob(context.Background(), id)
 	return &AgentOwnership{SessionID: a.SessionID, PromptID: a.PromptID, Token: a.Token, Phase: a.Phase, Worktree: a.Worktree, ProjectID: a.ProjectID, ServerOutcome: a.ServerOutcome, TerminalEvidence: a.TerminalEvidence}, err
 }
 

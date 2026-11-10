@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 
 	"github.com/ZanzyTHEbar/faults-go"
 
@@ -50,6 +52,29 @@ func (r *Reader) Project(id string) (ProjectShowOutput, error) {
 
 func (r *Reader) Results(id string, afterSequence int64, limit int) (ProjectResultsOutput, error) {
 	return r.store.projectResultsData(id, afterSequence, limit)
+}
+
+// RecentResults returns the newest retained events and their current stored details.
+func (r *Reader) RecentResults(id string, limit int) (ProjectResultsOutput, error) {
+	return r.store.projectResultsPage(id, 0, limit, true)
+}
+
+// MailByKey returns retained mail only when both the project and globally
+// unique idempotency key match. It does not acknowledge or change the message.
+// A missing key or a key owned by another project is classified as not found.
+func (r *Reader) MailByKey(projectID, key string) (_ ProjectInboxMessage, resultErr error) {
+	defer func() { resultErr = classifyDiagnostic(faults.CodeDatabaseRead, resultErr) }()
+	if !isValidProjectID(projectID) || !isValidInboxKey(key) {
+		return ProjectInboxMessage{}, faults.New(faults.CodeValidationFailed, "mail lookup requires a valid project ID and idempotency key")
+	}
+	row, err := dbquery.New(r.store.db).InboxMessageByKey(context.Background(), key)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && row.ProjectID != projectID) {
+		return ProjectInboxMessage{}, faults.Wrap(faults.CodeNotFound, "exact project mail key not found", sql.ErrNoRows)
+	}
+	if err != nil {
+		return ProjectInboxMessage{}, err
+	}
+	return inboxMessageFromRow(dbquery.InboxPageRow(row)), nil
 }
 
 func (r *Reader) Job(projectID, jobID string) (ProjectJobDetailOutput, error) {

@@ -910,6 +910,23 @@ func (q *Queries) ProjectResultEvents(ctx context.Context, arg ProjectResultEven
 	return items, nil
 }
 
+const projectResultsRecentAnchor = `-- name: ProjectResultsRecentAnchor :one
+SELECT CAST(COALESCE((SELECT n.sequence FROM completion_notifications n JOIN project_jobs pj ON n.job_id=pj.job_id
+ WHERE pj.project_id=?1 ORDER BY n.sequence DESC LIMIT 1 OFFSET ?2), 0) AS INTEGER)
+`
+
+type ProjectResultsRecentAnchorParams struct {
+	ProjectID string
+	PageLimit int64
+}
+
+func (q *Queries) ProjectResultsRecentAnchor(ctx context.Context, arg ProjectResultsRecentAnchorParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, projectResultsRecentAnchor, arg.ProjectID, arg.PageLimit)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const projectSummaries = `-- name: ProjectSummaries :many
 SELECT p.id,p.label,COALESCE(b.revision,0),COALESCE(b.repo_root,''),
  (SELECT COUNT(*) FROM project_inbox_messages m WHERE m.project_id=p.id AND m.recipient='integrator:'||p.id AND m.read_at IS NULL)

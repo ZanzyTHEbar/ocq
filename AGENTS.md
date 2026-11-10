@@ -20,11 +20,9 @@
   API injection is outside this local single-user model; ownership metadata
   detects accidental mismatches, not hostile forgery. docs/runtime-provenance.md
   preserves a superseded, stronger optional contract, not a current blocker.
-- Dagu was evaluated first. The approved source-backed decision selected SQLite
-  as the sole queue authority because external admission/ordering/reconciliation
-  would make a thin Dagu adapter another scheduler. Preserve the historical proof.
-  No Dagu runtime dependency, Python, standalone JS/TS runtime projects,
-  frameworks, or speculative backends. A small trusted embedded JavaScript
+- SQLite is the sole queue authority. Preserve private historical evidence outside
+  the public tree. No Python, standalone JS/TS runtime projects, frameworks, or
+  speculative backends. A small trusted embedded JavaScript
   GPUI mod for current herdr-app is approved; it may use a Go bridge calling
   the core directly, not a separate JavaScript service or the legacy adapter.
 - Keep one queue authority. OpenCode owns execution and permissions; Workmux
@@ -36,11 +34,8 @@
 - Keep runtime state, generated artifacts, and binaries untracked; retain useful
   fixtures. MIT licensing is approved; preserve LICENSE. Do not push or create
   a remote without approval.
-- Run the small proof with `bash proof/dagu/run.sh`; never replace its harmless
-  fixture with agent work. Verify the pinned official checksum before executing
-  Dagu. Use private owned state, record PID/start identities, and verify scheduler
-  and children have exited on success or failure. Do not patch live helpers,
-  services, global configuration, resource limits, or production orchestrators.
+- Do not patch live helpers, services, global configuration, resource limits, or
+  production orchestrators.
 - Build/vet with GOMAXPROCS=2 and `-p 1`. Run the real command-core acceptance
   scenario described in docs/command-core.md; do not add unit/mock matrices.
 - SQLite state must use private persistent local storage, not the repository's
@@ -77,10 +72,16 @@
   test `validation=not_run`), read-only `verify-worktree` live worktree-to-snapshot
   drift detection (`matches_snapshot` vs `modified_since_snapshot`), and the
   `<=16 KiB` deterministic inline Goldfish review gate (`read`/`glob`/`grep` plus
-  catch-all `deny *`). An experimental read-only current Herdr native mod uses
-  a short-lived Go bridge calling the core; the terminal board also remains
-  available. No legacy Herdr plugin is supported. See docs/notifications.md and
-  docs/project-control-plane.md.
+  catch-all `deny *`). An experimental current Herdr native mod uses a short-lived
+  Go bridge for stored views, explicit inbox acknowledgements, and local-only
+  `lane.blocked` compose via prepare, retained preview, and confirmation; supported
+  previously prepared `lane.assigned` mail can also be previewed and confirmed.
+  Never automatically resend uncertain sends; use explicit receipt read-back.
+  Remote compose is unavailable. The journal checks queue device/inode but cannot
+  detect in-place restores; do not replace or retarget database paths concurrently.
+  Human permissions are never auto-approved. The terminal board also remains
+  available. No legacy Herdr plugin is supported. See
+  docs/notifications.md and docs/project-control-plane.md.
 - Journal intent before Workmux/session/prompt mutations. Persist exact supplied
   session/prompt IDs and ownership. Never retry ambiguous POSTs, adopt by branch
   name, guess a latest session, or change shared-service discovery/auth context.
