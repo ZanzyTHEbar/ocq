@@ -666,6 +666,16 @@ the original request might still finish.
 The journal is local to this app installation, not a distributed lock between
 different clients. The panel labels project-list, board, inbox, history and
 job-detail read times where available.
+Unknown work rows highlight the core's last stored permission-or-form reason,
+session-inbox input reason, or otherwise unknown request status. The job detail
+shows the recorded session ID and worktree location for finding the exact session
+in OpenCode. A permission-or-form reason does not identify which kind was present;
+inbox input is not necessarily a human request. The observer records no timestamp
+for these job reasons: board and detail read times are database read times, not
+request observation times. Neither a missing warning nor a stored warning proves
+the current request state, and a preallocated session ID does not prove the
+session is available. This view does not query or navigate to OpenCode, answer
+requests, or reconcile agents.
 When the panel has keyboard focus, Up/Down choose an action and Enter activates
 it. Keyboard inspection replaces the scrolling board with the selected item's
 content, including items outside the viewport; Left/Right moves between labelled

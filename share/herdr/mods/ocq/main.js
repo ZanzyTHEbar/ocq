@@ -13,6 +13,33 @@ function readOrder(value) {
   return (value || "").replace(/(?:\.(\d+))?Z$/, (_match, fraction) => `.${(fraction || "").padEnd(9, "0")}Z`);
 }
 
+// These are the core observer's exact stored reasons, not a live request list.
+function attention(job) {
+  if (job?.state !== "unknown") return null;
+  if (job.outcome === "blocked" && [
+    "blocked: pending permission/form; never auto-answer; capacity held",
+    "blocked: permission/form appeared during terminal inspection; capacity held",
+  ].includes(job.reason)) return "Last recorded: permission or form request (type unknown)";
+  if (job.outcome === "blocked" && [
+    "session input pending in inbox; no completion, resend, or resume",
+    "session input arrived across terminal inspection; wait for inbox to drain; capacity held",
+  ].includes(job.reason)) return "Last recorded: session inbox input (not necessarily a human request)";
+  return "Unknown job state; request status not established";
+}
+
+function attentionDetail(job) {
+  if (!attention(job)) return null;
+  return {
+    status: attention(job),
+    observation_time: "not recorded; current request status unknown",
+    session_id: job.agent?.session_id || "not recorded",
+    location_worktree: job.agent?.worktree || "not recorded",
+    guidance: job.agent?.session_id && job.agent?.worktree
+      ? "Find the exact recorded session and location in OpenCode and check its current state there. An ID alone does not establish session availability. OCQ does not answer requests or observe the runtime from this view."
+      : "Session ID or location is not recorded. Investigate ownership before attempting to locate the session. OCQ does not answer requests or observe the runtime from this view.",
+  };
+}
+
 // The shell has synchronous hashes, not a usable async webcrypto.subtle.
 function composeProof(capability, nonce, role) {
   const key = Buffer.from(capability, "hex"), inner = new Uint8Array(64), outer = new Uint8Array(64);
@@ -862,7 +889,7 @@ export default class OCQ extends View {
       kind: "project", id: p.project_id, label: `Project: ${p.label} · ${p.project_id}`,
     })) : [];
     const jobs = (this.board?.project?.jobs ?? []).map((j) => ({
-      kind: "job", id: j.job_id, label: `Job: ${j.role} · ${j.state} · ${j.job_id}`,
+      kind: "job", id: j.job_id, label: `Job: ${j.role} · ${attention(j) || j.state} · ${j.job_id}`,
     }));
     const messages = this.collections.inbox.items.flatMap((m) => {
       const targets = [{ kind: "message", id: m.id, label: `Message: ${m.subject} · ${m.id}` }];
@@ -1153,8 +1180,13 @@ export default class OCQ extends View {
     if (target.kind === "project") value = this.projects.find((p) => p.project_id === target.id);
     else if (target.kind === "summary") value = this.board?.project;
     else if (target.kind === "job") {
-      value = { stored_job: this.board?.project?.jobs?.find((j) => j.job_id === target.id),
-        job_detail: this.detailJob === target.id ? (this.detailLoading ? "Loading job detail…" : this.detailError || this.detail) : "Activate to inspect associations" };
+      const stored = this.board?.project?.jobs?.find((j) => j.job_id === target.id);
+      const detail = this.detailJob === target.id ? this.detail?.job : null;
+      value = { attention: detail ? attentionDetail(detail) : attention(stored) ? {
+        status: attention(stored), observation_time: "not recorded; current request status unknown",
+        guidance: "Activate to load the recorded session ID and location; this does not observe the runtime.",
+      } : null, stored_job: stored,
+        job_detail: this.detailJob === target.id ? (this.detailLoading ? "Loading job detail…" : this.detailError || this.detail) : "Activate to inspect job details" };
     } else if (target.kind === "manifest") {
       value = this.manifestDigest === target.id ? (this.manifestLoading ? "Loading manifest…" : this.manifestError || this.manifest) : "Activate to read the retained manifest bytes.";
       if (this.manifestDigest === target.id && this.manifest && !this.manifestLoading && !this.manifestError) {
@@ -1457,10 +1489,12 @@ export default class OCQ extends View {
           .child(button("ocq-project-overview", "View project and binding", (cx) => this.openTarget("summary", undefined, cx)))
           .when(Boolean(project?.current_binding?.handoff_manifest_digest), (e) => e.child(button("ocq-handoff", "Read handoff", (cx) => this.openTarget("manifest", project.current_binding.handoff_manifest_digest, cx))))
           .child(div().pt(8).font_semibold().child("Work"))
+          .child(div().text_size(12).text_color(t.muted).child("Request observations may be stale; their observation time is not recorded. Inspect a job for its recorded session and location."))
           .when((project?.jobs ?? []).length === 0, (e) => e.child(div().text_color(t.dim).child("No jobs.")))
           .children((project?.jobs ?? []).map((j) => v_flex().id(`ocq-job-${j.job_id}`).py(5).gap(2).border_b(1).border_color(t.border)
             .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.inspect(j.job_id, cx))
             .child(div().child(`${j.role} · ${j.state} · ${j.outcome}`))
+            .when(Boolean(attention(j)), (e) => e.child(div().text_size(12).text_color(t.blocked).child(attention(j))))
             .child(div().text_size(12).text_color(t.muted).child(j.job_id))
             .child(div().text_size(12).child(`Result: ${j.result_status} · Validation: ${j.validation?.status ?? "unknown"} · Review: ${j.review?.verdict ?? "not reviewed"}`))
             .when(Boolean(j.review?.stale_for_latest_result), (e) => e.child(div().text_color(t.blocked).child("Review is stale for the latest result")))
@@ -1471,6 +1505,12 @@ export default class OCQ extends View {
               .when(Boolean(this.detailError), (e) => e.child(div().text_color(t.ansi1).child(`Cannot inspect job: ${this.detailError}`)))
               .when(Boolean(this.detail), (e) => e
                 .child(div().text_size(12).text_color(t.muted).child(`Job detail read · ${this.detail?.read_at ?? ""}`))
+                .when(Boolean(attentionDetail(this.detail?.job)), (e) => e.child(v_flex().gap(2)
+                  .child(div().text_color(t.blocked).child(attention(this.detail.job)))
+                  .child(div().text_size(12).child("Observation time not recorded · current request status unknown"))
+                  .child(div().text_size(12).child(`Recorded session ID: ${this.detail.job.agent?.session_id || "not recorded"}`))
+                  .child(div().text_size(12).child(`Recorded location (worktree): ${this.detail.job.agent?.worktree || "not recorded"}`))
+                  .child(div().text_size(12).text_color(t.muted).child(attentionDetail(this.detail.job).guidance))))
                 .child(div().child(`Lane: ${this.detail?.lane_id || "not assigned"}`))
                 .child(div().child(`Worktree: ${this.detail?.fsfork_path || "not recorded"}`))
                 .child(div().child(`Integration: ${this.detail?.integration || "unknown"}`))
