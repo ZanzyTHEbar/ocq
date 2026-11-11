@@ -13,6 +13,13 @@ import (
 
 // RecordResult atomically associates an imported manifest and delivers mail.
 func (q *Queue) RecordResult(projectID, jobID string, rawBytes []byte, supersedesID string) (_ ProjectResultAssociation, resultErr error) {
+	return q.store.recordResult(projectID, jobID, rawBytes, supersedesID, nil, false)
+}
+
+// Validation and publication share the same checks. Preview uses a schema-5
+// read snapshot and exits before every write; publication rechecks under the
+// real write transaction, including any adapter ownership fence.
+func (s *store) recordResult(projectID, jobID string, rawBytes []byte, supersedesID string, check func(sqlQueryer) error, preview bool) (_ ProjectResultAssociation, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeDatabaseWrite, resultErr) }()
 	var committed ProjectResultAssociation
 	if !isValidProjectID(projectID) || !isValidJobID(jobID) {
@@ -23,7 +30,12 @@ func (q *Queue) RecordResult(projectID, jobID string, rawBytes []byte, supersede
 	}
 
 	ctx := context.Background()
-	err := q.store.write(func(c *sql.Conn) error {
+	run := func(c sqlQueryer) error {
+		if check != nil {
+			if err := check(c); err != nil {
+				return err
+			}
+		}
 		queries := dbquery.New(c)
 		job, err := queries.ProjectJobReceiptTargets(ctx, jobID)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -121,14 +133,21 @@ func (q *Queue) RecordResult(projectID, jobID string, rawBytes []byte, supersede
 				return faults.New(faults.CodeValidationFailed, fmt.Sprintf("result association for project %s job %s kind %s manifest %s already exists with conflicting supersedes linkage", projectID, jobID, m.Kind, m.Digest))
 			}
 			committed = summarizeAssociation(existing.ID, existing.Sequence, projectID, jobID, m.Kind, m.Digest, supersedesPtr, existing.RecordedAt, &m, true)
-			return sealLaneAndDeliverMail(ctx, c, m, projectID, jobID, existing.ID, worktree, existing.RecordedAt)
+			if preview {
+				return nil
+			}
+			return sealLaneAndDeliverMail(ctx, c.(*sql.Conn), m, projectID, jobID, existing.ID, worktree, existing.RecordedAt)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return classifyDiagnostic(faults.CodeDatabaseRead, err)
 		}
+		if preview {
+			committed = summarizeAssociation(assocID, 0, projectID, jobID, m.Kind, m.Digest, supersedesPtr, "", &m, true)
+			return nil
+		}
 
 		ts := now()
-		if err := insertManifestConn(ctx, c, m, ts); err != nil {
+		if err := insertManifestConn(ctx, c.(*sql.Conn), m, ts); err != nil {
 			return err
 		}
 		seq, err := queries.InsertAssociation(ctx, dbquery.InsertAssociationParams{ID: assocID, ProjectID: projectID, JobID: jobID, Kind: m.Kind, ManifestDigest: m.Digest, SupersedesID: sqlStringPtr(supersedesPtr), RecordedAt: ts})
@@ -136,8 +155,14 @@ func (q *Queue) RecordResult(projectID, jobID string, rawBytes []byte, supersede
 			return err
 		}
 		committed = summarizeAssociation(assocID, seq, projectID, jobID, m.Kind, m.Digest, supersedesPtr, ts, &m, true)
-		return sealLaneAndDeliverMail(ctx, c, m, projectID, jobID, assocID, worktree, ts)
-	})
+		return sealLaneAndDeliverMail(ctx, c.(*sql.Conn), m, projectID, jobID, assocID, worktree, ts)
+	}
+	var err error
+	if preview {
+		err = s.readSchema5(run)
+	} else {
+		err = s.write(func(c *sql.Conn) error { return run(c) })
+	}
 	if err != nil {
 		return committed, err
 	}

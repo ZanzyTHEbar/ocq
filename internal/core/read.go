@@ -10,11 +10,11 @@ import (
 	"ocq/internal/core/dbquery"
 )
 
-// Reader provides non-initializing, non-consuming stored project views.
+// Reader provides non-initializing, non-consuming stored queue and project views.
 // It never starts, reconciles, or acknowledges work.
 type Reader struct{ store *store }
 
-// OpenReader requires an existing private schema-5 store on supported local storage.
+// OpenReader requires an existing private schema-5 store satisfying docs/storage.md.
 func OpenReader(stateDir string) (_ *Reader, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeRuntimeFailed, resultErr) }()
 	s, err := openReadOnlyStore(stateDir)
@@ -27,6 +27,10 @@ func OpenReader(stateDir string) (_ *Reader, resultErr error) {
 func (r *Reader) Close() error {
 	return classifyDiagnostic(faults.CodeDatabaseRead, r.store.database.Close())
 }
+
+// StateDirectory is the canonical path established by this existing-store
+// reader after private/nonsymlink final-directory and SQLite validation.
+func (r *Reader) StateDirectory() string { return r.store.dir }
 
 type ProjectSummary struct {
 	ProjectID                 string `json:"project_id"`

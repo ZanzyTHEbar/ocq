@@ -119,6 +119,11 @@ func composePrivateDirAt(dir *os.File, name string) (*os.File, error) {
 	if err := dir.Sync(); err != nil {
 		return nil, err
 	}
+	return composeOpenPrivateDirAt(dir, name)
+}
+
+// Read-only journal inspection must not create a directory or synchronize it.
+func composeOpenPrivateDirAt(dir *os.File, name string) (*os.File, error) {
 	fd, err := syscall.Openat(int(dir.Fd()), name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err

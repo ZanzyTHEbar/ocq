@@ -100,6 +100,34 @@ func (q *Queries) BoardUnreadMessages(ctx context.Context, arg BoardUnreadMessag
 	return items, nil
 }
 
+const composeIntegratorSenders = `-- name: ComposeIntegratorSenders :many
+SELECT DISTINCT sender FROM project_inbox_messages
+ WHERE project_id=? AND sender LIKE 'integrator:%' ORDER BY sender
+`
+
+func (q *Queries) ComposeIntegratorSenders(ctx context.Context, projectID string) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, composeIntegratorSenders, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var sender string
+		if err := rows.Scan(&sender); err != nil {
+			return nil, err
+		}
+		items = append(items, sender)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const inboxMessageByID = `-- name: InboxMessageByID :one
 SELECT m.id,m.sequence,m.key,m.project_id,m.sender,m.recipient,m.lane_id,m.job_id,m.kind,m.subject,m.body,m.manifest_digest,m.assoc_id,m.fsfork_path,m.reply_to_id,m.created_at,m.read_at,m.archived_at
  FROM project_inbox_messages m WHERE m.project_id=? AND m.id=?

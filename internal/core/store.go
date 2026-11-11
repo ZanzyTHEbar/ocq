@@ -92,20 +92,10 @@ func resolveStateDir(dir string) (string, error) {
 	return path, classifyDiagnostic(faults.CodeConfigInvalid, err)
 }
 
-func checkStateFilesystem(dir string) error {
-	var fs syscall.Statfs_t
-	if err := syscall.Statfs(dir, &fs); err != nil {
-		return classifyDiagnostic(faults.CodeStorageFailed, err)
-	}
-	// Deliberately narrow: reject tmpfs, virtiofs, overlay and network filesystems.
-	switch uint64(fs.Type) {
-	case 0xef53, 0x58465342, 0x9123683e: // ext4 family, XFS, Btrfs
-		return nil
-	default:
-		return faults.New(faults.CodeConfigInvalid, fmt.Sprintf("unsupported state filesystem %#x: use persistent local ext4/XFS/Btrfs, not tmpfs/network/shared mounts", fs.Type))
-	}
-}
-
+// Storage support depends on actual permissions, locking, WAL shared memory and
+// sync operations below, not a filesystem-name allowlist. Successful operations
+// cannot prove backing-store persistence or correct cross-host coherence; the
+// operator must satisfy docs/storage.md's single-host and retention contract.
 func openStore(dir string) (*store, error) {
 	dir, err := resolveStateDir(dir)
 	if err != nil {
@@ -118,9 +108,6 @@ func openStore(dir string) (*store, error) {
 	if err != nil {
 		return nil, classifyDiagnostic(faults.CodeStorageFailed, err)
 	}
-	if err := checkStateFilesystem(dir); err != nil {
-		return nil, err
-	}
 	// SQLite's initial journal-mode transition can fail BUSY without waiting when
 	// first-time opens race. Serialize only connection/schema initialization, not
 	// submission; the receipt itself is protected by its SQLite transaction.
@@ -130,7 +117,7 @@ func openStore(dir string) (*store, error) {
 	}
 	defer initLock.Close()
 	if err := syscall.Flock(int(initLock.Fd()), syscall.LOCK_EX); err != nil {
-		return nil, classifyDiagnostic(faults.CodeStorageFailed, err)
+		return nil, faults.Wrap(faults.CodeStorageFailed, "acquire schema.lock: storage must support advisory flock locking", err)
 	}
 	path := filepath.Join(dir, "queue.db")
 	file, err := privateFile(path, os.O_CREATE|os.O_RDWR)
@@ -281,9 +268,6 @@ func openReadOnlyStore(dir string) (*store, error) {
 	if err != nil {
 		return nil, classifyDiagnostic(faults.CodeStorageFailed, err)
 	}
-	if err := checkStateFilesystem(dir); err != nil {
-		return nil, err
-	}
 	path := filepath.Join(dir, "queue.db")
 	file, err := privateFile(path, os.O_RDONLY)
 	if err != nil {
@@ -355,16 +339,13 @@ func openExistingWritableStore(dir string) (*store, error) {
 	if err != nil {
 		return nil, classifyDiagnostic(faults.CodeStorageFailed, err)
 	}
-	if err := checkStateFilesystem(dir); err != nil {
-		return nil, err
-	}
 	initLock, err := privateFile(filepath.Join(dir, "schema.lock"), os.O_RDWR)
 	if err != nil {
 		return nil, err
 	}
 	defer initLock.Close()
 	if err := syscall.Flock(int(initLock.Fd()), syscall.LOCK_EX); err != nil {
-		return nil, classifyDiagnostic(faults.CodeStorageFailed, err)
+		return nil, faults.Wrap(faults.CodeStorageFailed, "acquire schema.lock: storage must support advisory flock locking", err)
 	}
 	path := filepath.Join(dir, "queue.db")
 	file, err := privateFile(path, os.O_RDWR)
@@ -476,28 +457,37 @@ func (s *store) acceptCanonical(key string, data []byte, agent bool) (Job, error
 		if !errors.Is(err, sql.ErrNoRows) {
 			return classifyDiagnostic(faults.CodeDatabaseRead, err)
 		}
-		var random [16]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			return classifyDiagnostic(faults.CodeRuntimeFailed, err)
-		}
-		id = "job-" + hex.EncodeToString(random[:])
-		if err := queries.InsertReceipt(context.Background(), dbquery.InsertReceiptParams{
-			Key: key, JobID: id, Canonical: data, Digest: digest, AcceptedAt: now(),
-		}); err != nil {
-			return err
-		}
-		if err = queries.InsertQueuedJob(context.Background(), id); err != nil {
-			return err
-		}
-		if agent {
-			return insertAgentOwnership(c, id)
-		}
-		return nil
+		id, err = insertCanonicalReceipt(c, key, data, digest, agent)
+		return err
 	})
 	if err != nil {
 		return Job{}, classifyDiagnostic(faults.CodeDatabaseWrite, err)
 	}
 	return s.get(id)
+}
+
+// Database-only admission work shared by the existing CLI/command path and
+// prepared agent admission. No validation callbacks, subprocesses or filesystem
+// setup may run while the write transaction is held.
+func insertCanonicalReceipt(c *sql.Conn, key string, data []byte, digest string, agent bool) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", classifyDiagnostic(faults.CodeRuntimeFailed, err)
+	}
+	id := "job-" + hex.EncodeToString(random[:])
+	queries := dbquery.New(c)
+	if err := queries.InsertReceipt(context.Background(), dbquery.InsertReceiptParams{Key: key, JobID: id, Canonical: data, Digest: digest, AcceptedAt: now()}); err != nil {
+		return "", err
+	}
+	if err := queries.InsertQueuedJob(context.Background(), id); err != nil {
+		return "", err
+	}
+	if agent {
+		if err := insertAgentOwnership(c, id); err != nil {
+			return "", err
+		}
+	}
+	return id, nil
 }
 
 func jobFromRow(row dbquery.JobByIDRow) (Job, error) {
@@ -589,7 +579,22 @@ func (s *store) list() (_ []Job, resultErr error) {
 }
 
 func (s *store) cancel(id string) error {
+	return s.cancelChecked(id, nil)
+}
+
+// The bridge checks the retained receipt in the same IMMEDIATE transaction as
+// the CLI's queued-only transition and terminal-notification trigger.
+func (s *store) cancelChecked(id string, check func(Job) error) error {
 	return s.write(func(c *sql.Conn) error {
+		if check != nil {
+			job, err := s.getFrom(c, id)
+			if err != nil {
+				return err
+			}
+			if err := check(job); err != nil {
+				return err
+			}
+		}
 		n, err := dbquery.New(c).CancelQueuedJob(context.Background(), id)
 		if err != nil {
 			return classifyDiagnostic(faults.CodeDatabaseWrite, err)
@@ -602,10 +607,16 @@ func (s *store) cancel(id string) error {
 }
 
 func (s *store) resolve(id, evidence string) (Job, error) {
+	return s.resolveChecked(id, evidence, nil)
+}
+
+// Bridge scope checks share the CLI's dispatcher exclusion and real process
+// checks; they run again on the exact write connection before the transition.
+func (s *store) resolveChecked(id, evidence string, check func(Job) error) (Job, error) {
 	var empty Job
 	lock, err := s.lock()
 	if err != nil {
-		return empty, err
+		return empty, &commandResolutionRefusal{"dispatcher_lock_unavailable", err}
 	}
 	defer lock.Close()
 	job, err := s.get(id)
@@ -619,9 +630,21 @@ func (s *store) resolve(id, evidence string) (Job, error) {
 		return empty, faults.New(faults.CodeValidationFailed, "resolve cannot prove an agent stopped from process/boot identity; use API-only reconcile")
 	}
 	if err := safeToResolve(job.Process); err != nil {
-		return empty, err
+		return empty, &commandResolutionRefusal{"process_exit_not_established", err}
 	}
 	if err := s.write(func(c *sql.Conn) error {
+		current, err := s.getFrom(c, id)
+		if err != nil {
+			return err
+		}
+		if current.State != "unknown" || current.Process != job.Process {
+			return faults.New(faults.CodeValidationFailed, "unknown command ownership changed; resolution refused")
+		}
+		if check != nil {
+			if err := check(current); err != nil {
+				return err
+			}
+		}
 		return classifyDiagnostic(faults.CodeDatabaseWrite, dbquery.New(c).ResolveUnknownJob(context.Background(), dbquery.ResolveUnknownJobParams{Evidence: evidence, ID: id}))
 	}); err != nil {
 		return empty, err

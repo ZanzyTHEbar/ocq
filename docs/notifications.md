@@ -1,115 +1,92 @@
-# Durable local completion notifications
+# Completion notifications
 
-ocq's first notification interface is **local CLI pull**, not proactive chat
-delivery. The existing SQLite queue stores one frozen completion event per job.
-There is no network sink, hook, subscriber service, or delivery into agent sessions.
+OCQ stores one durable completion event per job. CLI pull/ack provides delivery;
+the Herdr Queue view offers non-consuming pending/exact reads and explicitly
+confirmed local acknowledgement. There are no proactive chat/network hooks or
+delivery into agent sessions.
 
 ## Pull and acknowledge
 
 ```sh
-runtime/ocq --state-dir STATE_DIR notifications --limit 20
-# Process/persist the event using its stable ID, then acknowledge it:
-runtime/ocq --state-dir STATE_DIR ack completion-JOB_ID
+ocq --state-dir STATE_DIR notifications --limit 20
+# Durably handle/deduplicate the event, then acknowledge its exact ID:
+ocq --state-dir STATE_DIR ack completion-JOB_ID
 ```
 
-`notifications` returns a JSON array of the oldest unacknowledged events, ordered
-by their durable sequence. Default limit **20**, allowed range **1–100**; no
-positional arguments. An empty queue returns `[]`. Events contain fixed lifecycle
-fields, not prompts, receipts, reasoning, output contents or arbitrary error text.
-Use `status JOB_ID` and `logs JOB_ID` for current job details/output.
+Pull returns the oldest unacknowledged events by sequence. Default limit is 20,
+range 1–100; an empty result is `[]`. It does not claim, acknowledge, dispatch or
+release capacity. Dispatch need not be running. Multiple consumers can see the
+same event; there are no subscriber leases or independent cursors.
 
-Pull is read-only after any required schema migration: it does not claim events,
-acknowledge them, change capacity, or run a job. Repeated pulls return the same
-event until acknowledged, including after client or dispatcher restart. A
-dispatcher need not be running to pull or acknowledge. Multiple local consumers
-may see the same event; there are no leases or per-subscriber cursors. Acknowledge
-older events to advance through a bounded pending batch.
+`ack` takes the event ID, not the job ID. It sets `acknowledged_at` once and
+returns the event. Repeating it returns the same timestamp, so retrying after a
+lost ack response is safe. Unknown IDs fail. There is no blanket acknowledgement
+or event deletion command.
 
-`ack` requires the exact **event ID**, not the job ID. It commits an acknowledgement
-and returns the event with `acknowledged_at`. Repeating it returns the same event
-and original acknowledgement timestamp. An unknown ID fails; there is no blanket
-acknowledgement command. If the acknowledgement response is lost, retrying `ack`
-is safe. Acknowledgement is permanent and does not delete the event.
+Consumers must persist handling and deduplicate by event ID before acknowledging.
+Events are redelivered until acknowledgement; OCQ cannot make external consumer
+effects exactly once. Acknowledgement never retries execution or resolves unknown
+ownership.
 
-This is **at least once until acknowledgement**, provided a consumer continues
-pulling. A consumer should durably handle/deduplicate the event by ID before
-acknowledging; ocq cannot make external consumer side effects exactly once. No
-automatic execution retry or proactive delivery is implied.
+## Herdr acknowledgement
 
-## Frozen event contract
+Open an event in the Queue view, review the global acknowledgement, then confirm
+it separately. **Acknowledgement is local-only**; remote selections retain reads
+but disable this action. It removes the event from the pending global list, not
+from retained history. It is distinct from project inbox read/archive and never
+changes the job, releases capacity, retries work or answers permissions.
 
-Each event has `id`, `sequence`, `job_id`, `state`, `outcome`, `exit_code`,
-`validation`, `origin`, `recorded_at`, and nullable `acknowledged_at`.
+Preparation persists an intent for the exact local machine, originating Herdr
+space, queue identity, event ID, job ID and decimal sequence. Sequences remain
+decimal strings, not JavaScript numbers. Confirmation must receive an acknowledged
+durable arm before launching one attempt; the attempt marker is synced before
+the acknowledgement call. Only a separate read matching queue/event/job/sequence
+and `acknowledged_at` establishes an observed acknowledgement, not client return.
+That observation does not prove which caller acknowledged it.
 
-- `id` is deterministically `completion-` plus the immutable job ID. Sequence
-  orders events within this queue; gaps are harmless.
-- `state`, `outcome`, exit code and validation are a **first-terminal observation**,
-  not a live projection of the job. Event content cannot be changed or deleted;
-  only its first acknowledgement can be recorded. Both event and ack are retained
-  indefinitely initially; there is no pruning/reset command.
-- `origin=transition` means the event was inserted in the same SQLite transaction
-  as a change to `finished`, `cancelled`, or `resolved`. An AFTER UPDATE trigger
-  covers command exit (including nonzero exit), launch failure, queued command or
-  agent cancellation, command operator resolution, and agent terminal observation.
-  Failure to persist an event rolls back the terminal state change too.
-- `origin=migration_snapshot` means migration observed an already-terminal stored
-  job. `recorded_at` is the migration observation time, **not an invented historical
-  completion time**. Historical output/runtime resources are not revalidated by
-  migration.
-- `validation=not_run` stays separate from server success or exit zero. Queued
-  cancellation is `cancelled_before_launch`; resolution is `operator_reconciled`,
-  never fabricated success. Launch failure has no invented command exit code.
-- No new event is created for `queued`, `launching`, `running` or `unknown`.
-  Reinspection cannot duplicate/reset an existing event or its acknowledgement.
+After a lost response or panel reload, reopen the exact event in the original
+local space and use **Check exact event and journal**. A job's retained global
+event link and exact event-ID lookup also find events no longer in the pending
+list. Prepared intents can be reviewed again; armed or uncertain intents offer
+checks only, never automatic resend. A confirmed call may finish after leaving
+the view. Another space cannot replace the original intent. Missing, mismatched
+or unavailable read-back remains uncertain and is not permission to retry.
 
-A job can later become unknown during agent reinspection (for example, a known
-shell becomes unobservable). Its historical event remains frozen, labelled as
-the prior observation; **it does not assert current completion**. Read current
-status before making ownership decisions. Acknowledging that historical event
-does not release unknown capacity, resolve ownership, resume work, or retry it.
+Queue identity detects accidental replacement/retargeting, not in-place restores
+or hostile forgery. Do not replace or retarget queue paths while in use.
 
-## Schema migration and safety
+## Event contract
 
-Schema **3** adds only the outbox, index and triggers. Existing schema 1 upgrades
-transactionally through schema 2 to 3 under the initialization and dispatcher
-locks; stop dispatch before migrating. Schema 2 adds just the outbox. Future
-versions are rejected. Receipt bytes/digests/keys/sequence/timestamps, v1/v2
-requests, agent mutation journals, admission and uncertainty semantics are
-unchanged. No delivery fields are inserted into immutable receipts.
+Fields are `id`, `sequence`, `job_id`, `state`, `outcome`, `exit_code`,
+`validation`, `origin`, `recorded_at` and nullable `acknowledged_at`. Payloads omit
+prompts, reasoning, receipts, arbitrary errors and output contents. Use job status
+and logs for details.
 
-Already-terminal jobs receive exactly one labelled migration snapshot, ordered
-by receipt sequence. Nonterminal/unknown jobs receive none. Backfill and schema
-version change commit together, so reopening does not repeat backfill. Existing
-WAL/FULL/private persistent storage requirements still apply. The first command
-opening old state performs migration, even a pull; do not use retained evidence
-queues as migration experiments.
+- `id` is `completion-` plus the immutable job ID. Sequence orders events inside
+  one queue; gaps are valid.
+- Content is a frozen **first-terminal observation**, not a live job projection.
+  Only its first acknowledgement can change. Events and acknowledgements are
+  retained; there is no pruning command.
+- `origin=transition` means event creation and the transition to `finished`,
+  `cancelled` or `resolved` committed together. A failed event write rolls back
+  the terminal transition.
+- `origin=migration_snapshot` means migration observed an already-terminal job.
+  Its recorded time is migration time, not an invented historical finish time.
+  Backfill is ordered by receipt sequence and committed with migration.
+- Exit zero, `validation=not_run`, `cancelled_before_launch`, launch failure and
+  `operator_reconciled` remain distinct. Unknown/nonterminal states create no event.
 
-## Real acceptance and limits
+An agent may later become unknown when reinspection loses a known resource. The
+historical event remains frozen and does not assert current completion. Inspect
+current stored state and reconcile ownership before acting on that history.
 
-```sh
-GOMAXPROCS=2 go build -p 1 -o runtime/ocq-acceptance ./proof/command-core
-# Saved real pre-migration binaries, not fabricated PRAGMA versions:
-GOMAXPROCS=2 runtime/ocq-acceptance --notifications "$PWD/runtime/ocq" LEGACY_SCHEMA1 LEGACY_SCHEMA2
-GOMAXPROCS=2 runtime/ocq-acceptance "$PWD/runtime/ocq"
-```
+## Projects and upgrades
 
-The real scenario proves schema1→2→3 receipt preservation/backfill, bounded pull,
-consumer SIGKILL before ack, dispatcher crash/restarts, byte-identical redelivery,
-lost-ack-response/idempotent acknowledgement, durable acknowledgement after
-restart, one command execution, cancellation and genuine OS launch failure.
-Existing command acceptance also verifies no event while a crashed command is
-unknown, then an honest operator-resolved event rather than success.
+`project results` reads all retained project completion events, including globally
+acknowledged events, without consuming them. Its cursor is not a result-publication
+change feed; see [project observations](project-control-plane.md#stored-observations).
+Project inbox read/archive is separate from global completion acknowledgement.
 
-Agent migration/reinspection used isolated SQLite online-backup copies only. The
-retained no-tool check passed with no duplicate event or execution replay. The
-old tool check failed closed because its known shell ID was no longer observable;
-that copy stayed unknown, and ack did not release its slot. Original schema-2
-queues, receipts and outputs were unchanged. Details are in private
-`RESULT-NOTIFICATIONS.md`; no new model jobs or runtime mutation requests ran.
-
-Network/chat delivery, subscriber fan-out, retention/pruning,
-power-loss/storage-failure injection and consumer-side exactly-once effects are
-not implemented/validated. This slice does not install or deploy a service.
-An isolated [command-only supervision proof](supervision.md) now also preserves
-pending notifications and acknowledgements across supervised lifecycle changes;
-it does not add proactive delivery or install a persistent service.
+Writable notification commands can initialize or migrate a queue. Stop dispatch
+before upgrading old state; current schema is **5**. Migration preserves immutable
+receipts and backfills only already-terminal jobs. See [storage and upgrades](command-core.md#state-and-upgrades).

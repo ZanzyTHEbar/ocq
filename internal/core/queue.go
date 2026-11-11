@@ -2,11 +2,15 @@ package core
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"io"
 	"os"
 	"unicode/utf8"
 
 	"github.com/ZanzyTHEbar/faults-go"
+
+	"ocq/internal/core/dbquery"
 )
 
 // Queue owns one connection to the durable command and agent queue.
@@ -72,28 +76,53 @@ func (q *Queue) Acknowledge(id string) (Notification, error) {
 // resumes, prompts, approves, or releases uncertain ownership by process status.
 func (q *Queue) Reconcile(id string) (_ Job, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeRuntimeFailed, resultErr) }()
-	lock, err := q.store.lock()
+	return q.store.reconcileChecked(id, nil, nil)
+}
+
+// The optional bridge hooks fence an exact stored observation and retain its
+// operation receipt while the same dispatcher lock still excludes observers.
+// Neither hook is an alternative completion policy or an execution control.
+func (s *store) reconcileChecked(id string, check func(Job) error, observed func(error) error) (Job, error) {
+	lock, err := s.lock()
 	if err != nil {
 		return Job{}, err
 	}
 	defer lock.Close()
-	job, err := q.store.get(id)
+	job, err := s.get(id)
 	if err != nil {
 		return Job{}, err
 	}
 	if job.agentRequest == nil {
 		return Job{}, faults.New(faults.CodeValidationFailed, "reconcile is API-only and restricted to agent jobs")
 	}
-	if err := q.store.observeAgent(job); err != nil {
-		return Job{}, err
+	if check != nil {
+		if err := check(job); err != nil {
+			return Job{}, err
+		}
 	}
-	return q.store.get(job.ID)
+	observeErr := s.observeAgent(job)
+	if observed != nil {
+		if err := observed(observeErr); err != nil {
+			return Job{}, errors.Join(observeErr, err)
+		}
+	}
+	if observeErr != nil {
+		return Job{}, observeErr
+	}
+	return s.get(job.ID)
 }
 
 // OpenLog opens the exact private retained output for a job.
 func (q *Queue) OpenLog(id string, stderr bool) (_ io.ReadCloser, resultErr error) {
+	return q.store.openLog(id, stderr)
+}
+
+func (s *store) openLog(id string, stderr bool) (_ *os.File, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeStorageFailed, resultErr) }()
-	job, err := q.store.get(id)
+	job, err := dbquery.New(s.db).RetainedJobLog(context.Background(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, faults.New(faults.CodeNotFound, "exact queue job not found")
+	}
 	if err != nil {
 		return nil, err
 	}

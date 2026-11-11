@@ -2,10 +2,7 @@
 
 - Keep this local-first and portable. Do not embed host paths, credentials,
   private diagnostics, or machine-specific infrastructure in tracked files.
-- This is an alpha Go + SQLite command core with an experimental agent adapter,
-  not a production agent system. Session-scoped completion is validated for the
-  retained no-tool session and a real Build read/patch/foreground-shell/bounded
-  background-shell fixture, including actual operator-once tool permissions.
+- This is an alpha Go + SQLite queue core with an experimental agent adapter.
   Follow docs/architecture.md, docs/reliability-contract.md, and
   docs/command-core.md and docs/agent-integration.md. Provisioning/API observation
   and cooperative tool completion exist. One fresh dedicated session/worktree, one exact
@@ -18,13 +15,12 @@
   events are recorded auxiliary context, not proof of producer or causality.
   Extra execution inputs/profile mutations remain unknown. Same-user malicious
   API injection is outside this local single-user model; ownership metadata
-  detects accidental mismatches, not hostile forgery. docs/runtime-provenance.md
-  preserves a superseded, stronger optional contract, not a current blocker.
+  detects accidental mismatches, not hostile forgery.
 - SQLite is the sole queue authority. Preserve private historical evidence outside
   the public tree. No Python, standalone JS/TS runtime projects, frameworks, or
   speculative backends. A small trusted embedded JavaScript
-  GPUI mod for current herdr-app is approved; it may use a Go bridge calling
-  the core directly, not a separate JavaScript service or the legacy adapter.
+  GPUI mod for herdr-app may use a Go bridge calling the core directly, not a
+  separate JavaScript service or an alternate queue authority.
 - Keep one queue authority. OpenCode owns execution and permissions; Workmux
   owns worktrees. Never modify existing live helpers as part of experiments.
 - Make small, scoped changes; inspect existing work first. Never blindly retry
@@ -32,14 +28,17 @@
 - Validate harmless shell lifecycle jobs before live agent execution. Report
   exact checks, results, and gaps; do not invent tests or success claims.
 - Keep runtime state, generated artifacts, and binaries untracked; retain useful
-  fixtures. MIT licensing is approved; preserve LICENSE. Do not push or create
+  fixtures. Preserve the MIT LICENSE. Do not push or create
   a remote without approval.
 - Do not patch live helpers, services, global configuration, resource limits, or
   production orchestrators.
 - Build/vet with GOMAXPROCS=2 and `-p 1`. Run the real command-core acceptance
   scenario described in docs/command-core.md; do not add unit/mock matrices.
-- SQLite state must use private persistent local storage, not the repository's
-  shared mount or tmpfs. Keep WAL/FULL connection settings, immutable receipts,
+- SQLite state must satisfy docs/storage.md: private storage with coherent
+  single-host locking/WAL shared memory, file/directory sync and explicit retention.
+  Do not infer capability or durability from filesystem names; suitable VM/container
+  volumes are allowed, multi-host shared WAL is not, and ephemeral state cannot
+  promise durable recovery beyond its lifetime. Keep WAL/FULL connection settings, immutable receipts,
   FIFO head blocking, launch-intent persistence, and unknown ownership intact.
   Never release unknown capacity or retry execution just because a client exited.
 - Agent requests are a separate immutable v2; never add fields to/re-serialize v1
@@ -71,16 +70,26 @@
   (`source=machine_capture`, `verification=machine_verified_snapshot`, keeping
   test `validation=not_run`), read-only `verify-worktree` live worktree-to-snapshot
   drift detection (`matches_snapshot` vs `modified_since_snapshot`), and the
-  `<=16 KiB` deterministic inline Goldfish review gate (`read`/`glob`/`grep` plus
-  catch-all `deny *`). An experimental current Herdr native mod uses a short-lived
+  `<=16 KiB` deterministic inline static-review gate (`read`/`glob`/`grep` plus
+  catch-all `deny *`). The Herdr native mod uses a short-lived
   Go bridge for stored views, explicit inbox acknowledgements, and local-only
   `lane.blocked` compose via prepare, retained preview, and confirmation; supported
   previously prepared `lane.assigned` mail can also be previewed and confirmed.
-  Never automatically resend uncertain sends; use explicit receipt read-back.
-  Remote compose is unavailable. The journal checks queue device/inode but cannot
+  Local project intake supports exact-JSON registration and implementation/review
+  submissions with supported full referenced manifests, structured retained-byte
+  review and pointer-only final confirmation. Compose and
+  intake require durable arm plus one attempt and exact receipt read-back; never
+  automatically resend uncertain operations. Remote compose/intake are disabled.
+  Stored request reasons have no observation timestamp or permission/form type
+  distinction; stored request views do no live lookup or approval. Explicit local
+  agent reconciliation is a separate confirmed action. Do not infer agent workflow
+  completion or remote deployment readiness from panel intake-to-queue support.
+  Queue/log/global-event panel inspection uses existing-store read-only access;
+  it must not acknowledge global events or invoke execution controls implicitly.
+  See docs/herdr.md. Each journal checks queue device/inode but cannot
   detect in-place restores; do not replace or retarget database paths concurrently.
-  Human permissions are never auto-approved. The terminal board also remains
-  available. No legacy Herdr plugin is supported. See
+  Human permissions are never auto-approved. The terminal board is also
+  available. See
   docs/notifications.md and docs/project-control-plane.md.
 - Journal intent before Workmux/session/prompt mutations. Persist exact supplied
   session/prompt IDs and ownership. Never retry ambiguous POSTs, adopt by branch

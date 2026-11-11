@@ -31,8 +31,12 @@ func run(args []string) error {
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.AddCommand(palette()...)
+	root.AddCommand(queueCommands()...)
 	root.AddCommand(composeCommands()...)
 	root.AddCommand(intakeCommands()...)
+	root.AddCommand(resultPublicationCommands()...)
+	root.AddCommand(capturePublicationCommands()...)
+	installCompatibility(root)
 	root.SetArgs(args)
 	return root.Execute()
 }
@@ -43,9 +47,22 @@ const pageSize = 20
 
 func palette() []*cobra.Command {
 	return []*cobra.Command{
+		viewCommand("verify-worktree PROJECT JOB ASSOCIATION DIGEST STORED_WORKTREE", 5, verifyOwnedWorktree),
 		viewCommand("projects", 0, func(r *core.Reader, _ []string) (any, error) { return r.Projects() }),
-		viewCommand("board PROJECT", 1, func(r *core.Reader, args []string) (any, error) { return r.Board(args[0]) }),
-		viewCommand("job PROJECT JOB", 2, func(r *core.Reader, args []string) (any, error) { return r.Job(args[0], args[1]) }),
+		viewCommand("board PROJECT", 1, func(r *core.Reader, args []string) (any, error) {
+			board, err := r.Board(args[0])
+			if err != nil {
+				return nil, err
+			}
+			return boardView(board), nil
+		}),
+		viewCommand("job PROJECT JOB", 2, func(r *core.Reader, args []string) (any, error) {
+			detail, err := r.Job(args[0], args[1])
+			if err != nil {
+				return nil, err
+			}
+			return projectDetail(detail), nil
+		}),
 		viewCommand("recent-inbox PROJECT", 1, func(r *core.Reader, args []string) (any, error) {
 			page, err := r.RecentInbox(args[0], pageSize)
 			if err != nil {
@@ -61,7 +78,11 @@ func palette() []*cobra.Command {
 			}{page, messages}, nil
 		}),
 		viewCommand("recent-results PROJECT", 1, func(r *core.Reader, args []string) (any, error) {
-			return r.RecentResults(args[0], pageSize)
+			page, err := r.RecentResults(args[0], pageSize)
+			if err != nil {
+				return nil, err
+			}
+			return projectResults(page), nil
 		}),
 		viewCommand("inbox PROJECT AFTER", 2, func(r *core.Reader, args []string) (any, error) {
 			after, err := cursor(args[1])
@@ -106,10 +127,10 @@ func palette() []*cobra.Command {
 				page.NextSequence = page.Items[len(page.Items)-1].Event.Sequence
 			}
 			return struct {
-				core.ProjectResultsOutput
+				projectResultsPage
 				Cursor  string `json:"cursor"`
 				HasMore bool   `json:"has_more"`
-			}{page, strconv.FormatInt(page.NextSequence, 10), hasMore}, nil
+			}{projectResults(page), strconv.FormatInt(page.NextSequence, 10), hasMore}, nil
 		}),
 		viewCommand("manifest PROJECT DIGEST", 2, func(r *core.Reader, args []string) (any, error) {
 			manifest, err := r.Manifest(args[0], args[1])

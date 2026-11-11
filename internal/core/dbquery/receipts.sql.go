@@ -173,6 +173,155 @@ func (q *Queries) ListJobs(ctx context.Context) ([]ListJobsRow, error) {
 	return items, nil
 }
 
+const preparedAgentReceiptByKey = `-- name: PreparedAgentReceiptByKey :one
+SELECT r.job_id, r.canonical, r.digest, r.sequence,
+ j.id IS NOT NULL AS job_present, a.job_id IS NOT NULL AS agent_present
+ FROM receipts r LEFT JOIN jobs j ON j.id=r.job_id
+ LEFT JOIN agent_ownership a ON a.job_id=r.job_id WHERE r.key=?
+`
+
+type PreparedAgentReceiptByKeyRow struct {
+	JobID        string
+	Canonical    []byte
+	Digest       string
+	Sequence     int64
+	JobPresent   bool
+	AgentPresent bool
+}
+
+func (q *Queries) PreparedAgentReceiptByKey(ctx context.Context, key string) (PreparedAgentReceiptByKeyRow, error) {
+	row := q.db.QueryRowContext(ctx, preparedAgentReceiptByKey, key)
+	var i PreparedAgentReceiptByKeyRow
+	err := row.Scan(
+		&i.JobID,
+		&i.Canonical,
+		&i.Digest,
+		&i.Sequence,
+		&i.JobPresent,
+		&i.AgentPresent,
+	)
+	return i, err
+}
+
+const queueJobByID = `-- name: QueueJobByID :one
+SELECT j.id, r.sequence, CASE WHEN a.job_id IS NULL THEN 'command' ELSE 'agent' END AS kind,
+ j.state, j.reason, j.outcome, j.exit_code, j.validation, r.accepted_at,
+ coalesce(a.session_id,'') AS session_id, coalesce(a.worktree,'') AS worktree,
+ j.stdout <> '' AS has_stdout, j.stderr <> '' AS has_stderr, coalesce(n.id,'') AS completion_event_id
+ FROM jobs j JOIN receipts r ON j.id=r.job_id LEFT JOIN agent_ownership a ON a.job_id=j.id
+ LEFT JOIN completion_notifications n ON n.job_id=j.id
+ WHERE j.id = ?
+`
+
+type QueueJobByIDRow struct {
+	ID                string
+	Sequence          int64
+	Kind              string
+	State             string
+	Reason            string
+	Outcome           string
+	ExitCode          sql.NullInt64
+	Validation        string
+	AcceptedAt        string
+	SessionID         string
+	Worktree          string
+	HasStdout         bool
+	HasStderr         bool
+	CompletionEventID string
+}
+
+func (q *Queries) QueueJobByID(ctx context.Context, id string) (QueueJobByIDRow, error) {
+	row := q.db.QueryRowContext(ctx, queueJobByID, id)
+	var i QueueJobByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.Sequence,
+		&i.Kind,
+		&i.State,
+		&i.Reason,
+		&i.Outcome,
+		&i.ExitCode,
+		&i.Validation,
+		&i.AcceptedAt,
+		&i.SessionID,
+		&i.Worktree,
+		&i.HasStdout,
+		&i.HasStderr,
+		&i.CompletionEventID,
+	)
+	return i, err
+}
+
+const queueJobsPage = `-- name: QueueJobsPage :many
+SELECT j.id, r.sequence, CASE WHEN a.job_id IS NULL THEN 'command' ELSE 'agent' END AS kind,
+ j.state, j.reason, j.outcome, j.exit_code, j.validation, r.accepted_at,
+ coalesce(a.session_id,'') AS session_id, coalesce(a.worktree,'') AS worktree,
+ j.stdout <> '' AS has_stdout, j.stderr <> '' AS has_stderr, coalesce(n.id,'') AS completion_event_id
+ FROM jobs j JOIN receipts r ON j.id=r.job_id LEFT JOIN agent_ownership a ON a.job_id=j.id
+ LEFT JOIN completion_notifications n ON n.job_id=j.id
+ WHERE r.sequence > ? ORDER BY r.sequence LIMIT ?
+`
+
+type QueueJobsPageParams struct {
+	Sequence int64
+	Limit    int64
+}
+
+type QueueJobsPageRow struct {
+	ID                string
+	Sequence          int64
+	Kind              string
+	State             string
+	Reason            string
+	Outcome           string
+	ExitCode          sql.NullInt64
+	Validation        string
+	AcceptedAt        string
+	SessionID         string
+	Worktree          string
+	HasStdout         bool
+	HasStderr         bool
+	CompletionEventID string
+}
+
+func (q *Queries) QueueJobsPage(ctx context.Context, arg QueueJobsPageParams) ([]QueueJobsPageRow, error) {
+	rows, err := q.db.QueryContext(ctx, queueJobsPage, arg.Sequence, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []QueueJobsPageRow{}
+	for rows.Next() {
+		var i QueueJobsPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Sequence,
+			&i.Kind,
+			&i.State,
+			&i.Reason,
+			&i.Outcome,
+			&i.ExitCode,
+			&i.Validation,
+			&i.AcceptedAt,
+			&i.SessionID,
+			&i.Worktree,
+			&i.HasStdout,
+			&i.HasStderr,
+			&i.CompletionEventID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const queuedHead = `-- name: QueuedHead :one
 SELECT j.id FROM jobs j JOIN receipts r ON j.id = r.job_id
 WHERE j.state = 'queued' ORDER BY r.sequence LIMIT 1
@@ -265,4 +414,20 @@ type ResolveUnknownJobParams struct {
 func (q *Queries) ResolveUnknownJob(ctx context.Context, arg ResolveUnknownJobParams) error {
 	_, err := q.db.ExecContext(ctx, resolveUnknownJob, arg.Evidence, arg.ID)
 	return err
+}
+
+const retainedJobLog = `-- name: RetainedJobLog :one
+SELECT stdout, stderr FROM jobs WHERE id = ?
+`
+
+type RetainedJobLogRow struct {
+	Stdout string
+	Stderr string
+}
+
+func (q *Queries) RetainedJobLog(ctx context.Context, id string) (RetainedJobLogRow, error) {
+	row := q.db.QueryRowContext(ctx, retainedJobLog, id)
+	var i RetainedJobLogRow
+	err := row.Scan(&i.Stdout, &i.Stderr)
+	return i, err
 }

@@ -34,6 +34,10 @@ SELECT m.id,m.sequence,m.key,m.project_id,m.sender,m.recipient,m.lane_id,m.job_i
 SELECT m.id,m.sequence,m.key,m.project_id,m.sender,m.recipient,m.lane_id,m.job_id,m.kind,m.subject,m.body,m.manifest_digest,m.assoc_id,m.fsfork_path,m.reply_to_id,m.created_at,m.read_at,m.archived_at
  FROM project_inbox_messages m WHERE m.project_id=? AND m.id=?;
 
+-- name: ComposeIntegratorSenders :many
+SELECT DISTINCT sender FROM project_inbox_messages
+ WHERE project_id=? AND sender LIKE 'integrator:%' ORDER BY sender;
+
 -- name: InsertInboxMessage :execlastid
 INSERT INTO project_inbox_messages(id,key,project_id,sender,recipient,lane_id,job_id,kind,subject,body,manifest_digest,assoc_id,fsfork_path,reply_to_id,created_at)
  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);

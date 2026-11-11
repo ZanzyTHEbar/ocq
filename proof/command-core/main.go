@@ -411,9 +411,10 @@ func main() {
 	supervision := len(os.Args) > 1 && os.Args[1] == "--supervision"
 	project := len(os.Args) > 1 && os.Args[1] == "--project"
 	projectLegacy := len(os.Args) > 1 && os.Args[1] == "--project-legacy"
-	check((!notifications && !supervision && !project && !projectLegacy && len(os.Args) == 2) || (notifications && len(os.Args) == 5) || (supervision && len(os.Args) == 3) || (project && (len(os.Args) == 3 || len(os.Args) == 5)) || (projectLegacy && len(os.Args) == 5), "usage: ocq-acceptance OCQ | --notifications OCQ LEGACY_SCHEMA1 LEGACY_SCHEMA2 | --supervision OCQ | --project OCQ | --project-legacy OCQ LEGACY_SCHEMA1 LEGACY_SCHEMA2")
+	storage := len(os.Args) > 1 && os.Args[1] == "--storage"
+	check((!notifications && !supervision && !project && !projectLegacy && !storage && len(os.Args) == 2) || (notifications && len(os.Args) == 5) || ((supervision || storage) && len(os.Args) == 3) || (project && (len(os.Args) == 3 || len(os.Args) == 5)) || (projectLegacy && len(os.Args) == 5), "usage: ocq-acceptance OCQ | --storage OCQ | --notifications OCQ LEGACY_SCHEMA1 LEGACY_SCHEMA2 | --supervision OCQ | --project OCQ | --project-legacy OCQ LEGACY_SCHEMA1 LEGACY_SCHEMA2")
 	binArg := os.Args[1]
-	if notifications || supervision || project || projectLegacy {
+	if notifications || supervision || project || projectLegacy || storage {
 		binArg = os.Args[2]
 	}
 	bin, err := filepath.Abs(binArg)
@@ -456,6 +457,9 @@ func main() {
 			}
 		} else {
 			s.run()
+			if storage {
+				s.runStorage()
+			}
 		}
 	}()
 	if err := s.cleanup(); err != nil {
@@ -466,6 +470,9 @@ func main() {
 	}
 	if code == 0 {
 		label := "PASS command-core acceptance"
+		if storage {
+			label = "PASS storage contract and command-core acceptance (no power-loss guarantee)"
+		}
 		if notifications {
 			label = "PASS durable local completion notifications acceptance"
 		}

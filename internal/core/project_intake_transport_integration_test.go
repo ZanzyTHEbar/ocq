@@ -59,6 +59,25 @@ func TestProjectIntakeTransportAndOldDescriptor(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build bridge: %v %s", err, output)
 	}
+	// This real bridge caller speaks the same versioned mutation contract as the
+	// mod. No test bypass: the action process rechecks this image/context itself.
+	handshake := exec.Command(bridge, "compatibility", "sp-transport", root)
+	handshake.Env = append(os.Environ(), "OCQ_STATE_DIR="+state)
+	b, err := handshake.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compat struct {
+		Protocol string            `json:"protocol"`
+		Image    string            `json:"image_sha256"`
+		Context  string            `json:"bridge_context"`
+		Queue    string            `json:"queue_identity"`
+		Actions  map[string]string `json:"actions"`
+	}
+	if err := json.Unmarshal(b, &compat); err != nil {
+		t.Fatal(err)
+	}
+	compatArgs := []string{"--mod-contract", compat.Protocol, "--mod-image", compat.Image, "--mod-context", compat.Context, "--mod-space", "sp-transport", "--mod-folder", root, "--mod-queue", compat.Queue}
 	handoff := []byte(`{"version":1,"kind":"handoff","project_id":"proj-transport","source":"operator_import","observed_at":null,"intent":"fixture","decisions":[],"risks":[]}`)
 	revision := 0
 	repo := filepath.Join(root, "missing-repo")
@@ -71,7 +90,7 @@ func TestProjectIntakeTransportAndOldDescriptor(t *testing.T) {
 
 	start := func(args ...string) (*exec.Cmd, *bytes.Buffer) {
 		t.Helper()
-		cmd := exec.Command(bridge, args...)
+		cmd := exec.Command(bridge, append(append(args, compatArgs...), "--mod-action", compat.Actions[args[0]])...)
 		cmd.Env = append(os.Environ(), "OCQ_STATE_DIR="+state)
 		var output bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &output, &output

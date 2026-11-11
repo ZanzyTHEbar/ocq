@@ -22,9 +22,13 @@ func intakeCommands() []*cobra.Command {
 		}}
 	}
 	return []*cobra.Command{
+		command("intake-implementation-draft LAUNCH", 1, func(a []string) (any, error) { return core.DraftLocalProjectImplementation(state(), a[0]) }),
+		command("intake-review-draft LAUNCH", 1, func(a []string) (any, error) { return core.DraftLocalProjectReview(state(), a[0]) }),
+		command("intake-registration-draft LAUNCH", 1, func(a []string) (any, error) { return core.DraftLocalProjectRegistration(state(), a[0]) }),
 		command("intake-receive KIND LAUNCH", 2, func(a []string) (any, error) { return core.ReceiveLocalProjectIntake(state(), a[0], a[1]) }),
 		command("intake-receive-text KIND LAUNCH", 2, func(a []string) (any, error) { return core.ReceiveLocalProjectIntakeText(state(), a[0], a[1]) }),
 		command("intake-preview ID LAUNCH", 2, func(a []string) (any, error) { return core.PreviewLocalProjectIntake(state(), a[0], a[1]) }),
+		command("intake-review-preview ID LAUNCH", 2, func(a []string) (any, error) { return core.ReviewLocalProjectIntake(state(), a[0], a[1]) }),
 		command("intake-rendezvous LAUNCH", 1, func(a []string) (any, error) { return core.LocalProjectIntakeRendezvous(state(), a[0]) }),
 		command("intake-status", 0, func(_ []string) (any, error) { return core.LocalProjectIntakeStatus(state()) }),
 		command("intake-arm ID", 1, func(a []string) (any, error) { return core.ArmLocalProjectIntake(state(), a[0]) }),

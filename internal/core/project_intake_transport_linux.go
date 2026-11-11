@@ -123,6 +123,17 @@ func receiveLocalProjectIntake(stateDir, kind, launch string, textFrame bool) (P
 // length and exact retained bytes to one authenticated peer. It supports
 // recovery in every valid retained state and never dispatches.
 func PreviewLocalProjectIntake(stateDir, id, launch string) (ProjectIntakeStatus, error) {
+	return previewLocalProjectIntake(stateDir, id, launch, false)
+}
+
+// ReviewLocalProjectIntake adds exact parser-selected embedded bytes/digests to
+// the private preview. The original raw protocol and all mutation routes stay
+// unchanged. The larger bounded frame accounts for escaped duplicate bytes.
+func ReviewLocalProjectIntake(stateDir, id, launch string) (ProjectIntakeStatus, error) {
+	return previewLocalProjectIntake(stateDir, id, launch, true)
+}
+
+func previewLocalProjectIntake(stateDir, id, launch string, review bool) (ProjectIntakeStatus, error) {
 	if !isValidHexLen(id, 64) || !isValidHexLen(launch, 64) {
 		return ProjectIntakeStatus{}, faults.New(faults.CodeValidationFailed, "invalid intake preview identifier")
 	}
@@ -148,11 +159,19 @@ func PreviewLocalProjectIntake(stateDir, id, launch string) (ProjectIntakeStatus
 		if r.Kind == "submission" {
 			header[0] = 'S'
 		}
-		binary.BigEndian.PutUint32(header[1:], uint32(len(r.Request)))
+		payload := r.Request
+		if review {
+			var err error
+			payload, err = projectIntakeReview(r.Kind, r.Request)
+			if err != nil || len(payload) > 8*composeLimit {
+				return faults.New(faults.CodeValidationFailed, "private intake review unavailable")
+			}
+		}
+		binary.BigEndian.PutUint32(header[1:], uint32(len(payload)))
 		if _, err := conn.Write(header[:]); err != nil {
 			return faults.New(faults.CodeRuntimeFailed, "intake preview connection failed")
 		}
-		if _, err := conn.Write(r.Request); err != nil {
+		if _, err := conn.Write(payload); err != nil {
 			return faults.New(faults.CodeRuntimeFailed, "intake preview connection failed")
 		}
 		return nil

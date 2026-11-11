@@ -13,6 +13,21 @@ import (
 func composeCommands() []*cobra.Command {
 	return []*cobra.Command{
 		{
+			Use: "compose-context PROJECT LANE MANIFEST REPLY", Args: cobra.ExactArgs(4),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				reader, err := core.OpenReader(os.Getenv("OCQ_STATE_DIR"))
+				if err != nil {
+					return err
+				}
+				defer reader.Close()
+				context, err := reader.ComposeContext(args[0], args[1], args[2], args[3])
+				if err != nil {
+					return err
+				}
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(context)
+			},
+		},
+		{
 			Use: "compose-receive LAUNCH", Args: cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				status, err := core.ReceiveLocalComposeIntent(os.Getenv("OCQ_STATE_DIR"), args[0])

@@ -44,6 +44,21 @@ func gitExecRaw(dir string, args ...string) ([]byte, error) {
 	return b, nil
 }
 
+// Disabling diff's index refresh preserves the index, but --exit-code is also
+// needed to filter stat-only changes from raw/name-status output. Exit 1 means
+// actual differences, not a failed inspection. Capture keeps gitExecRaw as-is.
+func gitVerifyDiff(dir string, args ...string) ([]byte, error) {
+	fullArgs := append([]string{"--no-optional-locks", "-c", "core.quotepath=false", "-c", "diff.autoRefreshIndex=false", "diff", "--exit-code"}, args...)
+	c := exec.Command("git", fullArgs...)
+	c.Dir = dir
+	b, err := c.Output()
+	var exit *exec.ExitError
+	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
+		return nil, diagnosticWrap(faults.CodeRuntimeFailed, fmt.Sprintf("git diff %v failed", args), err)
+	}
+	return b, nil
+}
+
 func computeChangedFilesDigest(files []ManifestChangedFile) string {
 	h := sha256.New()
 	for _, f := range files {
@@ -337,6 +352,27 @@ func (q *Queue) CaptureResult(in CaptureRequest) (_ ProjectResultAssociation, re
 }
 
 func (s *store) captureResult(in CaptureRequest, committed *ProjectResultAssociation) error {
+	p, err := s.prepareCapture(in)
+	if err != nil {
+		return err
+	}
+	return s.publishCapture(p, committed, nil, false, true)
+}
+
+// Only the cooperative reader and its private retained capture journal construct
+// this value. Imported manifests never enter machine-capture publication.
+type preparedCapture struct {
+	manifest   ResultManifest
+	supersedes string
+}
+
+func (s *store) prepareCapture(in CaptureRequest) (preparedCapture, error) {
+	var prepared preparedCapture
+	err := s.readCapture(in, &prepared)
+	return prepared, err
+}
+
+func (s *store) readCapture(in CaptureRequest, prepared *preparedCapture) error {
 	projectID, jobID, supersedesID := in.ProjectID, in.JobID, in.Supersedes
 	worktreeFlag, ignoredExclusions := in.Worktree, in.IgnoredExclusions
 	for _, exclusion := range ignoredExclusions {
@@ -443,12 +479,59 @@ func (s *store) captureResult(in CaptureRequest, committed *ProjectResultAssocia
 		exclusions = []string{}
 	}
 
+	ts := now()
+	candidate := ResultManifest{
+		Version:             1,
+		Kind:                "result",
+		ProjectID:           projectID,
+		Source:              "machine_capture",
+		ObservedAt:          &ts,
+		ClaimLabel:          "machine_verified_snapshot",
+		JobID:               jobID,
+		RequestDigest:       receiptDigest,
+		Base:                agentReq.Base,
+		Worktree:            targetWorktree,
+		StagedStatus:        snap1.stagedStatus,
+		UntrackedPaths:      snap1.untrackedPaths,
+		UnstagedStatus:      snap1.unstagedStatus,
+		BeforeStatusDigest:  snap1.statusDigest,
+		AfterStatusDigest:   snap2.statusDigest,
+		BeforeContentDigest: snap1.contentDigest,
+		AfterContentDigest:  snap2.contentDigest,
+		IgnoredExclusions:   exclusions,
+		ChangedFiles:        snap1.changedFiles,
+		Diff:                snap1.diff,
+		InlineOutput:        inlineOutput,
+		EvidenceDigests:     evidenceDigests,
+		ClaimedValidation: ClaimedValidation{
+			Status:      "not_run",
+			Commands:    []string{},
+			Results:     "not_run",
+			Provenance:  "not_recorded",
+			Limitations: "machine snapshot capture verifies worktree file state only, not test execution",
+		},
+	}
+	prepared.manifest, prepared.supersedes = candidate, supersedesID
+	return nil
+}
+
+// Publication of a prepared capture never reads the filesystem. With reuse=true
+// the existing CLI retains its snapshot-equivalence idempotency. Retained UI
+// snapshots use reuse=false: observed_at and every reviewed byte stay exact.
+func (s *store) publishCapture(p preparedCapture, committed *ProjectResultAssociation, check func(sqlQueryer) error, preview, reuse bool) error {
+	candidate, supersedesID := p.manifest, p.supersedes
+	projectID, jobID, targetWorktree, receiptDigest := candidate.ProjectID, candidate.JobID, candidate.Worktree, candidate.RequestDigest
+	ctx := context.Background()
 	var supersedesPtr *string
 	if supersedesID != "" {
 		supersedesPtr = &supersedesID
 	}
-
-	err = s.write(func(c *sql.Conn) error {
+	run := func(c sqlQueryer) error {
+		if check != nil {
+			if err := check(c); err != nil {
+				return err
+			}
+		}
 		queries := dbquery.New(c)
 		metadata, err := queries.CaptureJobMetadata(ctx, jobID)
 		if err != nil {
@@ -460,9 +543,8 @@ func (s *store) captureResult(in CaptureRequest, committed *ProjectResultAssocia
 		if metadata.Worktree != "" && metadata.Worktree != targetWorktree {
 			return faults.New(faults.CodeInvariantFailed, fmt.Sprintf("stored job worktree %q does not match capture worktree %q", metadata.Worktree, targetWorktree))
 		}
-
 		if supersedesID != "" {
-			sup, err := dbquery.New(c).AssociationIdentity(ctx, supersedesID)
+			sup, err := queries.AssociationIdentity(ctx, supersedesID)
 			if errors.Is(err, sql.ErrNoRows) {
 				return faults.Wrap(faults.CodeNotFound, fmt.Sprintf("supersedes association %s does not exist", supersedesID), err)
 			}
@@ -473,54 +555,23 @@ func (s *store) captureResult(in CaptureRequest, committed *ProjectResultAssocia
 				return faults.New(faults.CodeValidationFailed, fmt.Sprintf("supersedes association %s must belong to same project %s, job %s, and kind result", supersedesID, projectID, jobID))
 			}
 		}
-
 		ts := now()
-		candidate := ResultManifest{
-			Version:             1,
-			Kind:                "result",
-			ProjectID:           projectID,
-			Source:              "machine_capture",
-			ObservedAt:          &ts,
-			ClaimLabel:          "machine_verified_snapshot",
-			JobID:               jobID,
-			RequestDigest:       receiptDigest,
-			Base:                agentReq.Base,
-			Worktree:            targetWorktree,
-			StagedStatus:        snap1.stagedStatus,
-			UntrackedPaths:      snap1.untrackedPaths,
-			UnstagedStatus:      snap1.unstagedStatus,
-			BeforeStatusDigest:  snap1.statusDigest,
-			AfterStatusDigest:   snap2.statusDigest,
-			BeforeContentDigest: snap1.contentDigest,
-			AfterContentDigest:  snap2.contentDigest,
-			IgnoredExclusions:   exclusions,
-			ChangedFiles:        snap1.changedFiles,
-			Diff:                snap1.diff,
-			InlineOutput:        inlineOutput,
-			EvidenceDigests:     evidenceDigests,
-			ClaimedValidation: ClaimedValidation{
-				Status:      "not_run",
-				Commands:    []string{},
-				Results:     "not_run",
-				Provenance:  "not_recorded",
-				Limitations: "machine snapshot capture verifies worktree file state only, not test execution",
-			},
-		}
-
 		// Check if an existing result association for (project_id, job_id) with matching supersedes_id
 		// already captured this exact quiescent snapshot (allowing idempotent retry across CLI invocations).
-		rows, err := queries.CapturedAssociations(ctx, dbquery.CapturedAssociationsParams{ProjectID: projectID, JobID: jobID})
-		if err != nil {
-			return classifyDiagnostic(faults.CodeDatabaseRead, err)
-		}
-		for _, row := range rows {
-			if !nullStringEqual(row.SupersedesID, supersedesPtr) {
-				continue
+		if reuse {
+			rows, err := queries.CapturedAssociations(ctx, dbquery.CapturedAssociationsParams{ProjectID: projectID, JobID: jobID})
+			if err != nil {
+				return classifyDiagnostic(faults.CodeDatabaseRead, err)
 			}
-			if exPM, err := parseManifestBytes(row.Canonical, "result", projectID); err == nil && exPM.Result != nil && exPM.Source == "machine_capture" {
-				if sameResultSnapshotIgnoringObservedAt(*exPM.Result, candidate) {
-					*committed = summarizeAssociation(row.ID, row.Sequence, projectID, jobID, "result", row.ManifestDigest, supersedesPtr, row.RecordedAt, &exPM, true)
-					return sealLaneAndDeliverMail(ctx, c, exPM, projectID, jobID, row.ID, targetWorktree, row.RecordedAt)
+			for _, row := range rows {
+				if !nullStringEqual(row.SupersedesID, supersedesPtr) {
+					continue
+				}
+				if exPM, err := parseManifestBytes(row.Canonical, "result", projectID); err == nil && exPM.Result != nil && exPM.Source == "machine_capture" {
+					if sameResultSnapshotIgnoringObservedAt(*exPM.Result, candidate) {
+						*committed = summarizeAssociation(row.ID, row.Sequence, projectID, jobID, "result", row.ManifestDigest, supersedesPtr, row.RecordedAt, &exPM, true)
+						return sealLaneAndDeliverMail(ctx, c.(*sql.Conn), exPM, projectID, jobID, row.ID, targetWorktree, row.RecordedAt)
+					}
 				}
 			}
 		}
@@ -548,13 +599,20 @@ func (s *store) captureResult(in CaptureRequest, committed *ProjectResultAssocia
 				return faults.New(faults.CodeValidationFailed, fmt.Sprintf("result association for project %s job %s kind result manifest %s already exists with conflicting supersedes linkage", projectID, jobID, m.Digest))
 			}
 			*committed = summarizeAssociation(existing.ID, existing.Sequence, projectID, jobID, m.Kind, m.Digest, supersedesPtr, existing.RecordedAt, &m, true)
-			return sealLaneAndDeliverMail(ctx, c, m, projectID, jobID, existing.ID, targetWorktree, existing.RecordedAt)
+			if preview {
+				return nil
+			}
+			return sealLaneAndDeliverMail(ctx, c.(*sql.Conn), m, projectID, jobID, existing.ID, targetWorktree, existing.RecordedAt)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return classifyDiagnostic(faults.CodeDatabaseRead, err)
 		}
 
-		if err := insertManifestConn(ctx, c, m, ts); err != nil {
+		if preview {
+			*committed = summarizeAssociation(assocID, 0, projectID, jobID, m.Kind, m.Digest, supersedesPtr, "", &m, true)
+			return nil
+		}
+		if err := insertManifestConn(ctx, c.(*sql.Conn), m, ts); err != nil {
 			return err
 		}
 		seq, err := queries.InsertAssociation(ctx, dbquery.InsertAssociationParams{ID: assocID, ProjectID: projectID, JobID: jobID, Kind: m.Kind, ManifestDigest: m.Digest, SupersedesID: sqlStringPtr(supersedesPtr), RecordedAt: ts})
@@ -562,8 +620,14 @@ func (s *store) captureResult(in CaptureRequest, committed *ProjectResultAssocia
 			return err
 		}
 		*committed = summarizeAssociation(assocID, seq, projectID, jobID, m.Kind, m.Digest, supersedesPtr, ts, &m, true)
-		return sealLaneAndDeliverMail(ctx, c, m, projectID, jobID, assocID, targetWorktree, ts)
-	})
+		return sealLaneAndDeliverMail(ctx, c.(*sql.Conn), m, projectID, jobID, assocID, targetWorktree, ts)
+	}
+	var err error
+	if preview {
+		err = s.readSchema5(run)
+	} else {
+		err = s.write(func(c *sql.Conn) error { return run(c) })
+	}
 	if err != nil {
 		return classifyDiagnostic(faults.CodeDatabaseWrite, err)
 	}
@@ -720,13 +784,17 @@ func compareLiveWorktreeToSnapshot(worktree string, res ResultManifest) (string,
 		return "worktree_unavailable", []string{err.Error()}
 	}
 
-	statusBytes, err := gitExecRaw(worktree, "status", "--porcelain=v1", "-uall")
+	// Verification is observational: even a stat-cache refresh must not write
+	// the index. Keep this scoped here; capture retains its existing semantics.
+	// diff's auto-refresh also needs disabling; optional-lock suppression alone
+	// does not prevent that refresh on supported Git versions.
+	statusBytes, err := gitExecRaw(worktree, "--no-optional-locks", "status", "--porcelain=v1", "-uall")
 	if err != nil {
 		return "worktree_unavailable", []string{err.Error()}
 	}
 	liveStatusDigest := sha256Hex(statusBytes)
 
-	stagedBytes, err := gitExecRaw(worktree, "diff", "--cached", "--name-status")
+	stagedBytes, err := gitVerifyDiff(worktree, "--cached", "--name-status")
 	if err != nil {
 		return "worktree_unavailable", []string{err.Error()}
 	}
@@ -735,7 +803,7 @@ func compareLiveWorktreeToSnapshot(worktree string, res ResultManifest) (string,
 		liveStagedStatus = "clean"
 	}
 
-	unstagedBytes, err := gitExecRaw(worktree, "diff", "--name-status")
+	unstagedBytes, err := gitVerifyDiff(worktree, "--name-status")
 	if err != nil {
 		return "worktree_unavailable", []string{err.Error()}
 	}
@@ -744,7 +812,7 @@ func compareLiveWorktreeToSnapshot(worktree string, res ResultManifest) (string,
 		liveUnstagedStatus = "clean"
 	}
 
-	untrackedBytes, err := gitExecRaw(worktree, "ls-files", "--others", "--exclude-standard")
+	untrackedBytes, err := gitExecRaw(worktree, "--no-optional-locks", "ls-files", "--others", "--exclude-standard")
 	if err != nil {
 		return "worktree_unavailable", []string{err.Error()}
 	}
@@ -761,7 +829,7 @@ func compareLiveWorktreeToSnapshot(worktree string, res ResultManifest) (string,
 	}
 	sort.Strings(liveUntracked)
 
-	rawDiffBytes, err := gitExecRaw(worktree, "diff", "--raw", "--no-renames", "--no-abbrev", res.Base, "--")
+	rawDiffBytes, err := gitVerifyDiff(worktree, "--raw", "--no-renames", "--no-abbrev", res.Base, "--")
 	if err != nil {
 		return "worktree_unavailable", []string{err.Error()}
 	}

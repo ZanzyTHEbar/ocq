@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/ZanzyTHEbar/faults-go"
 
@@ -50,19 +51,46 @@ func (s *store) notifications(limit int) ([]Notification, error) {
 }
 
 func (s *store) acknowledge(id string) (Notification, error) {
+	return s.acknowledgeChecked(id, nil)
+}
+
+// Both the CLI and the existing-store bridge writer use this same monotone SQL.
+// The bridge additionally verifies its exact retained observation in the write.
+func (s *store) acknowledgeChecked(id string, check func(Notification) error) (Notification, error) {
+	if id == "" {
+		return Notification{}, faults.New(faults.CodeValidationFailed, "ack requires one exact notification event ID")
+	}
+	var committed Notification
 	err := s.write(func(c *sql.Conn) error {
-		count, err := dbquery.New(c).AcknowledgeNotification(context.Background(), id)
+		queries := dbquery.New(c)
+		if check != nil {
+			row, err := queries.NotificationByID(context.Background(), id)
+			if errors.Is(err, sql.ErrNoRows) {
+				return faults.New(faults.CodeNotFound, "notification not found; use its exact event ID, not a job ID")
+			}
+			if err != nil {
+				return classifyDiagnostic(faults.CodeDatabaseRead, err)
+			}
+			if err := check(notificationFromRow(row)); err != nil {
+				return err
+			}
+		}
+		count, err := queries.AcknowledgeNotification(context.Background(), id)
 		if err != nil {
 			return classifyDiagnostic(faults.CodeDatabaseWrite, err)
 		}
 		if count != 1 {
 			return faults.New(faults.CodeNotFound, "notification not found; use its exact event ID, not a job ID")
 		}
+		row, err := queries.NotificationByID(context.Background(), id)
+		if err != nil {
+			return classifyDiagnostic(faults.CodeDatabaseRead, err)
+		}
+		committed = notificationFromRow(row)
 		return nil
 	})
 	if err != nil {
 		return Notification{}, err
 	}
-	row, err := dbquery.New(s.db).NotificationByID(context.Background(), id)
-	return notificationFromRow(row), classifyDiagnostic(faults.CodeDatabaseRead, err)
+	return committed, nil
 }

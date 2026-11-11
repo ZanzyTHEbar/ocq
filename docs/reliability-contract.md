@@ -1,67 +1,63 @@
-# Required reliability contract
+# Reliability contract
 
-These are acceptance requirements, not implemented guarantees. The proof-of-fit
-must establish them before live coding-agent jobs are entrusted to ocq.
+These rules describe OCQ's acceptance, ownership and recovery behavior. They do
+not promise sandboxing, validated deliverables or exactly-once external effects.
 
-## Submission and admission
+## Acceptance and ordering
 
-- Persist acceptance durably before returning a job ID as acknowledgment.
-- Accept a caller-provided idempotency key. A retry after a lost acknowledgment
-  must recover the same accepted job rather than enqueue duplicate work. Reject
-  reuse of a key for a different request. The durable job/key association must
-  survive restart; document its retention boundary.
-- Establish a durable submission order. Initial admission is strict FIFO:
-  a resource-blocked head job blocks later jobs, even if they would fit. Do not
-  silently skip the head for throughput. Concurrent completions are unordered.
-- Recover accepted jobs after service restart without silently losing them or
-  launching a second execution. Reconcile uncertain running jobs before acting.
-  [Command-only systemd supervision](supervision.md) is now proven on harmless
-  transient fixtures: dispatcher restart retains unknown ownership/capacity and
-  never retries execution. Graceful drain and forced unit cleanup are distinct
-  from successful job completion. This is not unattended agent deployment.
+- Acknowledgement follows durable receipt/job acceptance in SQLite.
+- Idempotency keys bind immutable requests. Matching retries recover the original
+  acceptance; changed requests under the same key fail. Receipts are retained;
+  there is no deletion command.
+- Admission is strict FIFO. A resource-blocked head job blocks later work, even
+  when later work would fit. Concurrent completion order is unspecified.
+- Memory declarations and concurrency slots control admission, not resource usage.
 
-## Execution and ownership
+## Ownership
 
-- Record exact job, session, and worktree identities before relying on them for
-  recovery or cleanup. Give each job one writable worktree and an unshared
-  OpenCode session. Do not infer ownership from names or the current directory.
-- Workmux owns worktrees; OpenCode owns execution and permissions. Worktree
-  separation does not imply OS isolation or per-job resource containment.
-- A denied or pending permission is visible as blocked/denied, not success.
-  Recovery must preserve that distinction and must not bypass permissions.
-- Do not blindly retry execution with ambiguous side effects after disconnect,
-  timeout, cancellation, or crash. Persist uncertainty and require reconciliation
-  or an explicit operator decision. Retrying an idempotent submission is not
-  permission to retry its execution.
-- Cancellation requests are not proof that tools stopped. Establish the actual
-  execution state before releasing ownership, cleaning up, or rerunning work.
+- Launch intent is durable before a process or external mutation starts. SQLite
+  cannot atomically spawn a process or commit an OpenCode request.
+- Unresolved launching/running work becomes unknown after dispatcher restart.
+  Unknown work keeps capacity and is not automatically retried.
+- Exact process, session, worktree and prompt identities are used for recovery.
+  Names, a closed client or an inactive UI are not ownership evidence.
+- Only queued work can be cancelled. A cancellation request is not evidence that
+  already-running tools stopped.
+- OpenCode owns agent permissions. OCQ does not answer them or treat a pending
+  request as successful completion.
 
-## Outcomes and recovery
+## Outcomes and evidence
 
-- Persist lifecycle state, terminal outcomes, and durable output references so
-  they remain discoverable after process restart or client disconnect. Expose
-  missing output explicitly rather than presenting a broken reference as success.
-- Store validation status and evidence separately from process exit status.
-  Exit zero alone does not establish a validated change; missing validation,
-  permission blocks, and ambiguous outcomes must remain visible.
-- For the experimental agent adapter, use the local single-user, dedicated-
-  session completion policy in [agent integration](agent-integration.md): one
-  exact supplied prompt consumed once in full ordered history, explicit terminal
-  outcome, stable profile/transcript, no active loop or pending input/permissions/
-  forms. Record system/synthetic context without asserting its producer or causal
-  ownership. Additional user/command/shell execution inputs and profile changes
-  remain unknown. Known foreground tools require terminal completed/error states;
-  running/streaming/unsupported tools hold capacity. Runtime-tracked background
-  shells require exact ID/session/location-bound exit observations and before/
-  final resource checks; an outer tool's return is insufficient. Missing resources
-  stay unknown. Idle/CLI exit alone is insufficient. This is a cooperative local
-  scope, not malicious same-user API defense or escaped-daemon detection.
-- Make notification delivery recoverable from durable state, with retriable
-  delivery and stable job identity for duplicate handling. A lost notification
-  must not erase an outcome or require executing the job again.
-  The first implemented interface is [local CLI pull/ack](notifications.md): one
-  frozen completion event per job, atomic with terminal transition, redelivered
-  until explicitly acknowledged. Proactive chat/network delivery is not provided.
+- Output availability, execution outcome and validation are separate. Missing
+  output is an error, not an empty successful log. Exit zero and
+  `agent_succeeded` do not establish validated changes.
+- Agent completion requires the [dedicated-session and tool/resource checks](agent-integration.md#completion).
+  Unsupported or missing resource observations retain unknown ownership.
+- Stored views do not reconcile execution. Read timestamps identify database
+  reads, not the freshness of every fact displayed. Herdr request reasons have no
+  observation timestamp and do not distinguish permission from form.
+- Imported result claims remain claims. Cooperative capture verifies a snapshot,
+  not test execution or ignored/external inputs. Review approval does not authorize
+  Git integration.
 
-Resource admission must also honor the memory floor, heavy-phase separation,
-and non-deadlocking token policy in [architecture](architecture.md).
+## Recovery and delivery
+
+- Inspect uncertain effects before explicit reconciliation; never infer permission
+  to retry from a missing response or receipt.
+- Command resolution requires stopped dispatch, exact liveness checks and recorded
+  evidence. It records an operator assertion and may release eligible unknown
+  capacity, not certify execution success or test validation. The panel's local
+  resolution requires retained review/confirmation and exact evidence/job/event
+  read-back; uncertain attempts are never automatically retried.
+  Agent reconciliation is lock-exclusive and API-only; it never resumes,
+  prompts, replies to permissions or cancels tools.
+- Completion events commit atomically with terminal transitions. They are frozen
+  first-terminal observations and remain available after acknowledgement.
+- Pull/ack never releases capacity or retries execution. Consumers must deduplicate
+  external handling by stable event ID; OCQ cannot make consumer effects exactly once.
+
+Storage must honor the [single-host locking, WAL/shared-memory, sync and retention
+contract](storage.md). VM/container lifetime and volume lifetime are independent;
+successful syscalls or filesystem names do not prove persistence. Ephemeral state
+cannot retain receipts or unknown ownership beyond its lifetime. No power-loss,
+hostile-process containment or unattended-agent deployment guarantee is implied.
