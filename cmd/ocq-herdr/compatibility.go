@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -50,6 +51,8 @@ func modActions() map[string]string {
 // none authorizes a claim, dispatch, acknowledgement or native launch.
 func modRead(action string) bool {
 	switch action {
+	case "view-snapshot", "watch-wait":
+		return true
 	case "compatibility", "projects", "board", "job", "recent-inbox", "inbox", "mail", "recent-results", "results", "manifest", "verify-worktree", "queue-jobs", "queue-job", "queue-log", "notifications", "notification", "agent-handoff-status", "agent-handoff-verify":
 		return true
 	}
@@ -61,19 +64,26 @@ func modRead(action string) bool {
 }
 
 type modCompatibility struct {
-	Protocol string            `json:"protocol"`
-	Claims   string            `json:"journal_claims"`
-	Actions  map[string]string `json:"actions"`
-	Build    string            `json:"build_kind"`
-	Image    string            `json:"image_sha256"`
-	Context  string            `json:"bridge_context"`
-	Queue    string            `json:"queue_identity"`
-	Space    string            `json:"space_id"`
-	Folder   string            `json:"folder"`
+	Protocol                string            `json:"protocol"`
+	Claims                  string            `json:"journal_claims"`
+	Actions                 map[string]string `json:"actions"`
+	Build                   string            `json:"build_kind"`
+	Image                   string            `json:"image_sha256"`
+	Context                 string            `json:"bridge_context"`
+	Queue                   string            `json:"queue_identity"`
+	Space                   string            `json:"space_id"`
+	Folder                  string            `json:"folder"`
+	ObservationContext      string            `json:"observation_context"`
+	ObservationStoreContext string            `json:"observation_store_context"`
+	ObservationSchema       int               `json:"observation_schema"`
 }
 
 func compatHash(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 func compatibility(space, folder string) (modCompatibility, error) {
+	return compatibilityContext(context.Background(), space, folder)
+}
+
+func compatibilityContext(ctx context.Context, space, folder string) (modCompatibility, error) {
 	out := modCompatibility{Protocol: modProtocol, Claims: modClaims, Actions: modActions(), Build: "local-development", Space: space, Folder: folder}
 	if !strings.HasPrefix(space, "sp") || len(space) <= 2 || len(space) > 128 || !utf8.ValidString(space) || strings.ContainsAny(space, "/\\ \t\r\n\x00") || !filepath.IsAbs(folder) || len(folder) > 4096 || !utf8.ValidString(folder) || strings.ContainsAny(folder, "\r\n\x00") {
 		return out, errors.New("invalid compatibility location")
@@ -84,6 +94,24 @@ func compatibility(space, folder string) (modCompatibility, error) {
 		return out, e
 	}
 	defer f.Close()
+	executableInfo, e := f.Stat()
+	if e != nil {
+		return out, e
+	}
+	executableStat, ok := executableInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return out, errors.New("bridge executable identity unavailable")
+	}
+	executablePath, e := os.Executable()
+	if e != nil {
+		return out, e
+	}
+	var pathDevice, pathInode uint64
+	if current, e := os.Stat(executablePath); e == nil {
+		if st, ok := current.Sys().(*syscall.Stat_t); ok {
+			pathDevice, pathInode = uint64(st.Dev), st.Ino
+		}
+	}
 	h := sha256.New()
 	n, e := io.Copy(h, io.LimitReader(f, 128<<20+1))
 	if e != nil || n > 128<<20 {
@@ -94,21 +122,14 @@ func compatibility(space, folder string) (modCompatibility, error) {
 	if e != nil {
 		return out, e
 	}
-	var device, inode uint64
-	if r, e := core.OpenReader(dir); e == nil {
-		dir = r.StateDirectory()
-		s, err := r.CommandSubmissionContext(space)
-		closeErr := r.Close()
-		if err == nil && closeErr == nil {
-			out.Queue = s.Queue
-		}
-		if st, err := os.Stat(filepath.Join(dir, "queue.db")); err == nil {
-			s := st.Sys().(*syscall.Stat_t)
-			device, inode = uint64(s.Dev), s.Ino
-		}
+	head, e := core.ObserveHead(ctx, dir)
+	if e != nil {
+		return out, e
 	}
-	b, _ := json.Marshal([]any{dir, device, inode, out.Queue, os.Getuid()})
-	out.Context = compatHash(b)
+	out.Queue, out.Context = head.QueueIdentity, head.BaseContext
+	out.ObservationStoreContext, out.ObservationSchema = head.StoreContext, head.Schema
+	b, _ := json.Marshal([]any{core.ObservationProtocol, out.Image, uint64(executableStat.Dev), executableStat.Ino, executablePath, pathDevice, pathInode, head.StoreContext, space, folder})
+	out.ObservationContext = compatHash(b)
 	return out, nil
 }
 
@@ -151,6 +172,7 @@ func existingBridgeStateDir() (string, error) {
 }
 
 func installCompatibility(root *cobra.Command) {
+	root.AddCommand(observationCommands()...)
 	var protocol, image, context, space, folder, queue, semantics string
 	root.PersistentFlags().StringVar(&protocol, "mod-contract", "", "Matched mod protocol (required for mutations)")
 	root.PersistentFlags().StringVar(&image, "mod-image", "", "Exact handshake bridge image")

@@ -32,11 +32,13 @@ completion events also commit together. External processes and APIs are outside
 SQLite transactions: durable mutation intent precedes launch, and ambiguous
 responses preserve unknown ownership rather than replaying effects.
 
-Current schema **5** includes agent ownership, completion notifications, projects,
-lanes and inbox mail. Migration is additive and transactional with dispatch
-stopped; immutable request bytes and receipts are preserved. Project projection
-reads use non-initializing read-only connections and require existing schema-5
-state. They do not create or migrate a queue.
+Current schema **6** includes agent ownership, completion notifications, projects,
+lanes, inbox mail and a committed observation revision. Migration is additive and
+transactional with dispatch stopped; immutable request bytes and receipts are
+preserved. Project projection reads use non-initializing read-only connections
+and support existing schema-5 or schema-6 state. Automatic observation requires 6;
+neither read path creates or migrates a queue. See the
+[coordinated upgrade sequence](command-core.md#state-and-upgrades).
 
 ## Admission
 

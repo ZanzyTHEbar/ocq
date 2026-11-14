@@ -40,6 +40,13 @@ type CompletionNotification struct {
 	AcknowledgedAt sql.NullString
 }
 
+type GooseDbVersion struct {
+	ID        int64
+	VersionID int64
+	IsApplied bool
+	Tstamp    sql.NullTime
+}
+
 type Job struct {
 	ID         string
 	State      string
@@ -53,6 +60,11 @@ type Job struct {
 	Outcome    string
 	Validation string
 	Evidence   string
+}
+
+type ObservationRevision struct {
+	Singleton int64
+	Revision  int64
 }
 
 type Project struct {
@@ -165,4 +177,12 @@ type Receipt struct {
 	Canonical  []byte
 	Digest     string
 	AcceptedAt string
+}
+
+type SqliteMaster struct {
+	Type     string
+	Name     string
+	TblName  string
+	Rootpage sql.NullInt64
+	Sql      sql.NullString
 }

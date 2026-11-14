@@ -39,7 +39,11 @@ func (s *store) projectShowData(projectID string) (_ ProjectShowOutput, resultEr
 		return out, err
 	}
 	defer tx.Rollback()
+	return s.projectShowQuery(ctx, tx, projectID)
+}
 
+func (s *store) projectShowQuery(ctx context.Context, tx sqlQueryer, projectID string) (ProjectShowOutput, error) {
+	var out ProjectShowOutput
 	details, err := dbquery.New(tx).ProjectDetails(ctx, projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, faults.Wrap(faults.CodeNotFound, fmt.Sprintf("project %s does not exist", projectID), err)
@@ -196,7 +200,11 @@ func (s *store) projectJobData(projectID, jobID string) (_ ProjectJobDetailOutpu
 		return out, err
 	}
 	defer tx.Rollback()
+	return s.projectJobQuery(ctx, tx, projectID, jobID)
+}
 
+func (s *store) projectJobQuery(ctx context.Context, tx sqlQueryer, projectID, jobID string) (ProjectJobDetailOutput, error) {
+	var out ProjectJobDetailOutput
 	projectJob, err := dbquery.New(tx).ProjectJobByID(ctx, dbquery.ProjectJobByIDParams{ProjectID: projectID, JobID: jobID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, faults.Wrap(faults.CodeNotFound, fmt.Sprintf("job %s is not attributed to project %s", jobID, projectID), err)

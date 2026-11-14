@@ -35,7 +35,10 @@ export class AgentReconciliation {
     if (r.code !== 0) throw new Error("Reconciliation operation or journal unavailable");
     return this.validate(JSON.parse(r.stdout), t);
   }
-  apply(out) { this.status = out; if (out.current) this.detail.data = { ...this.detail.data, job: out.current.job }; }
+  apply(out, owner, cx) {
+    this.status = out;
+    if (out.current) this.view.noteHelperObservation(owner, this.generation, this.detail, out.current, cx);
+  }
   action(owner, action, cx) {
     const t = this.t, before = this.status?.current?.snapshot_sha256;
     if (this.working || !this.current(owner, t)) return;
@@ -47,7 +50,7 @@ export class AgentReconciliation {
         if (!this.current(owner, t)) return;
         const out = await this.call(action === "review" ? "status" : action, t, action === "prepare" ? [before] : []);
         if (!this.current(owner, t)) return;
-        this.apply(out); this.confirm = action !== "status" && out.state === "prepared";
+        this.apply(out, owner, cx); this.confirm = action !== "status" && out.state === "prepared";
         if (this.confirm) owner.handle.focus();
       } catch (_e) { if (this.current(owner, t)) { this.status = null; this.error = "Operation outcome unavailable. Check stored operation receipt only; never implicitly retry reconciliation."; } }
       finally { this.working = false; if (this.current(owner, t)) cx.notify(); }
@@ -69,7 +72,7 @@ export class AgentReconciliation {
       } catch (_e) { if (this.current(owner, t)) this.error = "Claim or observation response unavailable. Checking stored receipt only; never resend."; }
       finally {
         if (this.current(owner, t)) {
-          try { const out = await this.call("status", t); if (this.current(owner, t)) { this.apply(out); this.error = null; } }
+          try { const out = await this.call("status", t); if (this.current(owner, t)) { this.apply(out, owner, cx); this.error = null; } }
           catch (_e) { if (this.current(owner, t)) { this.status = null; this.error = "Exact operation read-back unavailable. Current job state alone cannot prove this call ran. Use Check only."; } }
         }
         this.working = false; this.confirm = false;
@@ -100,6 +103,7 @@ export class AgentReconciliation {
     const state = this.status?.state;
     const labels = { none: "No live API observation has been authorized by this panel intent. Viewing and refreshing only read stored data.", prepared: "Exact stored intent retained, not confirmed. Review before live API observation.", armed: "Claim retained. An observation may be delayed; Check only, never resend.", uncertain: "Operation outcome uncertain. A current terminal job is NOT proof this call ran. Check the operation receipt only; never retry.", changed: "The exact stored snapshot changed before observation. Nothing may be dispatched from this intent; investigate.", blocked: "Journal blocked, corrupt or owned by another space. Return to the original context; do not retry.", ineligible: "This agent has not been admitted or is not eligible for observation. No provisioning or retry is offered.", recorded: "An exact operation receipt is retained. It records this explicit attempt, which may have been refused; NOT agent success or a validated deliverable." };
     content.child(div().text_color(theme.muted).child(this.working ? "Waiting for operation / reading stored receipt…" : labels[state] || "Read-back unavailable. Mutation disabled; Check only."));
+    if (this.status) content.child(div().text_size(12).text_color(theme.muted).child("Reconciliation status/current-job observation time: not recorded. Operation receipt recorded_at is receipt evidence only; neither updates the selected detail or its read timestamp."));
     if (this.error) content.child(div().text_color(theme.ansi1).child(this.error));
     const result = this.status?.operation_receipt;
     if (result) content.child(div().text_size(12).text_color(theme.muted).child(`Operation ${result.operation_id}\nRecorded: ${result.recorded_at}\nOperation outcome: ${result.operation_outcome}\nRecorded job: ${result.snapshot.job.state} / ${result.snapshot.job.outcome}\nRecorded validation: ${result.snapshot.job.validation}\nCurrent job/ownership snapshot: ${this.status.current_snapshot_match}\nReceipt SHA-256: ${this.status.operation_receipt_sha256}\n${result.operation_outcome === "dispatcher_lock_unavailable" ? "The dispatcher lock was held or unavailable. No dispatcher was stopped or adopted." : "Unknown/blocked still holds capacity. The core alone decides completion; no permission or form is answered."}\nA first terminal notification is frozen history, not proof of this operation.`));

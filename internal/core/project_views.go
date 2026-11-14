@@ -221,7 +221,7 @@ func isTerminalState(state string) bool {
 	return state == "finished" || state == "cancelled" || state == "resolved"
 }
 
-func getJobTx(ctx context.Context, tx *sql.Tx, id string) (Job, error) {
+func getJobTx(ctx context.Context, tx sqlQueryer, id string) (Job, error) {
 	queries := dbquery.New(tx)
 	row, err := queries.JobByID(ctx, id)
 	if err != nil {
@@ -258,7 +258,7 @@ type rawAssocRow struct {
 	recordedAt     string
 }
 
-func loadJobAssociationsTx(ctx context.Context, tx *sql.Tx, projectID, jobID string) ([]ProjectResultAssociation, []*parsedManifest, string, error) {
+func loadJobAssociationsTx(ctx context.Context, tx sqlQueryer, projectID, jobID string) ([]ProjectResultAssociation, []*parsedManifest, string, error) {
 	queries := dbquery.New(tx)
 	rows, err := queries.JobAssociations(ctx, dbquery.JobAssociationsParams{ProjectID: projectID, JobID: jobID})
 	if err != nil {
@@ -309,7 +309,7 @@ func loadJobAssociationsTx(ctx context.Context, tx *sql.Tx, projectID, jobID str
 	return assocs, manifests, status, nil
 }
 
-func computeJobDimensionsTx(ctx context.Context, tx *sql.Tx, pj projectJobRow, j Job, assocs []ProjectResultAssociation, manifests []*parsedManifest) (ProjectExecutionDimension, ProjectValidationDimension, ProjectReviewDimension, error) {
+func computeJobDimensionsTx(ctx context.Context, tx sqlQueryer, pj projectJobRow, j Job, assocs []ProjectResultAssociation, manifests []*parsedManifest) (ProjectExecutionDimension, ProjectValidationDimension, ProjectReviewDimension, error) {
 	execDim := ProjectExecutionDimension{
 		State:     j.State,
 		Outcome:   j.Outcome,
@@ -460,6 +460,6 @@ func computeJobDimensionsTx(ctx context.Context, tx *sql.Tx, pj projectJobRow, j
 	return execDim, valDim, revDim, nil
 }
 
-func pendingResultJobIDsTx(ctx context.Context, tx *sql.Tx, projectID string) ([]string, error) {
+func pendingResultJobIDsTx(ctx context.Context, tx sqlQueryer, projectID string) ([]string, error) {
 	return dbquery.New(tx).PendingResultJobs(ctx, projectID)
 }

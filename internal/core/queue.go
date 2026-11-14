@@ -118,8 +118,12 @@ func (q *Queue) OpenLog(id string, stderr bool) (_ io.ReadCloser, resultErr erro
 }
 
 func (s *store) openLog(id string, stderr bool) (_ *os.File, resultErr error) {
+	return openQueueLog(context.Background(), s.db, id, stderr)
+}
+
+func openQueueLog(ctx context.Context, q sqlQueryer, id string, stderr bool) (_ *os.File, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeStorageFailed, resultErr) }()
-	job, err := dbquery.New(s.db).RetainedJobLog(context.Background(), id)
+	job, err := dbquery.New(q).RetainedJobLog(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, faults.New(faults.CodeNotFound, "exact queue job not found")
 	}

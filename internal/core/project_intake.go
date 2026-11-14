@@ -40,13 +40,16 @@ func (i *ProjectIntake) SubmitProject(raw []byte) (ProjectSubmissionResult, erro
 	return (&Queue{store: i.store}).SubmitProject(raw)
 }
 
+// The historical helper name denotes the project intake floor, not a >= range:
+// only the explicitly supported schema 5 and 6 are accepted, including rechecks
+// on every writer's actual transaction connection.
 func requireProjectSchema5(q sqlQueryer) error {
 	var version int
 	if err := q.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil {
 		return classifyDiagnostic(faults.CodeDatabaseRead, err)
 	}
-	if version != 5 {
-		return faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing project store requires schema version 5, got %d", version))
+	if !supportedProjectSchema(version) {
+		return faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing project store requires schema version 5 or 6, got %d", version))
 	}
 	return nil
 }

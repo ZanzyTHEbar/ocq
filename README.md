@@ -29,6 +29,8 @@ depends on locking, SQLite WAL/shared memory and sync semantics, not filesystem
 names. All queue access must stay in one host/kernel coherence domain. See the
 [storage and runtime contract](docs/storage.md) for volume setup, persistence,
 ephemeral-storage limits and managed-runtime gaps. Keep state outside repositories.
+For existing queues, follow the [coordinated schema-6 upgrade](docs/command-core.md#state-and-upgrades)
+before using a newer writable CLI; `list` is not a read-only compatibility check.
 
 ## Run a command
 

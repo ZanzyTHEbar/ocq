@@ -71,6 +71,9 @@ var projectSchema string
 //go:embed sql/schema5.sql
 var projectLaneSchema string
 
+//go:embed sql/schema6.sql
+var observationSchema string
+
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 func resolveStateDir(dir string) (string, error) {
@@ -183,11 +186,11 @@ func openStore(dir string) (*store, error) {
 		database.Close()
 		return nil, classifyDiagnostic(faults.CodeDatabaseRead, err)
 	}
-	if version < 0 || version > 5 {
+	if version < 0 || version > 6 {
 		database.Close()
 		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("unsupported schema version %d", version))
 	}
-	if version < 5 {
+	if version < 6 {
 		migrationLock, err = s.lock()
 		if err != nil {
 			database.Close()
@@ -201,8 +204,9 @@ func openStore(dir string) (*store, error) {
 	return s, nil
 }
 
-// migrateStore uses a single Goose migration for all historical steps: Goose
-// commits the callback and its applied-version record in the same transaction.
+// migrateStore keeps Goose migration 1's historical steps intact. Migration 2
+// adds observation to schema 5, including queues that already applied version 1.
+// Goose commits each callback and its applied-version record in one transaction.
 // Goose may first commit an empty version table separately; this does not change
 // user_version or queue data and a subsequent open retries the migration.
 func migrateStore(db *sql.DB) error {
@@ -211,8 +215,32 @@ func migrateStore(db *sql.DB) error {
 			return faults.New(faults.CodeConfigInvalid, "schema downgrade is not supported")
 		},
 	})
+	observation := goose.NewGoMigration(2, &goose.GoFunc{RunTx: migrateObservationSchema}, &goose.GoFunc{
+		RunTx: func(context.Context, *sql.Tx) error {
+			return faults.New(faults.CodeConfigInvalid, "schema downgrade is not supported")
+		},
+	})
+	// Reject a damaged ledger before Goose can hide it with a later migration.
+	queries := dbquery.New(db)
+	ledgerExists, err := queries.ObservationLedgerExists(context.Background())
+	if err != nil {
+		return err
+	}
+	if ledgerExists != 0 {
+		applied, err := queries.ObservationLedgerVersion(context.Background())
+		if err != nil {
+			return err
+		}
+		var version int
+		if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+			return err
+		}
+		if applied > 2 || (applied == 2 && version != 6) || (applied == 1 && version < 5) {
+			return faults.New(faults.CodeInvariantFailed, "inconsistent Goose ledger and queue schema")
+		}
+	}
 	provider, err := goose.NewProvider(goose.DialectSQLite3, db, nil,
-		goose.WithDisableGlobalRegistry(true), goose.WithGoMigrations(migration))
+		goose.WithDisableGlobalRegistry(true), goose.WithGoMigrations(migration, observation))
 	if err != nil {
 		return classifyDiagnostic(faults.CodeConfigInvalid, err)
 	}
@@ -223,16 +251,19 @@ func migrateStore(db *sql.DB) error {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return classifyDiagnostic(faults.CodeDatabaseRead, err)
 	}
-	if version != 5 {
+	if version != 6 {
 		return faults.New(faults.CodeInvariantFailed, fmt.Sprintf("inconsistent Goose migration and schema version %d", version))
 	}
-	return nil
+	return validateObservationSchema(context.Background(), db)
 }
 
 func migrateSchema(ctx context.Context, tx *sql.Tx) error {
 	var version int
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return classifyDiagnostic(faults.CodeDatabaseRead, err)
+	}
+	if version == 6 {
+		return validateObservationSchema(ctx, tx)
 	}
 	if version < 0 || version > 5 {
 		return faults.New(faults.CodeConfigInvalid, fmt.Sprintf("unsupported schema version %d", version))
@@ -249,9 +280,40 @@ func migrateSchema(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+func migrateObservationSchema(ctx context.Context, tx *sql.Tx) error {
+	var version int
+	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version == 6 {
+		return validateObservationSchema(ctx, tx)
+	}
+	if version != 5 {
+		return faults.New(faults.CodeInvariantFailed, "observation migration requires schema 5")
+	}
+	_, err := tx.ExecContext(ctx, observationSchema)
+	return err
+}
+
+func supportedProjectSchema(version int) bool { return version == 5 || version == 6 }
+
 // Non-initializing read-only store open for projection reads. Fails closed if
-// the directory or database file does not exist or is not at schema version 5.
+// the directory or database file does not exist or is not at schema version 5/6.
 func openReadOnlyStore(dir string) (*store, error) {
+	return openReadOnlyStoreContext(context.Background(), dir)
+}
+
+func openReadOnlyStoreContext(ctx context.Context, dir string) (*store, error) {
+	return openReadOnlyStoreVersionContext(ctx, dir, true)
+}
+
+// Observation may inspect identity and PRAGMA user_version on an unsupported
+// schema, but must not run any application projection until schema 6 is checked.
+func openObservationStoreContext(ctx context.Context, dir string) (*store, error) {
+	return openReadOnlyStoreVersionContext(ctx, dir, false)
+}
+
+func openReadOnlyStoreVersionContext(ctx context.Context, dir string, requireSupported bool) (*store, error) {
 	dir, err := resolveStateDir(dir)
 	if err != nil {
 		return nil, err
@@ -281,7 +343,7 @@ func openReadOnlyStore(dir string) (*store, error) {
 		query.Add("_pragma", pragma)
 	}
 	u.RawQuery = query.Encode()
-	database, err := dbbootstrap.Open(context.Background(), dbbootstrap.Config{
+	database, err := dbbootstrap.Open(ctx, dbbootstrap.Config{
 		DSN: u.String(), MaxOpenConns: 1, MaxIdleConns: 1,
 	}, dbbootstrap.SQLite())
 	if err != nil {
@@ -290,18 +352,18 @@ func openReadOnlyStore(dir string) (*store, error) {
 	db := database.SQL()
 	var mode string
 	var foreignKeys, queryOnly, busy, version int
-	err = db.QueryRow("PRAGMA journal_mode").Scan(&mode)
+	err = db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode)
 	if err == nil {
-		err = db.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys)
+		err = db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys)
 	}
 	if err == nil {
-		err = db.QueryRow("PRAGMA query_only").Scan(&queryOnly)
+		err = db.QueryRowContext(ctx, "PRAGMA query_only").Scan(&queryOnly)
 	}
 	if err == nil {
-		err = db.QueryRow("PRAGMA busy_timeout").Scan(&busy)
+		err = db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busy)
 	}
 	if err == nil {
-		err = db.QueryRow("PRAGMA user_version").Scan(&version)
+		err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version)
 	}
 	if err != nil || mode != "wal" || foreignKeys != 1 || queryOnly != 1 || busy != 5000 {
 		database.Close()
@@ -311,14 +373,14 @@ func openReadOnlyStore(dir string) (*store, error) {
 		}
 		return nil, faults.New(faults.CodeConfigInvalid, message)
 	}
-	if version != 5 {
+	if requireSupported && !supportedProjectSchema(version) {
 		database.Close()
-		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("read-only store requires schema version 5, got %d", version))
+		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("read-only store requires schema version 5 or 6, got %d", version))
 	}
 	return &store{db: db, database: database, dir: dir}, nil
 }
 
-// openExistingWritableStore opens only an existing schema-5 database. Unlike
+// openExistingWritableStore opens only an existing schema-5/6 database. Unlike
 // openStore it creates neither state nor locks, changes no journal mode, and
 // never invokes Goose. The existing initialization lock excludes migrations
 // while the connection and its safety settings are inspected.
@@ -400,9 +462,9 @@ func openExistingWritableStore(dir string) (*store, error) {
 		}
 		return nil, faults.New(faults.CodeConfigInvalid, message)
 	}
-	if version != 5 {
+	if !supportedProjectSchema(version) {
 		database.Close()
-		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing writable store requires schema version 5, got %d", version))
+		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing writable store requires schema version 5 or 6, got %d", version))
 	}
 	return &store{db: db, database: database, dir: dir}, nil
 }

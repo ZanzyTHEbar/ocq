@@ -8,10 +8,15 @@ lifecycle, separate from submission.
 
 ## Install
 
-The installer requires a running **herdr-app 0.1.14** and an initialized app home.
-It checks that exact version, validates the mod, refuses to overwrite an existing
+The installer requires a running **herdr-app 0.1.14 or 0.1.15** and an initialized app home.
+It accepts only those exact versions, validates the mod, refuses to overwrite an existing
 OCQ mod or `ocq-workspace` layout, and requests activation of a separate personal
 layout. It does not merge or replace the previous layout.
+
+The 0.1.15 compatibility check used the official Linux x86-64 app with HC 0.1.19
+in isolated native fixtures: module loading, stored selected-machine queue reads,
+delayed-context refusal and disabled incompatible mutations. This does not establish
+other app versions, platforms or real remote deployment readiness.
 
 Build the bridge on the machine whose queue it will open:
 
@@ -36,6 +41,9 @@ Herdr's layout controls.
 Update mod and bridge together. **Before upgrading, stop older panel/bridge
 processes and ensure no delayed old `compose-dispatch` can start later.** Older
 bridges do not require the durable claim; mixed versions are unsafe.
+For schema 5→6, also coordinate the CLI and dispatcher replacement before any
+newer writable queue open. Follow the [explicit upgrade sequence](command-core.md#state-and-upgrades);
+the installer refuses existing mod/layout overwrites and is not a queue migrator.
 
 ## Which machine runs what?
 
@@ -48,7 +56,8 @@ bridges do not require the durable claim; mixed versions are unsafe.
 These can all run on one machine. For remote selection, install the bridge on the
 server core's PATH, not only the laptop. The bridge inherits `OCQ_STATE_DIR` or
 uses the standard XDG/HOME state location on its execution host. It requires an
-existing private schema-5 queue; reads never initialize or migrate it. The panel
+existing private queue (schema 6 for automatic observation; legacy views also
+support schema 5); reads never initialize or migrate it. The panel
 does not install/configure the server, OpenCode or Workmux. Its explicit local
 dispatcher control uses the fixed command-only policy described below.
 
@@ -60,19 +69,52 @@ means execution stopped or permits a retry.
 ## Inspect and acknowledge
 
 The panel selects a unique project matching the active space's repository or
-offers a picker. Project views refresh every 15 seconds. Latest inbox/completion
-windows contain 20 items each; older history is paged separately. Each refresh revisits
-one loaded historical page, so large histories update across multiple cycles.
-These are separate stored reads, not a coherent live stream.
+offers a picker over loaded project pages. Automatic stored observation requires
+the matched `ocq-observe-v1` bridge and an explicitly upgraded schema-6 queue;
+the panel never initializes or migrates a queue. Overview, Projects, Queue and
+Inbox share one controller, not per-list projection timers. It reads up to eight
+bounded selectors in one SQLite snapshot, then long-polls for changes for up to
+20 seconds in a foreground bridge call (25-second native call timeout). This is
+bounded long-polling, not server push. Unchanged wait renewals do not refetch
+projections. Loaded visible history pages refresh from their original page starts;
+revisiting inactive views reads them fresh. Different snapshot batches have
+separate read times, not one global live total. Unsupported/limited/missing views
+are reported explicitly.
+Automatic pages contain 20 rows; requests/responses are capped at 16 KiB/1 MiB.
+Automatic board/job/results detail requires at most 20 jobs, 20 lanes and 20 result
+associations per project, with request/manifest records at most 64 KiB. Otherwise it
+reports `limit_exceeded` rather than presenting a partial view as complete. Ordinary
+schema-5 read commands remain supported, but automatic observation stops at
+`upgrade_required` until an operator explicitly upgrades.
+
+At most one native observation promise is outstanding per JavaScript runtime,
+including across context changes. This is not a global physical-helper limit
+across windows or peers.
+After a settled read/RPC failure, read-only recovery backs off approximately
+2/5/10/30 seconds with jitter, then takes a fresh snapshot before waiting again.
+This is not proof that an old remote read helper exited: delayed delivery can
+overlap bounded foreground helpers, subject to the core's shared execution limit.
+No unresolved native promise is discarded to rearm another request. Unsupported
+bridge/schema/auth configuration stops futile retries with an actionable state.
+Disconnect/context reset suspends old local action authorization. During an outage,
+the last accepted data may remain visible with stale/reconnecting status.
+Reconnect takes a fresh read-only snapshot: it never acknowledges mail/events,
+retries mutations, revives confirmations or releases execution capacity. Quiesce
+and reopen a fresh selected context before local actions. `Read again` lives in
+Context details for diagnostics, not the normal inspection workflow.
 
 The Queue view reads jobs across projects, including standalone jobs, in pages
-of 20. It shows the first 20 pending global events and accepts exact job/event
+of 20. Pending global events are separately paged and accept exact job/event
 IDs, including acknowledged events. Job detail offers stdout/stderr reads in
 chunks of at most 32 KiB. Log bytes are escaped rather than interpreted as terminal
-output; EOF describes that read, not job completion. Queue jobs/events are read
-when the view opens or its machine context changes; use its explicit Refresh
-action for later updates. They do not use the project-view timer. Queue inspection
-does not acknowledge events or change execution.
+output; EOF describes that read, not job completion. Only the selected stream can
+follow automatically. Browsing older displayed bytes pauses follow; the retained
+display is capped at 64 KiB. Replacement/truncation requires explicit discard and
+rediscovery from zero, never automatic append across identities. Filesystem log
+reads are explicitly non-atomic with the SQLite snapshot and carry a separate
+observation time. A selected-stream append can wake observation without a database
+revision change; it does not require fetching every database view. Queue inspection
+does not acknowledge events, recover operation receipts implicitly or change execution.
 
 Opening mail does not mark it read. Read and separately confirmed archive actions
 retain pending local intent, make one mutation attempt, then read back the exact

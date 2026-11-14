@@ -7,6 +7,8 @@ sql:
       - internal/core/sql/schema3.sql
       - internal/core/sql/schema4.sql
       - internal/core/sql/schema5.sql
+      - internal/core/sql/schema6.sql
+      - internal/core/sql/goose_metadata.sql
     queries:
       - internal/core/sql/receipts.sql
       - internal/core/sql/agents.sql
@@ -14,6 +16,7 @@ sql:
       - internal/core/sql/notifications.sql
       - internal/core/sql/projects.sql
       - internal/core/sql/inbox.sql
+      - internal/core/sql/observation.sql
     gen:
       go:
         package: dbquery

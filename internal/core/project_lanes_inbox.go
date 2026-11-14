@@ -305,7 +305,7 @@ func sealLaneAndDeliverMail(ctx context.Context, c *sql.Conn, m parsedManifest, 
 	return err
 }
 
-func loadProjectLanesTx(ctx context.Context, tx *sql.Tx, projectID string) ([]ProjectLane, error) {
+func loadProjectLanesTx(ctx context.Context, tx sqlQueryer, projectID string) ([]ProjectLane, error) {
 	rows, err := dbquery.New(tx).ProjectLanes(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -317,7 +317,7 @@ func loadProjectLanesTx(ctx context.Context, tx *sql.Tx, projectID string) ([]Pr
 	return lanes, nil
 }
 
-func integratorUnreadCountTx(ctx context.Context, tx *sql.Tx, projectID string) (int, error) {
+func integratorUnreadCountTx(ctx context.Context, tx sqlQueryer, projectID string) (int, error) {
 	count, err := dbquery.New(tx).IntegratorUnreadCount(ctx, dbquery.IntegratorUnreadCountParams{ProjectID: projectID, Recipient: "integrator:" + projectID})
 	return int(count), err
 }
@@ -335,6 +335,11 @@ func (r *Reader) Lanes(projectID string) (_ ProjectLanesOutput, resultErr error)
 		return out, err
 	}
 	defer tx.Rollback()
+	return lanesQuery(ctx, tx, projectID)
+}
+
+func lanesQuery(ctx context.Context, tx sqlQueryer, projectID string) (ProjectLanesOutput, error) {
+	var out ProjectLanesOutput
 	queries := dbquery.New(tx)
 	if _, err := queries.ProjectByID(ctx, projectID); errors.Is(err, sql.ErrNoRows) {
 		return out, faults.Wrap(faults.CodeNotFound, fmt.Sprintf("project %s does not exist", projectID), err)
@@ -386,6 +391,12 @@ func (r *Reader) inbox(projectID, recipient string, unreadOnly bool, afterSeq in
 		return out, err
 	}
 	defer tx.Rollback()
+	return inboxQuery(ctx, tx, projectID, recipient, unreadOnly, afterSeq, limit, recent)
+}
+
+func inboxQuery(ctx context.Context, tx sqlQueryer, projectID, recipient string, unreadOnly bool, afterSeq int64, limit int, recent bool) (ProjectInboxOutput, error) {
+	var out ProjectInboxOutput
+	var err error
 	queries := dbquery.New(tx)
 	if _, err := queries.ProjectByID(ctx, projectID); errors.Is(err, sql.ErrNoRows) {
 		return out, faults.Wrap(faults.CodeNotFound, fmt.Sprintf("project %s does not exist", projectID), err)
@@ -505,12 +516,8 @@ func (q *Queue) sendMail(in MailRequest, existingSchemaOnly bool, expectedLanePa
 		if existingSchemaOnly {
 			// Recheck on the transaction's actual connection, as the store opener
 			// cannot guarantee a later connection still has the same schema.
-			var version int
-			if err := c.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-				return classifyDiagnostic(faults.CodeDatabaseRead, err)
-			}
-			if version != 5 {
-				return faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing writable store requires schema version 5, got %d", version))
+			if err := requireProjectSchema5(c); err != nil {
+				return err
 			}
 		}
 		queries := dbquery.New(c)
@@ -667,12 +674,8 @@ func (a *MailAcknowledger) Acknowledge(projectID, messageID string, sequence int
 	ctx := context.Background()
 	err := a.store.write(func(c *sql.Conn) error {
 		// A replacement connection must not permit an older or future schema.
-		var version int
-		if err := c.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-			return classifyDiagnostic(faults.CodeDatabaseRead, err)
-		}
-		if version != 5 {
-			return faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing writable store requires schema version 5, got %d", version))
+		if err := requireProjectSchema5(c); err != nil {
+			return err
 		}
 		queries := dbquery.New(c)
 		row, err := queries.InboxMessageByID(ctx, dbquery.InboxMessageByIDParams{ProjectID: projectID, ID: messageID})

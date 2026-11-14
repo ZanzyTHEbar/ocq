@@ -34,7 +34,10 @@ export class CommandResolution {
     if (r.code !== 0) throw new Error("Resolution journal unavailable");
     return this.validate(JSON.parse(r.stdout), t);
   }
-  apply(out) { this.status = out; if (out.observation) this.detail.data = { ...this.detail.data, job: out.observation.job }; }
+  apply(out, owner, cx) {
+    this.status = out;
+    if (out.observation) this.view.noteHelperObservation(owner, this.generation, this.detail, out.observation, cx);
+  }
 
   async exchange(owner, mode, t, digest, raw, cx) {
     if (!this.current(owner, t)) throw new Error("Context changed");
@@ -103,12 +106,12 @@ export class CommandResolution {
     cx.spawn(async (cx) => {
       try {
         if (!this.current(owner, t)) return;
-        if (action === "status") { const out = await this.call("status", t); if (this.current(owner, t)) this.apply(out); }
+        if (action === "status") { const out = await this.call("status", t); if (this.current(owner, t)) this.apply(out, owner, cx); }
         else {
           if (!this.current(owner, t)) return;
           const out = await this.exchange(owner, action === "prepare" ? "receive" : "preview", t, digest, raw, cx);
           if (!this.current(owner, t)) return;
-          this.apply(out.status);
+          this.apply(out.status, owner, cx);
           if (action === "preview") { this.preview = { payload: out.payload, digest }; this.confirm = true; owner.handle.focus(); }
           if (action === "prepare") this.view.resolveInput.set_value("");
         }
@@ -132,7 +135,7 @@ export class CommandResolution {
       } catch (_e) { if (this.current(owner, t)) this.error = "Claim or resolution response unavailable. Checking only; never retry."; }
       finally {
         if (this.current(owner, t)) {
-          try { const out = await this.call("status", t); if (this.current(owner, t)) { this.apply(out); this.error = null; } }
+          try { const out = await this.call("status", t); if (this.current(owner, t)) { this.apply(out, owner, cx); this.error = null; } }
           catch (_e) { if (this.current(owner, t)) { this.status = null; this.error = "Exact job/completion/evidence-digest read-back unavailable. Outcome uncertain; Check only."; } }
         }
         this.working = false; this.confirm = false; this.preview = null;
@@ -164,6 +167,7 @@ export class CommandResolution {
     if (!this.t) { content.child(div().child("Exact queue identity unavailable; resolution disabled.")); return; }
     const labels = { none: "No resolution intent. Enter private evidence, then prepare and review exact retained bytes.", prepared: "Private evidence retained, not confirmed. Explicit private review is required.", armed: "Claim retained. A call may be delayed. Check only; never resend.", uncertain: "Outcome uncertain. Check only; never retry.", refused: this.status?.refusal === "dispatcher_lock_unavailable" ? "Last attempt refused: dispatcher lock held or unavailable. No dispatcher was stopped or adopted. This attempt is consumed; check only." : "Last attempt refused: exact process/group exit was not established. No process was killed. This attempt is consumed; check only.", changed: "Stored job/observation changed. No matching operator resolution claimed. Investigate the actual outcome below.", blocked: "Journal blocked or owned by another space. Return to the original context; do not retry.", resolved_observed: "Resolved operator assertion, matching evidence digest and immutable completion observed. NOT execution success or validated delivery; caller causality is not established.", ineligible: "Not an UNKNOWN command. Resolution disabled." };
     content.child(div().text_color(t.muted).child(this.working ? "Reading retained resolution…" : labels[this.status?.state] || "Observation unavailable; mutation disabled. Check only."));
+    if (this.status) content.child(div().text_size(12).text_color(t.muted).child("Resolution status/job observation time: not recorded. Journal evidence does not update the selected detail or its read timestamp."));
     if (this.error) content.child(div().text_color(t.ansi1).child(this.error));
     if (this.status?.evidence_sha256) content.child(div().text_size(12).text_color(t.muted).child(`Private evidence SHA-256: ${this.status.evidence_sha256}`));
     if (!this.working && this.status?.state === "none" && j.state === "unknown") content

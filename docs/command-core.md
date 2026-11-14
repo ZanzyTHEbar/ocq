@@ -45,12 +45,42 @@ state. Use SQLite's online backup mechanism when backing up a running database;
 OCQ has no backup or pruning command.
 
 Writable queue opens can initialize or migrate state, including ordinary
-`list`, `status` and notification commands. Stop dispatch before upgrading.
-Current schema **5** is reached through additive transactional migrations:
-agent ownership (2), completion events (3), projects (4), lanes/inbox (5).
-Versions above 5 are rejected. Receipt/request bytes and existing evidence remain
-unchanged. Project projection reads instead require an existing schema-5 queue
-and never initialize or migrate it.
+`list`, `status` and notification commands. Current schema is **6**: agent
+ownership (2), completion events (3), projects (4), lanes/inbox (5), and committed
+observation revisions (6). Goose migration 1 retains the historical schema 1–5
+steps; separate migration 2 upgrades 5→6 under the initialization lock with
+dispatch stopped. Versions above 6 are rejected; there is no downgrade command.
+Non-initializing existing-store readers/writers explicitly support schemas 5 and
+6. Project projection reads never initialize or migrate. Herdr's automatic
+observation requires 6; schema 5 reports `upgrade_required`, not an automatic upgrade.
+
+For an existing queue, coordinate the upgrade before any newer writable open:
+
+1. Quiesce submitters and panel/bridge calls, including delayed old mutation calls.
+   Stop the dispatcher gracefully and wait for its owned foreground commands;
+   shutdown is not proof that unknown execution has completed.
+2. Retain a backup using the [storage guidance](storage.md#vm-and-container-setup).
+   Replace the CLI, dispatcher binary, bridge and mod with a matched release while
+   clients remain stopped. Do not start the newer dispatcher yet: it can migrate
+   on open too. Older schema-5-only binaries reject schema 6; do not mix them or
+   fall back to an older executable after upgrading. See [Herdr installation](herdr.md#install).
+3. With `STATE` set to the intended existing private queue directory, deliberately
+   open it using the matched new CLI, then inspect it read-only:
+
+   ```sh
+   : "${STATE:?Set STATE to the intended existing private queue directory}"
+   ocq --state-dir "$STATE" list &&
+     ocq --state-dir "$STATE" project list
+   ```
+
+The `list` command is the explicit migration step, **not** a read-only preflight;
+it also initializes state if the path is missing. Reopen matched clients and
+restart dispatch only after a successful upgrade. The 5→6 DDL and Goose applied
+record commit together. Real SQLite acceptance verifies rollback after a late
+ledger-write failure, preserving receipt, event, mail and journal bytes, followed
+by a deliberate administrative retry. This is not a power-loss guarantee or
+permission to retry execution. On an upgrade error, retain the diagnostic and
+inspect state before deciding on a migration retry; never repair it by unlinking locks.
 
 Connections use WAL, FULL synchronous mode, foreign keys and a 5000 ms busy
 timeout. Effective settings are checked on open; required operations fail closed

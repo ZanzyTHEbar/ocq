@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"io"
+	"os"
 	"strconv"
 
 	"github.com/ZanzyTHEbar/faults-go"
@@ -120,6 +121,10 @@ func (r *Reader) QueueLog(id, stream string, offset int64) (_ QueueLogOutput, re
 		return QueueLogOutput{}, err
 	}
 	defer f.Close()
+	return readQueueLog(f, id, stream, offset, readAt)
+}
+
+func readQueueLog(f *os.File, id, stream string, offset int64, readAt string) (QueueLogOutput, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return QueueLogOutput{}, err

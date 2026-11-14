@@ -88,5 +88,7 @@ change feed; see [project observations](project-control-plane.md#stored-observat
 Project inbox read/archive is separate from global completion acknowledgement.
 
 Writable notification commands can initialize or migrate a queue. Stop dispatch
-before upgrading old state; current schema is **5**. Migration preserves immutable
-receipts and backfills only already-terminal jobs. See [storage and upgrades](command-core.md#state-and-upgrades).
+before upgrading old state; current schema is **6**. Schema 3 backfills only
+already-terminal jobs; schema 6 adds observation revisions without rewriting
+receipts or completion events. Coordinate all clients before the explicit upgrade;
+see [storage and upgrades](command-core.md#state-and-upgrades).

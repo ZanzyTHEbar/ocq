@@ -89,7 +89,7 @@ func TestExistingMailAcknowledgement(t *testing.T) {
 	if err := migrated.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := oldDB.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
+	if err := oldDB.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
 		t.Fatalf("migration retry failed: version=%d err=%v", version, err)
 	}
 	if err := oldDB.Close(); err != nil {
@@ -209,7 +209,7 @@ INSERT INTO project_inbox_messages(sequence,id,key,project_id,sender,recipient,l
 	if _, err := a.Acknowledge("proj-test", id, 41, false); err == nil {
 		t.Fatal("acknowledgement accepted a changed schema version")
 	}
-	if _, err := db.Exec("PRAGMA user_version=5"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version=6"); err != nil {
 		t.Fatal(err)
 	}
 	queue, err = core.OpenQueue(state)

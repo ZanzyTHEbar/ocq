@@ -30,9 +30,9 @@ export class QueuedCancellation {
     if (out.state === "cancelled_observed" && (o?.job?.state !== "cancelled" || o.job.outcome !== "cancelled_before_launch" || o.completion?.job_id !== s.job_id || o.completion.state !== "cancelled" || o.completion.outcome !== "cancelled_before_launch" || o.completion.id !== o.job.completion_event_id)) throw new Error("Cancellation not established");
     return out;
   }
-  apply(out) {
+  apply(out, owner, cx) {
     this.status = out;
-    if (out.observation) this.detail.data = { ...this.detail.data, job: out.observation.job };
+    if (out.observation) this.view.noteHelperObservation(owner, this.generation, this.detail, out.observation, cx);
   }
   action(owner, action, cx) {
     const scope = this.s;
@@ -45,7 +45,7 @@ export class QueuedCancellation {
         if (!this.current(owner, scope)) return;
         const out = await this.call(action === "review" ? "status" : action, undefined, scope);
         if (!this.current(owner, scope)) return;
-        this.apply(out); this.confirm = action !== "status" && out.state === "prepared";
+        this.apply(out, owner, cx); this.confirm = action !== "status" && out.state === "prepared";
       } catch (_e) { if (this.current(owner, scope)) { this.status = null; this.error = "Outcome unavailable. Check only; never resend cancellation."; } }
       finally { this.working = false; if (this.current(owner, scope)) cx.notify(); }
     }); cx.notify();
@@ -69,7 +69,7 @@ export class QueuedCancellation {
           try {
             const out = await this.call("status", undefined, scope);
             if (this.current(owner, scope)) {
-              this.apply(out);
+              this.apply(out, owner, cx);
               if (["cancelled_observed", "not_queued"].includes(out.state)) this.error = null;
             }
           } catch (_e) { if (this.current(owner, scope)) { this.status = null; this.error = "Exact read-back unavailable. Outcome uncertain. Use Check only."; } }
@@ -102,10 +102,11 @@ export class QueuedCancellation {
       none: "No cancellation intent. Only queued work may be cancelled.", prepared: "Retained intent, not confirmed. Review before cancelling.",
       armed: "Confirmed claim retained. A call may be delayed. Check only; never resend.", uncertain: "Outcome uncertain. Check only; never resend.",
       cancelled_observed: "Cancelled-before-launch job and immutable completion observed. This does not establish which caller caused it.",
-      not_queued: "Job is no longer queued. No cancellation is claimed. The stored state/outcome below is authoritative.",
+      not_queued: "Cancellation journal observed a job no longer queued. No cancellation is claimed. Its snapshot is separate from the selected detail.",
       blocked: "Journal blocked or owned by another space. Return to the original context; investigate, never resend."
     };
     content.child(div().text_color(t.muted).child(this.working ? "Reading exact job and cancellation journal…" : labels[state] || "Observation unavailable; cancellation disabled."));
+    if (this.status) content.child(div().text_size(12).text_color(t.muted).child("Cancellation status/job observation time: not recorded. Journal evidence does not update the selected detail or its read timestamp."));
     if (this.error) content.child(div().text_color(t.ansi1).child(this.error));
     if (!this.working && state === "none" && this.detail.data.job.state === "queued") content.child(action("ocq-cancel-prepare", "Review queued-job cancellation…", (cx) => this.action(owner, "prepare", cx)));
     if (!this.working && state === "prepared") content.child(action("ocq-cancel-review", "Review retained cancellation…", (cx) => this.action(owner, "review", cx)));

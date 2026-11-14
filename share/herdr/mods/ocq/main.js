@@ -12,9 +12,10 @@ import { RegistrationForm } from "./registration.js";
 import { SubmissionForm } from "./submission.js";
 import { ComposeForm } from "./compose-form.js";
 import { composeProof, composeEqual, composeDecode, socketFrames } from "./private-frames.js";
+import { StoredUpdates, acceptObservationVersion } from "./stored-updates.js";
 
 function emptyCollection() {
-  return { items: [], history: [], recent: [], readTimes: {}, cursor: "0", refreshCursor: "0", readAt: null, recentReadAt: null, loaded: false, loading: false, recentLoading: false, refreshingHistory: false, hasMore: false, error: null, recentError: null };
+  return { pages: [{ start: "0" }], items: [], history: [], recent: [], readTimes: {}, cursor: "0", readAt: null, loaded: false, loading: false, hasMore: false, error: null };
 }
 
 function readOrder(value) {
@@ -163,10 +164,19 @@ function intakeStructured(kind, raw, exact = null) {
 export default class OCQ extends View {
   init(_props, cx) {
     this.queue = new QueueInspection();
+    this.updates = new StoredUpdates(this, cx);
+    this.projectPages = [{ start: "0" }];
+    this.lanePages = [{ start: "0" }];
+    this.boardToken = {};
     this.worktreeCheck = new WorktreeVerification();
     this.worktreeCheck.reset();
     this.publication = new ResultPublication();
     this.queueMode = false;
+    this.workspaceView = "overview";
+    this.projectView = "work";
+    this.contextDetails = false;
+    this.diagnostics = false;
+    this.updateHealth = { state: "stored", reason: null };
     this.projects = [];
     this.projectsReadAt = null;
     this.selected = null;
@@ -208,9 +218,106 @@ export default class OCQ extends View {
         if (await nextCommand() === "focus") this.handle.focus();
       }
     });
-    this.refresh(cx);
-    this.refreshCompose(cx);
-    cx.timer.every(15000, (cx) => { this.refresh(cx); this.refreshCompose(cx); });
+    this.updates.sync(cx);
+  }
+
+  close() { this.closed = true; this.generation++; this.queue.generation++; this.publication.generation++; this.worktreeCheck.generation++; this.updates.dispose(); }
+
+  observationSelectors() {
+    const descriptors = [], scope = { space: this.spaceID, machine: this.machine, folder: this.folder, generation: this.generation, project: this.selected };
+    const add = (selector, target, apply, dirty = false) => descriptors.push({ selector, target, apply, dirty });
+    this.projectPages.forEach((page, index) => add({ slot: `projects-${index}`, kind: "projects", cursor: page.start }, page, (slot, meta, readAt) => {
+      if (!this.projectPages.includes(page) || !acceptObservationVersion(page.observationVersion, meta)) return false;
+      page.observationVersion = meta; page.items = slot.status === "ready" ? slot.data : []; page.readAt = readAt;
+      page.error = slot.status === "ready" ? null : `Project page ${page.start}: ${slot.status}`;
+      page.next = slot.cursor || page.start; page.hasMore = slot.has_more;
+      this.projects = this.projectPages.flatMap(item => item.items || []);
+      this.projectsHasMore = this.projectPages[this.projectPages.length - 1].hasMore !== false;
+      this.projectsReadAt = readAt; this.error = this.projectPages.map(item => item.error).filter(Boolean).join("\n") || null;
+      if (!this.selected && !this.projectsHasMore) {
+        const matching = this.projects.filter(item => item.repo_root === this.folder);
+        const selected = matching.length === 1 ? matching[0].project_id : this.projects.length === 1 ? this.projects[0].project_id : null;
+        if (selected) { this.selected = selected; this.boardToken = {}; this.projectDetailToken = {}; this.manifestToken = {}; }
+      }
+      return true;
+    }));
+    if (this.queueMode) return descriptors.concat(this.queue.observationSelectors(this));
+    if (!this.selected) return descriptors;
+    const boardToken = this.boardToken;
+    add({ slot: "project-board", kind: "board", project_id: this.selected }, boardToken, (slot, meta, _readAt, cx) => {
+      if (this.boardToken !== boardToken || scope.project !== this.selected) return false;
+      if (slot.status !== "ready") { this.board = null; this.boardError = `Selected project: ${slot.status}${slot.status === "limit_exceeded" ? " (legacy project dimensions exceed the bounded view; use paged Lanes or Queue)" : ""}`; boardToken.observationVersion = meta; return true; }
+      this.boardError = null;
+      return this.applyProjectObservation(scope, slot.data, cx, meta);
+    });
+    if (this.workspaceView === "projects" && this.projectView === "lanes") this.lanePages.forEach((page, index) => add({ slot: `lanes-${index}`, kind: "lanes", project_id: this.selected, cursor: page.start }, page, (slot, meta, readAt) => {
+      if (!this.lanePages.includes(page) || scope.project !== this.selected || !acceptObservationVersion(page.observationVersion, meta)) return false;
+      page.observationVersion = meta; page.items = slot.status === "ready" ? slot.data : []; page.error = slot.status === "ready" ? null : slot.status;
+      page.next = slot.cursor || page.start; page.hasMore = slot.has_more; page.readAt = readAt;
+      this.lanes = this.lanePages.flatMap(item => item.items || []); return true;
+    }));
+    for (const kind of ["inbox", "results"]) {
+      const visible = kind === "inbox" ? this.workspaceView === "inbox" : this.workspaceView === "projects" && this.projectView === "results";
+      if (!visible) continue;
+      const collection = this.collections[kind];
+      collection.pages.forEach((page, index) => add({ slot: `${kind}-${index}`, kind, project_id: this.selected, cursor: page.start }, page, (slot, meta, readAt) => {
+        if (this.collections[kind] !== collection || !collection.pages.includes(page) || !acceptObservationVersion(page.observationVersion, meta)) return false;
+        page.observationVersion = meta; page.items = slot.status === "ready" ? (kind === "inbox" ? slot.data.messages : slot.data.items) : [];
+        page.error = slot.status === "ready" ? null : `${kind} page ${page.start}: ${slot.status}`;
+        page.next = slot.cursor || page.start; page.hasMore = slot.has_more; page.readAt = readAt;
+        collection.history = collection.pages.flatMap(item => item.items || []); collection.recent = [];
+        this.combineCollection(kind, collection);
+        for (const item of page.items) collection.readTimes[this.itemID(kind, item)] = readAt;
+        const last = collection.pages[collection.pages.length - 1]; collection.cursor = last.next || last.start; collection.hasMore = last.hasMore;
+        collection.readAt = readAt; collection.loaded = true; collection.loading = false;
+        collection.error = collection.pages.map(item => item.error).filter(Boolean).join("\n") || null; return true;
+      }));
+    }
+    if (this.detailJob && ((this.workspaceView === "projects" && this.projectView === "work") || this.keyboardMode)) {
+      const token = this.projectDetailToken, job = this.detailJob;
+      add({ slot: "project-job", kind: "job", project_id: this.selected, job_id: job }, token, (slot, meta) => {
+        if (this.projectDetailToken !== token || this.detailJob !== job || scope.project !== this.selected || !acceptObservationVersion(token.observationVersion, meta)) return false;
+        token.observationVersion = meta; this.detail = slot.status === "ready" ? slot.data : null;
+        this.detailError = slot.status === "ready" ? null : `Selected job: ${slot.status}`; this.detailLoading = false; return true;
+      });
+    }
+    if (this.keyboardMode && ["manifest", "manifest-text"].includes(this.keyboardTarget.kind) && this.manifestDigest) {
+      const token = this.manifestToken, digest = this.manifestDigest;
+      add({ slot: "manifest", kind: "manifest", project_id: this.selected, digest }, token, (slot, meta) => {
+        if (this.manifestToken !== token || this.manifestDigest !== digest || !acceptObservationVersion(token.observationVersion, meta)) return false;
+        token.observationVersion = meta; this.manifest = slot.status === "ready" ? slot.data : null;
+        this.manifestError = slot.status === "ready" ? null : `Manifest: ${slot.status}`; this.manifestLoading = false; return true;
+      });
+    }
+    const mail = this.mailObservation;
+    if (this.keyboardMode && mail && this.keyboardTarget.id === mail.id) add({ slot: "selected-mail", kind: "mail", project_id: this.selected, message_id: mail.id, sequence: mail.sequence }, mail, (slot, meta, readAt) => {
+      if (this.mailObservation !== mail || !acceptObservationVersion(mail.observationVersion, meta)) return false;
+      mail.observationVersion = meta; mail.status = slot.status; mail.data = slot.status === "ready" ? slot.data : null; mail.readAt = readAt; return true;
+    });
+    return descriptors;
+  }
+
+  resetObservationVersions() {
+    // New binding means new projection ownership, not just new version labels.
+    // Keep private journals/reviews separate; never reuse their old authority.
+    this.observationReset = "Stored observation context changed; prior authority suspended.";
+    this.generation++; this.detailGeneration++; this.manifestGeneration++;
+    this.retainedPrivate = this.retainedPrivate || [];
+    if (!this.compose.authoritySuspended || !this.intake.authoritySuspended) this.retainedPrivate.push({ compose: this.compose, intake: this.intake, mailConfirmation: this.mailConfirmation, worktreeCheck: { ...this.worktreeCheck }, publication: { ...this.publication } });
+    this.compose.authoritySuspended = true; this.intake.authoritySuspended = true;
+    for (const state of Object.values(this.mailActions)) state.authoritySuspended = true;
+    this.worktreeCheck.generation++; this.worktreeCheck.screen = false;
+    this.publication.generation++; this.publication.screen = false;
+    this.projectPages = [{ start: "0" }]; this.projects = []; this.projectsReadAt = null; this.projectsHasMore = false;
+    this.board = null; this.boardVersion = null; this.boardError = null; this.boardToken = {};
+    this.lanePages = [{ start: "0" }]; this.lanes = [];
+    this.collections = { inbox: emptyCollection(), results: emptyCollection() };
+    this.detail = null; this.detailJob = null; this.detailError = null; this.detailLoading = false; this.projectDetailToken = {};
+    this.manifest = null; this.manifestDigest = null; this.manifestError = null; this.manifestLoading = false; this.manifestToken = {};
+    this.mailObservation = null; this.expandedMessage = null;
+    this.error = null; this.loading = false;
+    this.keyboardTarget = { kind: "refresh" }; this.keyboardPage = 0;
+    this.queue.resetObservationVersions();
   }
 
   clearInspection() {
@@ -228,65 +335,16 @@ export default class OCQ extends View {
     this.manifestLoading = false;
     this.expandedMessage = null;
     this.collections = { inbox: emptyCollection(), results: emptyCollection() };
+    this.boardToken = {}; this.projectDetailToken = {}; this.manifestToken = {}; this.mailObservation = null;
+    this.boardVersion = null; this.boardError = null; this.lanes = [];
+    this.lanePages = [{ start: "0" }];
     this.mailConfirmation = null;
     this.compose = { ...this.compose, screen: false, preview: null, context: null, form: null, options: null, confirm: false, working: false };
     this.intake = { ...this.intake, screen: false, preview: null, context: null, confirm: false, working: false };
   }
 
   refresh(cx, notify = true) {
-    if (this.queueMode) return;
-    if (this.loading) return;
-    const active = spaces().find((s) => s.active);
-    if (!active) {
-      this.error = null;
-      if (notify) cx.notify();
-      return;
-    }
-    if (active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder) { if (notify) cx.notify(); return; }
-    const generation = ++this.generation;
-    const machine = this.machine;
-    const folder = this.folder;
-    this.loading = true;
-    this.error = null;
-    cx.spawn(async (cx) => {
-      try {
-        const list = await exec("ocq-herdr", ["projects"], { on: machine });
-        if (list.code !== 0) throw new Error(list.stderr || "Cannot read projects");
-        const projectList = JSON.parse(list.stdout);
-        const projects = projectList.projects;
-        const matching = projects.filter((p) => p.repo_root === folder);
-        const selected = projects.some((p) => p.project_id === this.selected)
-          ? this.selected : matching.length === 1 ? matching[0].project_id
-            : projects.length === 1 ? projects[0].project_id : null;
-        let board = null;
-        if (selected) {
-          const result = await exec("ocq-herdr", ["board", selected], { on: machine });
-          if (result.code !== 0) throw new Error(result.stderr || "Cannot read project board");
-          board = JSON.parse(result.stdout);
-        }
-        if (generation !== this.generation) return;
-        if (selected !== this.selected) this.clearInspection();
-        this.projects = projects;
-        this.projectsReadAt = projectList.read_at;
-        this.selected = selected;
-        this.board = board;
-        if (selected) {
-          for (const kind of ["inbox", "results"]) {
-            const collection = this.collections[kind];
-            if (!collection.recentLoading) this.loadRecent(kind, cx);
-            if (!collection.loading && !collection.loaded) this.loadCollection(kind, false, cx);
-            else if (!collection.loading && collection.loaded && collection.history.length) this.refreshHistory(kind, cx);
-          }
-        }
-      } catch (e) {
-        if (generation === this.generation) {
-          this.error = String(e);
-        }
-      } finally {
-        if (generation === this.generation) this.loading = false;
-        cx.notify();
-      }
-    });
+    this.updates.readAgain(cx);
     if (notify) cx.notify();
   }
 
@@ -295,138 +353,21 @@ export default class OCQ extends View {
   combineCollection(kind, collection) {
     const latest = new Set(collection.recent.map((item) => this.itemID(kind, item)));
     const items = collection.recent.slice().reverse().concat(collection.history.filter((item) => !latest.has(this.itemID(kind, item))));
-    // Keep an item being inspected reachable if it rolls out of the recent window.
-    if (this.keyboardMode && this.keyboardTarget.id && !items.some((item) => this.itemID(kind, item) === this.keyboardTarget.id)) {
-      const selected = collection.items.find((item) => this.itemID(kind, item) === this.keyboardTarget.id);
-      if (selected) items.push(selected);
-    }
+    // Inspection identity remains stable, but missing/limited pages must not
+    // reinsert old objects as current data. Exact mail has its own selector.
     collection.items = items;
     const retained = new Set(items.map((item) => this.itemID(kind, item)));
     for (const id of Object.keys(collection.readTimes)) if (!retained.has(id)) delete collection.readTimes[id];
   }
 
   loadRecent(kind, cx) {
-    const active = spaces().find((s) => s.active);
-    if (!this.selected || !active || active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder) return;
-    const collection = this.collections[kind], projectID = this.selected, machine = this.machine;
-    if (collection.recentLoading) return;
-    collection.recentLoading = true;
-    cx.spawn(async (cx) => {
-      try {
-        const response = await exec("ocq-herdr", [`recent-${kind}`, projectID], { on: machine });
-        if (response.code !== 0) throw new Error(response.stderr || `Cannot read recent ${kind}`);
-        const page = JSON.parse(response.stdout), items = kind === "inbox" ? page.messages : page.items;
-        if (!Array.isArray(items) || !page.read_at) throw new Error("Invalid recent collection response");
-        if (this.collections[kind] !== collection) return;
-        const previous = new Map(collection.items.map((item) => [this.itemID(kind, item), item]));
-        collection.recent = items.map((item) => {
-          const id = this.itemID(kind, item);
-          return readOrder(collection.readTimes[id]) > readOrder(page.read_at) && previous.has(id) ? previous.get(id) : item;
-        });
-        collection.recentReadAt = page.read_at;
-        collection.recentError = null;
-        const updates = new Map(items.map((item) => [this.itemID(kind, item), item]));
-        collection.history = collection.history.map((item) => {
-          const id = this.itemID(kind, item);
-          return updates.has(id) && readOrder(collection.readTimes[id]) <= readOrder(page.read_at) ? updates.get(id) : item;
-        });
-        for (const item of items) {
-          const id = this.itemID(kind, item);
-          if (readOrder(collection.readTimes[id]) < readOrder(page.read_at)) collection.readTimes[id] = page.read_at;
-        }
-        this.combineCollection(kind, collection);
-      } catch (e) {
-        if (this.collections[kind] === collection) collection.recentError = String(e);
-      } finally {
-        if (this.collections[kind] === collection) collection.recentLoading = false;
-        cx.notify();
-      }
-    });
-  }
-
-  // Refresh one already-loaded historical page per cycle; recent activity has
-  // its own bounded read and never waits for this scan to reach the tail.
-  refreshHistory(kind, cx) {
-    const collection = this.collections[kind];
-    if (collection.refreshingHistory || !collection.history.length) return;
-    const projectID = this.selected, machine = this.machine, cursor = collection.refreshCursor;
-    const lastID = this.itemID(kind, collection.history[collection.history.length - 1]);
-    collection.refreshingHistory = true;
-    cx.spawn(async (cx) => {
-      try {
-        const response = await exec("ocq-herdr", [kind, projectID, cursor], { on: machine });
-        if (response.code !== 0) throw new Error(response.stderr || `Cannot refresh ${kind}`);
-        const page = JSON.parse(response.stdout), items = kind === "inbox" ? page.messages : page.items;
-        if (!Array.isArray(items) || typeof page.has_more !== "boolean" || typeof page.cursor !== "string" || !page.read_at) throw new Error("Invalid history refresh response");
-        if (this.collections[kind] !== collection) return;
-        const updates = new Map(items.map((item) => [this.itemID(kind, item), item]));
-        collection.history = collection.history.map((item) => {
-          const id = this.itemID(kind, item);
-          return updates.has(id) && readOrder(collection.readTimes[id]) <= readOrder(page.read_at) ? updates.get(id) : item;
-        });
-        collection.recent = collection.recent.map((item) => {
-          const id = this.itemID(kind, item);
-          return updates.has(id) && readOrder(collection.readTimes[id]) <= readOrder(page.read_at) ? updates.get(id) : item;
-        });
-        for (const item of items) {
-          const id = this.itemID(kind, item);
-          if (readOrder(collection.readTimes[id]) < readOrder(page.read_at)) collection.readTimes[id] = page.read_at;
-        }
-        collection.refreshCursor = !page.has_more || page.cursor === cursor || updates.has(lastID) ? "0" : page.cursor;
-        collection.error = null;
-        this.combineCollection(kind, collection);
-      } catch (e) {
-        if (this.collections[kind] === collection) collection.error = String(e);
-      } finally {
-        if (this.collections[kind] === collection) collection.refreshingHistory = false;
-        cx.notify();
-      }
-    });
+    this.updates.readAgain(cx);
   }
 
   loadCollection(kind, reset, cx) {
-    const active = spaces().find((s) => s.active);
-    if (!this.selected || !active || active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder) return;
-    if (reset) this.collections[kind] = emptyCollection();
     const collection = this.collections[kind];
-    if (reset) this.loadRecent(kind, cx);
-    if (collection.loading) return;
-    const projectID = this.selected, machine = this.machine;
-    collection.loading = true;
-    collection.error = null;
-    cx.spawn(async (cx) => {
-      try {
-        const response = await exec("ocq-herdr", [kind, projectID, collection.cursor], { on: machine });
-        if (response.code !== 0) throw new Error(response.stderr || `Cannot read ${kind}`);
-        const page = JSON.parse(response.stdout);
-        if (typeof page.has_more !== "boolean") throw new Error("Update ocq-herdr on this machine to read paged data safely.");
-        if (this.collections[kind] !== collection) return;
-        const items = kind === "inbox" ? page.messages : page.items;
-        const updates = new Map(items.map((item) => [this.itemID(kind, item), item]));
-        collection.recent = collection.recent.map((item) => {
-          const id = this.itemID(kind, item);
-          return updates.has(id) && readOrder(collection.readTimes[id]) <= readOrder(page.read_at) ? updates.get(id) : item;
-        });
-        collection.history = collection.history.concat(items.map((item) => {
-          const id = this.itemID(kind, item);
-          return readOrder(collection.readTimes[id]) > readOrder(page.read_at) ? collection.items.find((existing) => this.itemID(kind, existing) === id) || item : item;
-        }));
-        this.combineCollection(kind, collection);
-        for (const item of items) {
-          const id = this.itemID(kind, item);
-          if (readOrder(collection.readTimes[id]) < readOrder(page.read_at)) collection.readTimes[id] = page.read_at;
-        }
-        collection.cursor = page.cursor;
-        collection.hasMore = page.has_more;
-        collection.readAt = page.read_at;
-        collection.loaded = true;
-      } catch (e) {
-        if (this.collections[kind] === collection) collection.error = String(e);
-      } finally {
-        if (this.collections[kind] === collection) collection.loading = false;
-        cx.notify();
-      }
-    });
+    if (!reset && collection.hasMore && !collection.pages.some(page => page.start === collection.cursor)) collection.pages.push({ start: collection.cursor });
+    this.updates.readAgain(cx);
     cx.notify();
   }
 
@@ -443,7 +384,7 @@ export default class OCQ extends View {
 
   composeLocal() {
     const active = spaces().find((s) => s.active);
-    return Boolean(active && active.machine === null && this.machine === null && active.id === this.spaceID && active.folder === this.folder);
+    return Boolean(!this.closed && active && active.machine === null && this.machine === null && active.id === this.spaceID && active.folder === this.folder);
   }
 
   composeContext(lane) {
@@ -457,7 +398,7 @@ export default class OCQ extends View {
   }
 
   composeCurrent(c, context) {
-    return this.compose === c && c.screen && c.context === context && this.composeContextCurrent(context);
+    return !c.authoritySuspended && this.compose === c && c.screen && c.context === context && this.composeContextCurrent(context);
   }
 
   composeQuoted(value) { return visibleString(value); }
@@ -522,7 +463,7 @@ export default class OCQ extends View {
     const c = this.compose;
     if (!this.composeLocal() || c.working) return;
     const scope = { space: this.spaceID, folder: this.folder, project: this.selected, screen: c.screen };
-    const current = () => this.compose === c && c.screen === scope.screen && this.composeLocal() && scope.space === this.spaceID && scope.folder === this.folder && scope.project === this.selected;
+    const current = () => !c.authoritySuspended && this.compose === c && c.screen === scope.screen && this.composeLocal() && scope.space === this.spaceID && scope.folder === this.folder && scope.project === this.selected;
     c.working = true;
     cx.spawn(async (cx) => {
       try {
@@ -561,9 +502,9 @@ export default class OCQ extends View {
   openCompose(lane, cx) {
     const previous = this.compose;
     if (previous.working && previous.screen && this.composeContextCurrent(previous.context)) return;
-    const c = this.compose = { ...previous, working: false, preview: null, form: null, options: null, context: null };
+    const c = this.compose = { ...previous, authoritySuspended: false, working: false, preview: null, form: null, options: null, context: null };
     c.screen = true; c.confirm = false; c.error = null;
-    if (lane && c.state === "idle") {
+    if (lane && ["idle", "loading"].includes(c.state)) {
       c.context = this.composeContext(lane);
       if (c.context) c.form = new ComposeForm(this, c.context);
     }
@@ -663,7 +604,7 @@ export default class OCQ extends View {
     // The selected project must be explicit; the returned lane/job is checked
     // against the current stored board before it can be confirmed.
     const context = { space: this.spaceID, folder: this.folder, project: this.selected };
-    const current = () => this.compose === c && c.screen && c.id === id && c.state === initialState && c.recoveryState === initialRecovery && this.composeLocal() && context.space === this.spaceID && context.folder === this.folder && context.project === this.selected;
+    const current = () => !c.authoritySuspended && this.compose === c && c.screen && c.id === id && c.state === initialState && c.recoveryState === initialRecovery && this.composeLocal() && context.space === this.spaceID && context.folder === this.folder && context.project === this.selected;
     c.working = true; c.error = null; c.preview = null; c.confirm = false;
     cx.spawn(async (cx) => {
       try {
@@ -698,7 +639,7 @@ export default class OCQ extends View {
     if (action === "retire" && !["completed", "cancelled"].includes(c.state)) return;
     if (!["dispatch", "cancel", "reconcile", "retire"].includes(action)) return;
     const scope = { space: this.spaceID, folder: this.folder, project: this.selected };
-    const current = () => this.compose === c && c.screen && this.composeLocal() && scope.space === this.spaceID && scope.folder === this.folder && scope.project === this.selected;
+    const current = () => !c.authoritySuspended && this.compose === c && c.screen && this.composeLocal() && scope.space === this.spaceID && scope.folder === this.folder && scope.project === this.selected;
     c.working = true; c.confirm = false; c.error = null;
     cx.spawn(async (cx) => {
       let claimLaunched = false, claimKnown = false, sendLaunched = false;
@@ -740,7 +681,7 @@ export default class OCQ extends View {
   }
 
   intakeCurrent(context) {
-    return Boolean(context && this.intake.context === context && this.intake.screen && this.composeLocal() && context.machine === this.machine && context.space === this.spaceID && context.folder === this.folder && context.selection === this.selected);
+    return Boolean(!this.intake.authoritySuspended && context && this.intake.context === context && this.intake.screen && this.composeLocal() && context.machine === this.machine && context.space === this.spaceID && context.folder === this.folder && context.selection === this.selected);
   }
 
   intakeSubmission(raw) {
@@ -794,7 +735,7 @@ export default class OCQ extends View {
 
   openIntake(cx, newProject = false, reviewTarget = null) {
     if (this.intake.working && this.intakeCurrent(this.intake.context)) return;
-    const i = this.intake = { ...this.intake, working: false };
+    const i = this.intake = { ...this.intake, authoritySuspended: false, working: false };
     i.screen = true; i.context = Object.freeze({ machine: this.machine, space: this.spaceID, folder: this.folder, selection: this.selected, project: newProject ? null : this.selected, revision: this.board?.project?.current_binding?.revision ?? null, newProject, reviewTarget: reviewTarget ? Object.freeze({ association: reviewTarget.association, job: reviewTarget.job, digest: reviewTarget.digest, source: reviewTarget.source, verification: reviewTarget.verification }) : null, submission: null, registration: null, generatedSubmission: null });
     if (newProject) i.kind = "registration";
     else if (reviewTarget) i.kind = "submission";
@@ -1087,57 +1028,22 @@ export default class OCQ extends View {
   }
 
   targets() {
-    const projects = this.projects.length > 1 ? this.projects.map((p) => ({
-      kind: "project", id: p.project_id, label: `Project: ${p.label} · ${p.project_id}`,
-    })) : [];
-    const jobs = (this.board?.project?.jobs ?? []).map((j) => ({
-      kind: "job", id: j.job_id, label: `Job: ${j.role} · ${attention(j) || j.state} · ${j.job_id}`,
-    }));
-    const publications = (this.board?.project?.jobs ?? []).map((j) => ({ kind: "publication", id: j.job_id, label: `Import / publish manifest · ${j.role} · ${j.job_id}` }));
-    const captures = (this.board?.project?.jobs ?? []).filter((j) => j.role === "implementation").map((j) => ({ kind: "capture", id: j.job_id, label: `Prepare / publish machine snapshot · ${j.job_id}` }));
-    const messages = this.collections.inbox.items.flatMap((m) => {
-      const targets = [{ kind: "message", id: m.id, label: `Message: ${m.subject} · ${m.id}` }];
-      const options = this.mailOptions(m);
-      if (options.read) targets.push({ kind: "mail-read", id: m.id, label: `Mark read: ${m.subject} · ${m.id}` });
-      if (options.archive) targets.push({ kind: "mail-archive", id: m.id, label: `Archive: ${m.subject} · ${m.id}` });
-      if (options.check) targets.push({ kind: "mail-check", id: m.id, label: `Check outcome: ${m.subject} · ${m.id}` });
-      return targets;
-    });
-    const results = this.collections.results.items.map((r) => ({
-      kind: "result", id: r.event.id, label: `Completion: ${r.role} · ${r.event.outcome} · ${r.job_id}`,
-    }));
-    const lanes = (this.board?.project?.lanes ?? []).map((lane) => ({
-      kind: "lane", id: lane.lane_id, label: `Lane: ${lane.role} · ${lane.lane_id}`,
-    }));
-    const composeLanes = (this.board?.project?.lanes ?? []).map((lane) => ({ kind: "compose-lane", id: lane.lane_id, label: `Compose update from lane ${lane.lane_id}` }));
-    const manifests = [];
-    const addManifest = (id, label) => {
-      if (id && !manifests.some((m) => m.id === id)) manifests.push({ kind: "manifest", id, label: `Manifest: ${label} · ${id}` });
-    };
-    addManifest(this.board?.project?.current_binding?.handoff_manifest_digest, "handoff");
-    addManifest(this.detail?.brief_digest, "brief");
-    for (const a of this.detail?.associations ?? []) addManifest(a.manifest_digest, `${a.kind} · ${a.verification}`);
-    const checks = (this.detail?.associations ?? []).filter((a) => a.kind === "result").map((a) => ({ kind: "worktree-check", id: a.id, label: `Verify owned worktree · ${a.manifest_digest}`, association: a, worktree: this.detail?.job?.agent?.worktree }));
-    const reviews = (this.detail?.associations ?? []).filter((a) => a.kind === "result" && a.availability === "available").map((a) => ({ kind: "review-submit", id: a.id, label: `Submit review job for exact result · ${a.manifest_digest}`, association: a }));
-    for (const m of this.collections.inbox.items) addManifest(m.manifest_digest, `message attachment · ${m.subject}`);
-    for (const r of this.collections.results.items) {
-      for (const a of r.result_summary?.associations ?? []) addManifest(a.manifest_digest, `${a.kind} · ${a.verification}`);
-    }
-    if (this.manifest !== null && this.manifestDigest) manifests.push({
-      kind: "manifest-text", id: this.manifestDigest, label: `Original manifest text · ${this.manifestDigest}`,
-    });
-    const controls = [];
-    for (const kind of ["inbox", "results"]) {
-      controls.push({ kind: "reload", id: kind, label: `Reload ${kind}` });
-      if (this.collections[kind].hasMore) controls.push({ kind: "more", id: kind, label: `Load more ${kind}` });
-    }
-    const summary = this.board ? [{ kind: "summary", label: "Project overview and binding" }] : [];
-    return [{ kind: "refresh", label: "Refresh board" }, { kind: "queue", label: "Read queue on selected machine" }, { kind: "compose", label: "Compose and recovery" }, { kind: "intake", label: "Prepare project intake" }, ...(this.composeLocal() && this.selected ? [{ kind: "implementation-submit", label: "Submit implementation job" }] : []), ...projects, ...summary, ...jobs, ...publications, ...captures, ...lanes, ...composeLanes, ...manifests, ...checks, ...reviews, ...controls, ...results, ...messages];
+    return [...(this.headerTargets || []), ...(this.compatibilityTargets || []), ...(this.renderTargets || [])];
+  }
+
+  // Register alongside the rendered control, including its original callback
+  // guard. Hidden sections never contribute keyboard actions. Inspection identity
+  // is separate from navigation identity so data updates cannot redirect it.
+  registerAction(id, label, action, list = this.renderTargets) {
+    const run = cx => { this.handle.focus(); this.navigationTarget = id; this.navigationLabel = label; action(cx); };
+    list.push({ id, label, run });
+    if (this.navigationTarget === id) this.navigationLabel = label;
+    return (_e, cx) => { cx.stop_propagation(); run(cx); };
   }
 
   key(e, cx) {
     if (e.modifiers.control || e.modifiers.alt || e.modifiers.platform) return;
-    if (this.intake.screen) {
+    if (this.intake.screen && !this.intake.authoritySuspended) {
       if (e.key === "f6") { this.handle.focus(); this.intakeInputFocused = false; if (this.registrationForm) this.registrationForm.focused = false; if (this.submissionForm) this.submissionForm.focused = false; cx.stop_propagation(); cx.notify(); return; }
       if (this.intakeInputFocused || (this.intake.entry === "form" && (this.intake.kind === "registration" ? this.registrationForm?.focused : this.submissionForm?.focused))) {
         if (e.key === "escape") { this.handle.focus(); cx.stop_propagation(); }
@@ -1161,7 +1067,7 @@ export default class OCQ extends View {
       else return;
       cx.stop_propagation(); cx.notify(); return;
     }
-    if (this.compose.screen) {
+    if (this.compose.screen && !this.compose.authoritySuspended) {
       const c = this.compose;
       if (e.key === "f6") { this.handle.focus(); if (c.form) c.form.focused = false; cx.stop_propagation(); cx.notify(); return; }
       if (c.form?.focused) {
@@ -1183,48 +1089,26 @@ export default class OCQ extends View {
       else return;
       cx.stop_propagation(); cx.notify(); return;
     }
-    if (this.mailConfirmation) {
+    if (this.mailConfirmation && this.mailContextCurrent(this.mailConfirmation)) {
       if (e.key === "escape" || e.key === "n") { this.mailConfirmation = null; cx.notify(); }
       else if (e.key === "y" && !e.is_held) this.confirmArchive(cx);
       cx.stop_propagation();
       return;
     }
     const targets = this.targets();
-    let index = targets.findIndex((t) => t.kind === this.keyboardTarget.kind && t.id === this.keyboardTarget.id);
+    if (!targets.length) return;
+    let index = targets.findIndex(t => t.id === this.navigationTarget);
     if (index < 0) index = 0;
     if (e.key === "down" || e.key === "up") {
       index = (index + (e.key === "down" ? 1 : targets.length - 1)) % targets.length;
-      this.keyboardTarget = { kind: targets[index].kind, id: targets[index].id };
-      this.keyboardPage = 0;
-      this.keyboardMode = true;
+      this.navigationTarget = targets[index].id;
+      this.navigationLabel = targets[index].label;
     } else if (e.key === "escape") this.keyboardMode = false;
     else if (e.key === "left") this.keyboardPage = Math.max(0, this.keyboardPage - 1);
-    else if (e.key === "right") this.keyboardPage = Math.min(this.keyboardPages(targets[index]).length - 1, this.keyboardPage + 1);
+    else if (e.key === "right") this.keyboardPage = Math.min(this.keyboardPages(this.keyboardTarget).length - 1, this.keyboardPage + 1);
     else if (e.key === "enter" || e.key === "space") {
-      this.keyboardMode = true;
-      const target = targets[index];
-      if (target.kind === "refresh") this.refresh(cx);
-      else if (target.kind === "queue") this.openQueue(cx);
-      else if (target.kind === "compose") this.openCompose(null, cx);
-      else if (target.kind === "intake") this.openIntake(cx);
-      else if (target.kind === "implementation-submit") this.openImplementationIntake(cx);
-      else if (target.kind === "compose-lane") this.openCompose((this.board?.project?.lanes ?? []).find((lane) => lane.lane_id === target.id), cx);
-      else if (target.kind === "project") this.select(target.id, cx);
-      else if (target.kind === "job") this.inspect(target.id, cx);
-      else if (target.kind === "publication") this.publication.open(this, target.id, cx);
-      else if (target.kind === "capture") this.publication.open(this, target.id, cx, true);
-      else if (target.kind === "manifest") this.inspectManifest(target.id, cx);
-      else if (target.kind === "worktree-check") this.worktreeCheck.open(this, target.association, target.worktree, cx);
-      else if (target.kind === "review-submit") this.openReviewIntake(target.association, cx);
-      else if (target.kind === "more" || target.kind === "reload") this.loadCollection(target.id, target.kind === "reload", cx);
-      else if (target.kind === "mail-read" || target.kind === "mail-archive") {
-        const message = this.collections.inbox.items.find((m) => m.id === target.id);
-        if (message) this.requestMailAction(message, target.kind === "mail-archive", cx);
-      } else if (target.kind === "mail-check") {
-        const message = this.collections.inbox.items.find((m) => m.id === target.id);
-        if (message) this.checkMailAction(message, cx);
-      }
-      this.keyboardPage = 0;
+      if (e.is_held) return;
+      targets[index].run(cx);
     } else return;
     cx.stop_propagation();
     cx.notify();
@@ -1235,6 +1119,10 @@ export default class OCQ extends View {
     this.keyboardPage = 0;
     this.keyboardMode = true;
     this.handle.focus();
+    if (kind === "message") {
+      const message = this.collections.inbox.items.find(item => item.id === id);
+      this.mailObservation = message ? { id, sequence: message.sequence_text, status: "loading", data: null } : null;
+    }
     if (kind === "manifest") this.inspectManifest(id, cx);
     else cx.notify();
   }
@@ -1269,7 +1157,7 @@ export default class OCQ extends View {
       if (!raw) return null;
       const saved = JSON.parse(raw);
       if (saved.version !== 1 || !["read", "archive"].includes(saved.mode) || typeof saved.sequence !== "string" || !/^[0-9]+$/.test(saved.sequence)) throw new Error("invalid journal");
-      return this.mailActions[key] = { status: "uncertain", mode: saved.mode, sequence: saved.sequence };
+      return this.mailActions[key] = { status: "uncertain", mode: saved.mode, sequence: saved.sequence, authoritySuspended: Boolean(this.observationReset) };
     } catch (_e) {
       return this.mailActions[key] = { status: "blocked", mode: "unknown" };
     }
@@ -1277,6 +1165,7 @@ export default class OCQ extends View {
 
   mailOptions(message) {
     const state = this.mailState(message);
+    if (state?.authoritySuspended) return { check: false, read: false, archive: false };
     if (state && state.status !== "observed") return { check: state.status === "uncertain", read: false, archive: false };
     const validSequence = typeof message.sequence_text === "string" && /^[0-9]+$/.test(message.sequence_text);
     const read = message.read_at || state?.message?.read_at;
@@ -1287,6 +1176,7 @@ export default class OCQ extends View {
   mailStatus(message) {
     const state = this.mailState(message);
     if (!state) return "";
+    if (state.authoritySuspended) return "Prior-context private action evidence retained; not a current message observation or authorization.";
     if (state.status === "journaling") return "Saving the action record; no request has been sent yet.";
     if (state.status === "pending") return `${state.mode} request in progress; outcome not yet known.`;
     if (state.status === "checking") return "Reading back the exact stored message…";
@@ -1298,14 +1188,14 @@ export default class OCQ extends View {
   mailContext(message) {
     const active = spaces().find((s) => s.active);
     if (!active || active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder || !this.selected || message.project_id !== this.selected) return null;
-    return { space: active.id, machine: active.machine, folder: active.folder, project: this.selected,
+    return { generation: this.generation, space: active.id, machine: active.machine, folder: active.folder, project: this.selected,
       id: message.id, sequence: message.sequence_text, subject: message.subject,
       key: this.mailKey(active.machine, this.selected, message.id) };
   }
 
   mailContextCurrent(context) {
     const active = spaces().find((s) => s.active);
-    return Boolean(active && active.id === context.space && active.machine === context.machine && active.folder === context.folder && this.spaceID === context.space && this.selected === context.project);
+    return Boolean(!this.closed && context.generation === this.generation && active && active.id === context.space && active.machine === context.machine && active.folder === context.folder && this.spaceID === context.space && this.selected === context.project);
   }
 
   requestMailAction(message, archive, cx) {
@@ -1346,8 +1236,8 @@ export default class OCQ extends View {
         localStorage.setItem(context.key, JSON.stringify({ version: 1, mode, sequence: context.sequence }));
         await localStorage.flush();
         if (!this.mailContextCurrent(context)) {
-          localStorage.removeItem(context.key);
-          delete this.mailActions[context.key];
+          state.status = "blocked";
+          state.error = "Context changed after journal persistence; retained evidence only, no dispatch.";
           cx.notify();
           return;
         }
@@ -1370,7 +1260,7 @@ export default class OCQ extends View {
 
   checkMailAction(message, cx) {
     const context = this.mailContext(message), state = this.mailState(message);
-    if (!context || !state || state.status !== "uncertain" || state.sequence !== context.sequence) return;
+    if (!context || !state || state.authoritySuspended || state.status !== "uncertain" || state.sequence !== context.sequence) return;
     if (this.keyboardMode && this.keyboardTarget.id === context.id) {
       this.keyboardTarget = { kind: "message", id: context.id };
       this.keyboardPage = 0;
@@ -1386,6 +1276,7 @@ export default class OCQ extends View {
     cx.notify();
     try {
       const result = await exec("ocq-herdr", ["mail", context.project, context.id, state.sequence], { on: context.machine });
+      if (!this.mailContextCurrent(context)) { state.status = "uncertain"; state.authoritySuspended = true; return; }
       if (result.code !== 0) throw new Error("read-back failed");
       const observed = JSON.parse(result.stdout), item = observed.message;
       if (!item || item.id !== context.id || item.project_id !== context.project || item.sequence_text !== state.sequence || state.sequence !== context.sequence || !observed.read_at) throw new Error("read-back identity mismatch");
@@ -1398,13 +1289,8 @@ export default class OCQ extends View {
         state.status = "observed";
         state.message = item;
         state.readAt = observed.read_at;
-        if (this.mailContextCurrent(context)) {
-          const inbox = this.collections.inbox;
-          inbox.history = inbox.history.map((m) => m.id === item.id ? item : m);
-          inbox.recent = inbox.recent.map((m) => m.id === item.id ? item : m);
-          this.combineCollection("inbox", inbox);
-          inbox.readTimes[item.id] = observed.read_at;
-        }
+        // Retain explicit action read-back separately. Only revision-bound
+        // observation slots update the visible inbox/exact-mail projection.
       }
     } catch (_e) { state.status = "uncertain"; }
     cx.notify();
@@ -1415,7 +1301,7 @@ export default class OCQ extends View {
   keyboardPages(target) {
     let value;
     if (target.kind === "project") value = this.projects.find((p) => p.project_id === target.id);
-    else if (target.kind === "summary") value = this.board?.project;
+    else if (target.kind === "summary") value = this.boardError || this.board?.project;
     else if (target.kind === "job") {
       const stored = this.board?.project?.jobs?.find((j) => j.job_id === target.id);
       const detail = this.detailJob === target.id ? this.detail?.job : null;
@@ -1430,13 +1316,13 @@ export default class OCQ extends View {
         try { value = JSON.parse(this.manifest); } catch (_e) { value = this.manifest; }
       }
     } else if (target.kind === "manifest-text") {
-      value = this.manifestDigest === target.id ? this.manifest : "Read the manifest first.";
-    } else if (target.kind === "message") value = this.collections.inbox.items.find((m) => m.id === target.id);
+      value = this.manifestDigest === target.id ? (this.manifestLoading ? "Loading manifest…" : this.manifestError || this.manifest) : "Read the manifest first.";
+    } else if (target.kind === "message") value = this.mailObservation?.id === target.id ? (this.mailObservation.status === "ready" ? this.mailObservation.data : `Selected message: ${this.mailObservation.status}`) : this.collections.inbox.items.find((m) => m.id === target.id);
     else if (target.kind === "mail-read") value = "Activate to mark this message read. Opening it does not mark it read. Its stored state is checked afterward.";
     else if (target.kind === "mail-archive") value = "Activate to review a separate archive confirmation. Archiving cannot be undone; the message remains retained.";
     else if (target.kind === "mail-check") value = "Activate to read back the exact message. An absent change does not prove a delayed request cannot still complete.";
-    else if (target.kind === "result") value = this.collections.results.items.find((r) => r.event.id === target.id);
-    else if (target.kind === "lane") value = this.board?.project?.lanes?.find((lane) => lane.lane_id === target.id);
+    else if (target.kind === "result") value = this.collections.results.items.find((r) => r.event.id === target.id) || this.collections.results.error || "Selected completion is not present in the loaded pages at this read.";
+    else if (target.kind === "lane") value = (this.lanes || this.board?.project?.lanes || []).find((lane) => lane.lane_id === target.id) || this.lanePages.map(page => page.error).filter(Boolean).join("\n") || "Selected lane is not present in the loaded pages at this read.";
     else value = target.kind === "refresh" ? "Activate to refresh the stored project board." : target.kind === "compose" ? "Activate to open local compose and recovery. Choose a lane to start a new update." : `Activate to ${target.label.toLowerCase()}.`;
     const pages = [];
     const addText = (title, text) => {
@@ -1486,57 +1372,101 @@ export default class OCQ extends View {
       cx.notify();
       return;
     }
-    const generation = ++this.detailGeneration;
-    const projectID = this.selected, machine = this.machine;
+    ++this.detailGeneration;
+    this.projectDetailToken = {};
     this.detailJob = jobID;
     this.detail = null;
     this.detailError = null;
     this.detailLoading = true;
-    cx.spawn(async (cx) => {
-      try {
-        const result = await exec("ocq-herdr", ["job", projectID, jobID], { on: machine });
-        if (result.code !== 0) throw new Error(result.stderr || "Cannot inspect job");
-        const detail = JSON.parse(result.stdout);
-        if (generation === this.detailGeneration) this.detail = detail;
-      } catch (e) {
-        if (generation === this.detailGeneration) this.detailError = String(e);
-      } finally {
-        if (generation === this.detailGeneration) this.detailLoading = false;
-        cx.notify();
-      }
-    });
     cx.notify();
   }
 
   inspectManifest(digest, cx) {
     const active = spaces().find((s) => s.active);
     if (!active || active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder) { cx.notify(); return; }
-    const generation = ++this.manifestGeneration;
-    const projectID = this.selected, machine = this.machine;
+    ++this.manifestGeneration;
+    this.manifestToken = {};
     this.manifestDigest = digest;
     this.manifest = null;
     this.manifestError = null;
     this.manifestLoading = true;
-    cx.spawn(async (cx) => {
-      try {
-        const result = await exec("ocq-herdr", ["manifest", projectID, digest], { on: machine });
-        if (result.code !== 0) throw new Error(result.stderr || "Cannot read manifest");
-        const manifest = JSON.parse(result.stdout);
-        if (generation === this.manifestGeneration) this.manifest = manifest;
-      } catch (e) {
-        if (generation === this.manifestGeneration) this.manifestError = String(e);
-      } finally {
-        if (generation === this.manifestGeneration) this.manifestLoading = false;
-        cx.notify();
-      }
-    });
     cx.notify();
   }
 
   render(cx) {
     compatibility.observe();
+    this.renderTargets = []; this.headerTargets = []; this.compatibilityTargets = [];
     const content = this.renderContent(cx);
-    return v_flex().size_full().min_h(0).child(compatibility.notice(cx, theme())).child(div().flex_1().min_h(0).child(content));
+    const t = theme();
+    const workspace = !(this.intake.screen && !this.intake.authoritySuspended) && !(this.compose.screen && !this.compose.authoritySuspended) && !this.publication.screen && !this.worktreeCheck.screen && !(this.mailConfirmation && this.mailContextCurrent(this.mailConfirmation)) &&
+      ![this.queue.dispatcher, this.queue.submission, this.queue.agentSubmission].some(helper => helper.screen && helper.current(this)) &&
+      !(this.queue.ack.confirm && this.queue.ackCurrent(this, this.queue.ack)) &&
+      ![this.queue.cancel, this.queue.resolution, this.queue.reconciliation].some(helper => helper.confirm && helper.current(this));
+    return v_flex().size_full().min_h(0).bg(t.background).text_color(t.foreground)
+      .when(workspace, e => e.child(this.workspaceHeader(cx, t)))
+      .when(Boolean(this.observationReset) && !workspace, e => e.child(div().p(8).text_size(12).text_color(t.blocked).child("Prior context suspended · private journals/reviews retained as evidence only. Reopen a fresh selected context for a new review.")))
+      .child(compatibility.notice(cx, t, (id, label, action) => this.registerAction(id, label, action, this.compatibilityTargets)))
+      .child(div().flex_1().min_h(0).child(content));
+  }
+
+  // Controller seam: observation health only, never action authorization or a
+  // synthesized connection claim. The transport owns context/revision ordering.
+  applyUpdateHealth(scope, health, cx) {
+    const active = spaces().find(s => s.active);
+    if (!active || active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder || scope.generation !== this.generation || scope.space !== this.spaceID || scope.machine !== this.machine || scope.folder !== this.folder) return false;
+    if (!["stored", "reading", "stale", "unavailable"].includes(health.state)) return false;
+    this.updateHealth = { state: health.state, reason: health.reason || null };
+    cx.notify(); return true;
+  }
+
+  applyProjectObservation(scope, board, cx, meta = null) {
+    const active = spaces().find(s => s.active);
+    if (!active || active.id !== this.spaceID || active.machine !== this.machine || active.folder !== this.folder || this.loading || scope.generation !== this.generation || scope.space !== this.spaceID || scope.machine !== this.machine || scope.folder !== this.folder || scope.project !== this.selected || board?.project?.project_id !== this.selected) return false;
+    if (meta ? !acceptObservationVersion(this.boardVersion, meta) : (!board.project.read_at || readOrder(board.project.read_at) < readOrder(this.board?.project?.read_at))) return false;
+    // Only stored board data changes: retain inspection, review pages, mail
+    // intents, collection cursors and forms. Existing action guards still apply.
+    const binding = board.project.current_binding;
+    // Guided forms retain their exact safe-integer binding revision contract.
+    // The database observation revision itself is NEVER converted to Number.
+    if (typeof binding?.revision === "string" && /^(0|[1-9][0-9]*)$/.test(binding.revision) && (binding.revision.length < 16 || (binding.revision.length === 16 && binding.revision <= "9007199254740991"))) board = { ...board, project: { ...board.project, current_binding: { ...binding, revision: Number(binding.revision) } } };
+    this.board = board; if (meta) { this.boardVersion = meta; this.boardToken.observationVersion = meta; }
+    cx.notify(); return true;
+  }
+
+  navigateWorkspace(view, cx) {
+    if (view === "queue") { if (!this.queueMode) this.openQueue(cx); }
+    else { if (this.queueMode) this.leaveQueue(cx); this.workspaceView = view; this.keyboardMode = false; }
+    cx.notify();
+  }
+
+  workspaceHeader(cx, t) {
+    const control = (id, label, action, selected = false) => div().id(id).role("button").accessibility_label(label)
+      .px(8).py(5).rounded(5).cursor_pointer().when(selected, e => e.bg(t.hover).font_semibold())
+      .when(this.navigationTarget === id, e => e.bg(t.hover))
+      .hover(e => e.bg(t.hover)).on_click(this.registerAction(id, label, action, this.headerTargets)).child(label);
+    const queueID = this.queue.jobs.data?.queue_identity || compatibility.status?.queue_identity;
+    const view = this.queueMode ? "queue" : this.workspaceView;
+    return v_flex().id("ocq-workspace-header").flex_none().p(10).gap(5).border_b(1).border_color(t.border)
+      .child(div().font_semibold().child(`OCQ · ${this.machine ?? "This computer"}${this.machine !== null ? " · Remote read-only" : ""}`))
+      .child(h_flex().gap(2).children(["overview", "projects", "queue", "inbox"].map(name => control(`ocq-workspace-${name}`, name[0].toUpperCase() + name.slice(1), cx => this.navigateWorkspace(name, cx), view === name))))
+      .child(div().text_size(12).text_color(["waiting", "reading"].includes(this.updateHealth.state) ? t.muted : t.blocked).child(this.updateHealth.state === "waiting" ? "Automatic change waiting · stored observations" : this.updateHealth.state === "missing" ? "No existing queue · automatic creation waiting" : `${this.updateHealth.state.replace(/_/g, " ")} · stored observations may be stale`))
+      .when(Boolean(this.observationReset), e => e.child(div().text_size(12).text_color(t.blocked).child("Prior action authority suspended. Private reviews/journals retained separately; only freshly read projections are shown. Quiesce and reopen a fresh selected context before a new review.")))
+      .child(control("ocq-context-details", this.contextDetails ? "Hide context details" : "Context details", cx => { this.contextDetails = !this.contextDetails; cx.notify(); }))
+      .when(this.contextDetails, e => e.child(v_flex().gap(4)
+        .child(div().text_size(12).text_color(t.muted).child(`Space: ${this.spaceID || "not selected"}\nFolder: ${this.folder || "not selected"}\nQueue: ${queueID || "identity not observed"}\nSnapshot revision: ${this.updates.revision || "not observed"}\nLatest snapshot read: ${this.updateHealth.readAt || "not yet read"}\nLatest project page read: ${this.projectsReadAt || "not yet read"}\n${this.updateHealth.reason || "No current read diagnostic."}`))
+        .child(control("ocq-copy-update-diagnostics", "Copy update diagnostics", cx => cx.write_to_clipboard(JSON.stringify({ machine: this.machine, health: this.updateHealth, revision: this.updates.revision }))))
+        .child(control("ocq-workspace-read-again", "Read again", cx => this.queueMode ? this.queue.refresh(this, cx) : this.refresh(cx)))))
+      .when(["stale", "unavailable"].includes(this.updateHealth.state), e => e.child(div().text_size(12).text_color(t.blocked).child("Updates unavailable; displayed observations may be stale.")));
+  }
+
+  readFault(error, label, t) {
+    const control = (id, text, action) => div().id(id).role("button").accessibility_label(text).px(8).py(4).cursor_pointer()
+      .when(this.navigationTarget === id, e => e.bg(t.hover))
+      .hover(e => e.bg(t.hover)).on_click(this.registerAction(id, text, action)).child(text);
+    return v_flex().gap(4)
+      .child(div().text_color(t.ansi1).child(`Cannot read ${label} on ${this.machine ?? "this computer"}. Displayed observations may be stale.`))
+      .child(control(`ocq-diagnostics-${label}`, "Diagnostics", cx => { this.diagnostics = !this.diagnostics; cx.notify(); }))
+      .when(this.diagnostics, e => e.child(div().child(error)).child(control(`ocq-copy-diagnostics-${label}`, "Copy diagnostics", cx => cx.write_to_clipboard(error))));
   }
 
   renderContent(cx) {
@@ -1546,28 +1476,25 @@ export default class OCQ extends View {
       this.spaceID = active?.id ?? null;
       this.machine = machine;
       this.folder = folder;
-      this.generation++;
-      this.loading = false;
+      this.resetObservationVersions();
       this.selected = null;
-      this.projects = [];
-      this.projectsReadAt = null;
-      this.board = null;
-      this.keyboardTarget = { kind: "refresh" };
-      this.keyboardPage = 0;
-      this.clearInspection();
-      this.queue.reset();
+      this.updateHealth = { state: "stored", reason: null };
       if (this.queueMode && active) this.queue.refresh(this, cx, false);
       this.refresh(cx, false);
     }
     const t = theme();
+    this.updates.sync(cx);
     const button = (id, text, action) => div().id(id).role("button").accessibility_label(text).px(8).py(4).rounded(5)
       .text_color(t.foreground).hover((s) => s.bg(t.hover)).cursor_pointer()
-      .when(!enabledButton(id), e => e.opacity(0.4))
-      .on_click((_e, cx) => { if (enabledButton(id)) action(cx); }).child(text);
+      .when(!enabledButton(id) || (this.queueMode && !this.queue.detailControlAllowed(id)), e => e.opacity(0.4))
+      .when(this.navigationTarget === id, e => e.bg(t.hover))
+      .on_click(!this.queueMode && enabledButton(id)
+        ? this.registerAction(id, text, cx => { if (enabledButton(id)) action(cx); })
+        : (_e, cx) => { cx.stop_propagation(); if (enabledButton(id) && (!this.queueMode || this.queue.detailControlAllowed(id))) { this.handle.focus(); action(cx); } }).child(text);
     if (this.queueMode && active) return this.queue.render(this, cx, t, button);
     if (this.worktreeCheck.screen) return this.worktreeCheck.render(this, cx, t, button);
     if (this.publication.screen) return this.publication.render(this, cx, t, button);
-    if (this.intake.screen) {
+    if (this.intake.screen && !this.intake.authoritySuspended) {
       const i = this.intake, local = this.intakeCurrent(i.context), preview = i.preview;
       const stateText = { loading: "Checking journal…", idle: "No retained intake.", prepared: "Prepared, not dispatched. Preview the retained request.", armed: "Already claimed. A delayed dispatch may still start; do not send again.", attempted: "Outcome uncertain. A missing receipt does not authorize retry.", completed: "Exact receipt was matched. The request remains retained.", cancelled: "Cancelled before attempt. The request remains retained.", blocked: "Journal unavailable or blocked. Do not prepare another request." };
       if (local && preview && i.confirm) {
@@ -1642,7 +1569,7 @@ export default class OCQ extends View {
         .when(local && !i.working && Boolean(i.id), (e) => e.child(button("ocq-intake-preview", "Preview exact retained request", (cx) => this.previewIntake(cx))))
         .child(div().text_size(12).text_color(t.muted).child("R refresh · P prepare · V preview · C cancel · T retire · ←/→ pages · Esc close"));
     }
-    if (this.compose.screen) {
+    if (this.compose.screen && !this.compose.authoritySuspended) {
       const c = this.compose, local = this.composeLocal(), request = c.preview?.request;
       const previewPages = c.preview?.pages || [];
       const stateText = { loading: "Checking local journal…", idle: "No retained compose intent.", busy: "Another compose operation holds the journal. Refresh later.", prepared: "Prepared locally. A confirmation from another view may still be pending. Preview before confirming.", armed: "Send confirmed and durably claimed. A send process may be delayed; do not confirm again. You can revoke only before an attempt begins.", dispatch_intent: "Send outcome uncertain. Check the stored receipt; never resend automatically.", uncertain: "Send outcome uncertain. Check the stored receipt; never resend automatically.", completed: "Stored receipt matched. Retire to prepare another message.", cancelled: c.observation === "revoked_before_attempt" ? "Claim revoked before any attempt. A delayed send process will be refused. Retire to prepare another message." : "Prepared message cancelled. A delayed confirmation will be refused. Retire to prepare another message.", blocked: "Journal blocked or unverifiable. Do not send; investigate the local store." };
@@ -1678,7 +1605,7 @@ export default class OCQ extends View {
         .when(local && !c.working && ["completed", "cancelled"].includes(c.state), (e) => e.child(button("ocq-compose-retire", "Retire retained intent", (cx) => this.composeAction("retire", cx))))
         .when(local, (e) => e.child(div().text_size(12).text_color(t.muted).child("←/→ preview pages · R refresh · P prepare · V preview · C cancel · S review · Y confirm · K check · T retire")));
     }
-    if (this.mailConfirmation) {
+    if (this.mailConfirmation && this.mailContextCurrent(this.mailConfirmation)) {
       const confirmation = this.mailConfirmation;
       return v_flex().id("ocq-archive-confirmation").size_full().min_h(0).p(14).gap(10).bg(t.background)
         .text_color(t.foreground).track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
@@ -1690,8 +1617,7 @@ export default class OCQ extends View {
           .child(button("ocq-archive-confirm", "Confirm archive", (cx) => this.confirmArchive(cx))));
     }
     const project = this.board?.project;
-    const targets = this.targets();
-    const keyboardTarget = targets.find((target) => target.kind === this.keyboardTarget.kind && target.id === this.keyboardTarget.id) ?? targets[0];
+    const keyboardTarget = this.keyboardTarget;
     const pages = this.keyboardPages(keyboardTarget);
     const page = Math.min(this.keyboardPage, pages.length - 1);
     const observation = ["message", "mail-read", "mail-archive", "mail-check"].includes(keyboardTarget.kind) ? this.collections.inbox.readTimes[keyboardTarget.id]
@@ -1699,21 +1625,14 @@ export default class OCQ extends View {
         : (keyboardTarget.kind === "manifest" || keyboardTarget.kind === "manifest-text") ? null
           : keyboardTarget.kind === "job" && this.detailJob === keyboardTarget.id ? this.detail?.read_at : project?.read_at;
     const selectedMessage = ["message", "mail-read", "mail-archive", "mail-check"].includes(keyboardTarget.kind)
-      ? this.collections.inbox.items.find((m) => m.id === keyboardTarget.id) : null;
+      ? this.mailObservation?.id === keyboardTarget.id ? this.mailObservation.data : this.collections.inbox.items.find((m) => m.id === keyboardTarget.id) : null;
     return v_flex().id("ocq-panel").size_full().min_h(0).bg(t.background)
       .text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => this.key(e, cx))
-      .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().font_semibold().child("OCQ"))
-        .child(div().flex_1())
-        .child(button("ocq-intake-open", "Project intake", (cx) => this.openIntake(cx)))
-        .child(button("ocq-compose-open", "Compose", (cx) => this.openCompose(null, cx)))
-        .child(button("ocq-refresh", this.loading ? "Refreshing…" : "Refresh", (cx) => this.refresh(cx))))
-      .when(Boolean(active), (e) => e.child(button("ocq-open-queue", "Queue · jobs, logs and global notifications", (cx) => this.openQueue(cx))))
       .child(div().px(14).py(5).text_size(12).text_color(t.muted)
-        .child(`↑/↓ select · Enter activate · ${keyboardTarget.label}`))
+        .child(`↑/↓ select · Enter activate · ${this.navigationLabel || "Workspace navigation"}`))
       .child(div().px(14).text_size(12).text_color(t.muted)
-        .child(this.projectsReadAt ? `Project list read · ${this.projectsReadAt}` : this.loading ? "Loading stored projects…" : "No project snapshot available"))
+        .child(this.projectsReadAt ? `Latest project page read · ${this.projectsReadAt}` : "No project snapshot available yet"))
       .when(this.keyboardMode, (e) => e.child(v_flex().id("ocq-keyboard-inspection").flex_1().min_h(0).p(12).gap(8)
         .child(div().text_size(12).text_color(t.muted).child(`Inspection · ←/→ field ${page + 1}/${pages.length} · Esc board`))
         .child(h_flex().gap(8)
@@ -1723,7 +1642,7 @@ export default class OCQ extends View {
         .when(keyboardTarget.kind === "manifest" && this.manifestDigest === keyboardTarget.id && this.manifest !== null,
           (e) => e.child(button("ocq-manifest-original", "View original manifest text", (cx) => this.openTarget("manifest-text", this.manifestDigest, cx))))
         .when(keyboardTarget.kind === "manifest-text", (e) => e.child(button("ocq-manifest-fields", "View manifest fields", (cx) => this.openTarget("manifest", this.manifestDigest, cx))))
-        .when(Boolean(this.error), (e) => e.child(div().text_color(t.ansi1).child(`Refresh failed; data may be stale: ${this.error}`)))
+         .when(Boolean(this.error), (e) => e.child(div().text_color(t.ansi1).child(`Cannot read stored projects on ${this.machine ?? "this computer"}. Displayed data may be stale.`)))
         .when(Boolean(selectedMessage && this.mailStatus(selectedMessage)), (e) => e.child(div().text_color(this.mailState(selectedMessage)?.status === "observed" ? t.muted : t.blocked).child(this.mailStatus(selectedMessage))))
         .when(Boolean(selectedMessage && this.mailOptions(selectedMessage).read), (e) => e.child(button("ocq-inspection-mark-read", "Mark read", (cx) => this.requestMailAction(selectedMessage, false, cx))))
         .when(Boolean(selectedMessage && this.mailOptions(selectedMessage).archive), (e) => e.child(button("ocq-inspection-archive", "Archive…", (cx) => this.requestMailAction(selectedMessage, true, cx))))
@@ -1733,22 +1652,40 @@ export default class OCQ extends View {
         .child(div().flex_1().min_h(0).overflow_y_scroll().child(pages[page].text))))
       .when(!this.keyboardMode, (e) => e.child(v_flex().id("ocq-content").flex_1().min_h(0).overflow_y_scroll().p(12).gap(8)
         .when(!active, (e) => e.child(div().text_color(t.muted).child("Select a Herdr space to view OCQ on its machine.")))
-        .when(Boolean(this.error), (e) => e.child(div().text_color(t.ansi1).child(`Refresh failed; displayed data may be stale: ${this.error}`)))
-        .when(Boolean(active) && !this.error && !this.loading && this.projects.length === 0, (e) => e.child(div().text_color(t.dim).child("No registered projects.")))
+         .when(Boolean(this.error), (e) => e
+           .child(div().text_color(t.ansi1).child(`Cannot read stored projects on ${this.machine ?? "this computer"}. Check the selected machine and bridge. Displayed data may be stale.`))
+           .child(button("ocq-project-diagnostics", this.diagnostics ? "Hide diagnostics" : "Diagnostics", cx => { this.diagnostics = !this.diagnostics; cx.notify(); }))
+           .when(this.diagnostics, e => e.child(div().child(this.error)).child(button("ocq-project-diagnostics-copy", "Copy diagnostics", cx => cx.write_to_clipboard(this.error)))))
+          .when(Boolean(active) && Boolean(this.projectPages[0].readAt) && !this.error && !this.projectsHasMore && this.projects.length === 0, (e) => e.child(div().text_color(t.muted).child("No projects registered in this queue. Queue contains standalone jobs separately.")))
+          .when(Boolean(this.boardError), e => e.child(this.readFault(this.boardError, "selected project", t)))
+         .when(this.workspaceView === "overview", e => e
+           .child(div().font_semibold().child("Overview"))
+           .child(div().child(this.selected ? `Selected project: ${project?.label || this.selected}` : "Choose a project in Projects to inspect work and inbox mail."))
+           .when(Boolean(project), e => e.child(div().child(`Selected project · ${(project.jobs || []).length} loaded jobs · ${(project.jobs || []).filter(j => attention(j)).length} need inspection\nLoaded inbox items: ${this.collections.inbox.items.length} · loaded completion items: ${this.collections.results.items.length}`))))
+         .when(this.workspaceView === "projects", e => e
+           .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Project intake…", cx => this.openIntake(cx)))))
         .when(!project && this.projects.length > 1, (e) => e.child(div().child("Choose a project")))
-        .when(this.projects.length > 1, (e) => e.child(v_flex().gap(3).children(this.projects.map((p) =>
+         .when(this.workspaceView !== "overview" && this.projects.length > 0, (e) => e.child(v_flex().gap(3).child(div().font_semibold().child("Project")).children(this.projects.map((p) =>
           button(`ocq-project-${p.project_id}`, `${p.label} · ${p.project_id} · ${p.integrator_unread_mail_count} unread`, (cx) => this.select(p.project_id, cx))))))
-        .when(Boolean(project), (e) => e
-          .child(div().font_semibold().child(project?.label ?? ""))
-          .child(div().text_size(12).text_color(t.muted).child(`Stored snapshot · ${project?.read_at ?? ""}`))
-          .child(button("ocq-project-overview", "View project and binding", (cx) => this.openTarget("summary", undefined, cx)))
+          .when(this.workspaceView !== "overview" && this.projectsHasMore, e => e.child(button("ocq-project-pages-more", "Load next 20 projects", cx => { const last = this.projectPages[this.projectPages.length - 1]; if (last.next && !this.projectPages.some(page => page.start === last.next)) this.projectPages.push({ start: last.next }); cx.notify(); })))
+          .when(Boolean(this.selected) && this.workspaceView !== "overview", (e) => e
+           .child(div().font_semibold().child(project?.label ?? this.selected))
+           .child(div().text_size(12).text_color(t.muted).child(`Project snapshot read · ${project?.read_at ?? "not available"}`))
+           .when(this.workspaceView === "projects", e => e.child(h_flex().gap(2).children(["work", "results", "lanes", "binding"].map(view => button(`ocq-project-tab-${view}`, view[0].toUpperCase() + view.slice(1), cx => { this.projectView = view; cx.notify(); }).when(this.projectView === view, e => e.bg(t.hover).font_semibold())))))
+           .when(this.workspaceView === "projects" && this.projectView === "binding", e => e
+           .child(button("ocq-project-overview", "View project and binding", (cx) => this.openTarget("summary", undefined, cx)))
+           .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Project intake / binding…", cx => this.openIntake(cx))))
+           .when(Boolean(project?.current_binding?.handoff_manifest_digest), (e) => e.child(button("ocq-handoff", "Read handoff", (cx) => this.openTarget("manifest", project.current_binding.handoff_manifest_digest, cx)))))
+            .when(Boolean(project) && this.workspaceView === "projects" && this.projectView === "work", e => e
           .when(this.composeLocal(), (e) => e.child(button("ocq-implementation-submit", "Submit implementation job…", (cx) => this.openImplementationIntake(cx))))
           .when(Boolean(project?.current_binding?.handoff_manifest_digest), (e) => e.child(button("ocq-handoff", "Read handoff", (cx) => this.openTarget("manifest", project.current_binding.handoff_manifest_digest, cx))))
           .child(div().pt(8).font_semibold().child("Work"))
           .child(div().text_size(12).text_color(t.muted).child("Request observations may be stale; their observation time is not recorded. Inspect a job for its recorded session and location."))
           .when((project?.jobs ?? []).length === 0, (e) => e.child(div().text_color(t.dim).child("No jobs.")))
           .children((project?.jobs ?? []).map((j) => v_flex().id(`ocq-job-${j.job_id}`).py(5).gap(2).border_b(1).border_color(t.border)
-            .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.inspect(j.job_id, cx))
+            .role("button").accessibility_label(`Inspect ${j.role} job ${j.job_id}, ${j.state}`).cursor_pointer().hover((s) => s.bg(t.hover))
+            .when(this.navigationTarget === `ocq-job-${j.job_id}`, e => e.bg(t.hover))
+            .on_click(this.registerAction(`ocq-job-${j.job_id}`, `Inspect ${j.role} job ${j.job_id}, ${j.state}`, cx => this.inspect(j.job_id, cx)))
             .child(div().child(`${j.role} · ${j.state} · ${j.outcome}`))
             .when(Boolean(attention(j)), (e) => e.child(div().text_size(12).text_color(t.blocked).child(attention(j))))
             .child(div().text_size(12).text_color(t.muted).child(j.job_id))
@@ -1758,7 +1695,7 @@ export default class OCQ extends View {
             .child(div().text_size(12).text_color(t.accent).child(this.detailJob === j.job_id ? "Close details" : "Inspect job"))
             .when(this.detailJob === j.job_id, (e) => e.child(v_flex().px(8).py(5).gap(3)
               .when(this.detailLoading, (e) => e.child(div().child("Loading job…")))
-              .when(Boolean(this.detailError), (e) => e.child(div().text_color(t.ansi1).child(`Cannot inspect job: ${this.detailError}`)))
+              .when(Boolean(this.detailError), (e) => e.child(this.readFault(this.detailError, "job detail", t)))
               .when(Boolean(this.detail), (e) => e
                 .child(div().text_size(12).text_color(t.muted).child(`Job detail read · ${this.detail?.read_at ?? ""}`))
                 .when(Boolean(attentionDetail(this.detail?.job)), (e) => e.child(v_flex().gap(2)
@@ -1771,49 +1708,46 @@ export default class OCQ extends View {
                 .child(div().child(`Worktree: ${this.detail?.fsfork_path || "not recorded"}`))
                 .child(div().child(`Integration: ${this.detail?.integration || "unknown"}`))
                 .child(div().child(`Validation verified: ${this.detail?.validation?.verified ? "yes" : "no"}`))
-                .child(div().role("button").accessibility_label("Import or publish result manifest").text_color(t.accent).cursor_pointer()
-                  .on_click((_e, cx) => { cx.stop_propagation(); this.publication.open(this, j.job_id, cx); }).child("Import / publish result manifest…"))
-                .when(j.role === "implementation", (e) => e.child(div().role("button").accessibility_label("Prepare machine snapshot").text_color(t.accent).cursor_pointer()
-                  .on_click((_e, cx) => { cx.stop_propagation(); this.publication.open(this, j.job_id, cx, true); }).child("Prepare / publish machine snapshot…")))
-                .child(div().role("button").accessibility_label("View all job fields").text_color(t.accent).cursor_pointer()
-                  .on_click((_e, cx) => { cx.stop_propagation(); this.openTarget("job", j.job_id, cx); }).child("View all job fields"))
-                .when(Boolean(this.detail?.brief_digest), (e) => e.child(div().role("button").accessibility_label("Read job brief").text_color(t.accent).cursor_pointer()
-                  .on_click((_e, cx) => { cx.stop_propagation(); this.openTarget("manifest", this.detail.brief_digest, cx); }).child("Read job brief")))
-                .children((this.detail?.associations ?? []).map((a) => div().text_size(12).text_color(t.accent).cursor_pointer()
-                  .on_click((_e, cx) => {
-                    cx.stop_propagation();
-                    this.openTarget("manifest", a.manifest_digest, cx);
-                  })
-                  .child(`Read ${a.kind} · ${a.verification} · ${a.manifest_digest}`)))
-                .children((this.detail?.associations ?? []).filter((a) => a.kind === "result").map((a) => div().role("button").text_color(t.accent).cursor_pointer()
-                  .on_click((_e, cx) => { cx.stop_propagation(); this.worktreeCheck.open(this, a, this.detail?.job?.agent?.worktree, cx); })
-                  .child(`Verify owned worktree… · ${a.manifest_digest}`)))
+                .child(button(`ocq-publication-${j.job_id}`, "Import / publish result manifest…", cx => this.publication.open(this, j.job_id, cx)))
+                .when(j.role === "implementation", (e) => e.child(button(`ocq-capture-${j.job_id}`, "Prepare / publish machine snapshot…", cx => this.publication.open(this, j.job_id, cx, true))))
+                .child(button(`ocq-project-job-fields-${j.job_id}`, "View all job fields", cx => this.openTarget("job", j.job_id, cx)))
+                .when(Boolean(this.detail?.brief_digest), (e) => e.child(button(`ocq-project-job-brief-${j.job_id}`, "Read job brief", cx => this.openTarget("manifest", this.detail.brief_digest, cx))))
+                .children((this.detail?.associations ?? []).map((a) => button(`ocq-project-association-${a.id}`, `Read ${a.kind} · ${a.verification} · ${a.manifest_digest}`, cx => this.openTarget("manifest", a.manifest_digest, cx))))
+                .children((this.detail?.associations ?? []).filter((a) => a.kind === "result").map((a) => button(`ocq-worktree-associated-${a.id}`, `Verify owned worktree… · ${a.manifest_digest}`, cx => this.worktreeCheck.open(this, a, this.detail?.job?.agent?.worktree, cx))))
                 .when(this.composeLocal(), (e) => e.children((this.detail?.associations ?? []).filter((a) => a.kind === "result" && a.availability === "available").map((a) => button(`ocq-review-submit-${a.id}`, `Submit review job for this result… · ${a.manifest_digest}`, (cx) => this.openReviewIntake(a, cx))))))))))
-          .child(div().pt(8).font_semibold().child("Lanes"))
-          .when((project?.lanes ?? []).length === 0, (e) => e.child(div().text_color(t.dim).child("No lanes.")))
-          .children((project?.lanes ?? []).map((lane) => button(`ocq-lane-${lane.lane_id}`, `${lane.role} · ${lane.job_state} · ${lane.lane_id}`, (cx) => this.openTarget("lane", lane.lane_id, cx))))
-          .when(this.composeLocal() && this.compose.state === "idle", (e) => e.children((project?.lanes ?? []).map((lane) => button(`ocq-compose-lane-${lane.lane_id}`, `Compose update · ${lane.lane_id}`, (cx) => this.openCompose(lane, cx)))))
-          .child(div().pt(8).font_semibold().child("Completion history"))
-          .child(div().text_size(12).text_color(t.muted).child(`Recent 20 · ${this.collections.results.recentReadAt || "not yet read"}; historical pages refresh separately`))
-          .when(Boolean(this.collections.results.recentError), (e) => e.child(div().text_color(t.ansi1).child(`Recent results read failed: ${this.collections.results.recentError}`)))
-          .when(Boolean(this.collections.results.error), (e) => e.child(div().text_color(t.ansi1).child(`Results read failed: ${this.collections.results.error}`)))
+           )
+           .when(this.workspaceView === "projects" && this.projectView === "lanes", e => e
+           .child(button("ocq-compose-open", "Compose / recover retained message…", cx => this.openCompose(null, cx)))
+           .child(div().pt(8).font_semibold().child("Lanes"))
+           .children(this.lanePages.filter(page => page.error).map(page => this.readFault(page.error, `lanes page ${page.start}`, t)))
+           .when(Boolean(this.lanePages[0].readAt) && !this.lanePages[0].error && !(this.lanes || []).length, (e) => e.child(div().text_color(t.dim).child("No lanes.")))
+           .children((this.lanes || []).map((lane) => button(`ocq-lane-${lane.lane_id}`, `${lane.role} · ${lane.job_state} · ${lane.lane_id}`, (cx) => this.openTarget("lane", lane.lane_id, cx))))
+           .when(this.composeLocal() && this.compose.state === "idle", (e) => e.children((this.lanes || []).map((lane) => button(`ocq-compose-lane-${lane.lane_id}`, `Compose update · ${lane.lane_id}`, (cx) => this.openCompose(lane, cx)))))
+           .when(Boolean(this.lanePages[this.lanePages.length - 1].hasMore), e => e.child(button("ocq-project-lanes-more", "Load next 20 lanes", cx => { const last = this.lanePages[this.lanePages.length - 1]; if (!this.lanePages.some(page => page.start === last.next)) this.lanePages.push({ start: last.next }); cx.notify(); })))
+           )
+           .when(this.workspaceView === "projects" && this.projectView === "results", e => e
+           .child(div().pt(8).font_semibold().child("Completion history"))
+           .child(div().text_size(12).text_color(t.muted).child(`Loaded pages of 20 · last page read ${this.collections.results.readAt || "not yet read"}; each snapshot batch is coherent, not one global total`))
+          .when(Boolean(this.collections.results.recentError), (e) => e.child(this.readFault(this.collections.results.recentError, "recent results", t)))
+          .when(Boolean(this.collections.results.error), (e) => e.child(this.readFault(this.collections.results.error, "results history", t)))
           .when(this.collections.results.loading, (e) => e.child(div().child("Loading results…")))
-          .when(this.collections.results.loaded && !this.collections.results.items.length, (e) => e.child(div().text_color(t.dim).child("No completion events.")))
+           .when(this.collections.results.loaded && !this.collections.results.error && !this.collections.results.items.length, (e) => e.child(div().text_color(t.dim).child("No completion events on loaded pages.")))
           .children(this.collections.results.items.map((r) => v_flex().gap(2)
             .child(button(`ocq-result-${r.event.id}`, `${r.role} · historical ${r.event.outcome} · current ${r.current_job.state} · ${r.job_id}`, (cx) => this.openTarget("result", r.event.id, cx)))
             .children((r.result_summary?.associations ?? []).map((a) => button(`ocq-result-manifest-${a.id}`, `Read ${a.kind} · ${a.verification}`, (cx) => this.openTarget("manifest", a.manifest_digest, cx))))
             .children((r.result_summary?.associations ?? []).filter((a) => a.kind === "result").map((a) => button(`ocq-result-check-${a.id}`, `Verify owned worktree… · ${a.manifest_digest}`, (cx) => this.worktreeCheck.open(this, a, r.current_job.agent?.worktree, cx))))
             .when(this.composeLocal(), (e) => e.children((r.result_summary?.associations ?? []).filter((a) => a.kind === "result" && a.availability === "available").map((a) => button(`ocq-result-review-${a.id}`, `Submit review job for this result… · ${a.manifest_digest}`, (cx) => this.openReviewIntake(a, cx)))))))
           .when(this.collections.results.hasMore, (e) => e.child(button("ocq-results-more", "Load more results", (cx) => this.loadCollection("results", false, cx))))
-          .child(button("ocq-results-reload", "Reload results", (cx) => this.loadCollection("results", true, cx)))
+            )
+           .when(this.workspaceView === "inbox", e => e
           .child(div().pt(8).font_semibold().child("Inbox · all recipients"))
-          .child(div().text_size(12).text_color(t.muted).child(`Recent 20 · ${this.collections.inbox.recentReadAt || "not yet read"}; includes read and archived mail; historical pages refresh separately`))
-          .when(Boolean(this.collections.inbox.recentError), (e) => e.child(div().text_color(t.ansi1).child(`Recent inbox read failed: ${this.collections.inbox.recentError}`)))
-          .when(Boolean(this.collections.inbox.error), (e) => e.child(div().text_color(t.ansi1).child(`Inbox read failed: ${this.collections.inbox.error}`)))
+           .child(div().text_size(12).text_color(t.muted).child(`Loaded pages of 20 · last page read ${this.collections.inbox.readAt || "not yet read"}; includes read and archived mail, selected project only`))
+          .when(Boolean(this.collections.inbox.recentError), (e) => e.child(this.readFault(this.collections.inbox.recentError, "recent inbox mail", t)))
+          .when(Boolean(this.collections.inbox.error), (e) => e.child(this.readFault(this.collections.inbox.error, "inbox history", t)))
           .when(this.collections.inbox.loading, (e) => e.child(div().child("Loading inbox…")))
-          .when(this.collections.inbox.loaded && !this.collections.inbox.items.length, (e) => e.child(div().text_color(t.dim).child("No messages.")))
+           .when(this.collections.inbox.loaded && !this.collections.inbox.error && !this.collections.inbox.items.length, (e) => e.child(div().text_color(t.dim).child("No messages on loaded pages.")))
           .children(this.collections.inbox.items.map((m) => v_flex().id(`ocq-message-${m.id}`).py(4).gap(2).border_b(1).border_color(t.border)
-            .child(button(`ocq-read-${m.id}`, `${m.subject} · ${m.archived_at || this.mailState(m)?.message?.archived_at ? "archived" : m.read_at || this.mailState(m)?.message?.read_at ? "read" : "unread"}`, (cx) => this.openTarget("message", m.id, cx)))
+             .child(button(`ocq-read-${m.id}`, `${m.subject} · ${m.archived_at ? "archived" : m.read_at ? "read" : "unread"}`, (cx) => this.openTarget("message", m.id, cx)))
             .child(div().text_size(12).text_color(t.muted).child(`${m.kind} · ${m.sender} → ${m.recipient}`))
             .when(Boolean(this.mailStatus(m)), (e) => e.child(div().text_size(12).text_color(this.mailState(m)?.status === "observed" ? t.muted : t.blocked).child(this.mailStatus(m))))
             .when(this.mailOptions(m).read, (e) => e.child(button(`ocq-mark-read-${m.id}`, "Mark read", (cx) => this.requestMailAction(m, false, cx))))
@@ -1821,7 +1755,7 @@ export default class OCQ extends View {
             .when(this.mailOptions(m).check, (e) => e.child(button(`ocq-check-mail-${m.id}`, "Check stored message", (cx) => this.checkMailAction(m, cx))))
             .when(Boolean(m.manifest_digest), (e) => e.child(button(`ocq-attachment-${m.id}`, "Read attached manifest", (cx) => this.openTarget("manifest", m.manifest_digest, cx))))))
           .when(this.collections.inbox.hasMore, (e) => e.child(button("ocq-inbox-more", "Load more mail", (cx) => this.loadCollection("inbox", false, cx))))
-          .child(button("ocq-inbox-reload", "Reload inbox", (cx) => this.loadCollection("inbox", true, cx)))
+            )
           .child(div().pt(8).text_size(12).text_color(t.muted).child("Stored observations only. Imported claims are unverified; worktree drift is checked only by explicit Verify filesystem now. Opening mail does not mark it read.")))));
   }
 }

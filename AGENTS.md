@@ -56,6 +56,13 @@
   the same transaction as the sealing association. Projection reads
   (`project list|show|results|job|manifest|lanes|inbox|board|verify-worktree`)
   use non-initializing read-only SQLite access.
+  Schema6 adds committed `observation_revision` triggers without rewriting receipts
+  or journals. Preserve Goose migration 1's historical schema1->5 steps; use separate
+  transactional migration 2 for 5->6 under the initialization/dispatcher locks.
+  Existing-store APIs explicitly support {5,6}; automatic observation requires 6
+  and never initializes/migrates. Coordinate CLI/bridge/dispatcher/mod replacement
+  before explicit upgrade; keep selected database views coherent in one read
+  transaction and filesystem log observations separate/non-atomic.
   Terminal transitions and events commit atomically; unknown is not completion.
   Preserve frozen first-terminal snapshots and idempotent acknowledgements;
   pull/ack must never release capacity or retry execution. `project results` is

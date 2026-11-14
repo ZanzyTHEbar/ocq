@@ -5,7 +5,7 @@ umask 077
 
 if [ "$#" -ne 3 ] || [ "$3" != "--activate" ]; then
   echo "usage: sh share/herdr/install.sh HERDR_APP_HOME HERDR_APP --activate" >&2
-  echo "Requires a running Herdr app 0.1.14; switches it to a new personal ocq-workspace layout." >&2
+  echo "Requires a running Herdr app 0.1.14 or 0.1.15; switches it to a new personal ocq-workspace layout." >&2
   exit 2
 fi
 
@@ -18,10 +18,10 @@ if [ ! -d "$home/mods" ] || [ ! -d "$home/layouts" ] || [ -L "$home/mods" ] || [
   echo "Start Herdr once with this app home first; mods and layouts must be real directories." >&2
   exit 1
 fi
-if [ "$("$app" --version)" != "herdr-app 0.1.14" ]; then
-  echo "This personal layout is validated only with herdr-app 0.1.14." >&2
-  exit 1
-fi
+case "$("$app" --version)" in
+  'herdr-app 0.1.14'|'herdr-app 0.1.15') ;;
+  *) echo "This personal layout is validated only with herdr-app 0.1.14 or 0.1.15." >&2; exit 1 ;;
+esac
 if ! HERDR_APP_HOME="$home" "$app" status >/dev/null; then
   echo "No running Herdr app found for the specified home; no files changed." >&2
   exit 1
@@ -41,6 +41,7 @@ mkdir "$mod"
 cp "$here/mods/ocq/main.js" "$mod/main.js"
 cp "$here/mods/ocq/compatibility.js" "$mod/compatibility.js"
 cp "$here/mods/ocq/queue.js" "$mod/queue.js"
+cp "$here/mods/ocq/stored-updates.js" "$mod/stored-updates.js"
 cp "$here/mods/ocq/queued-cancel.js" "$mod/queued-cancel.js"
 cp "$here/mods/ocq/command-resolution.js" "$mod/command-resolution.js"
 cp "$here/mods/ocq/agent-reconcile.js" "$mod/agent-reconcile.js"

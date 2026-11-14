@@ -1,8 +1,13 @@
 # Native compatibility acceptance
 
-These opt-in proofs use Herdr app 0.1.14, HC 0.1.19, an explicitly supplied
-network guard and a retained pre-contract bridge binary. Use fresh private
+These opt-in proofs accept an explicit Herdr app 0.1.14 or 0.1.15 binary,
+HC 0.1.19, an explicitly supplied network guard and a retained pre-contract
+bridge binary. Use fresh private
 profiles, never shared queues or running user sessions. No agent executes.
+The exact candidate gate is not acceptance: each supplied app must pass the native
+scenario. The peer proof retains the selected queued-job screenshot and requires
+the personal layout to have no native errors or obstructing overlays. Only the
+fresh private fixture home starts with the welcome marked skipped.
 
 Supply private job-scoped `TMPDIR` and `GOCACHE`; builds use
 `GOMAXPROCS=2 -p 1`. Run from the repository root. Runtime evidence is retained
@@ -52,6 +57,8 @@ receiver and a paused real native Start callback. It requires:
 - A returned old handshake that cannot authorize the newly selected peer, a
   stored job read from its distinct queue, all 69 remote mutation actions denied,
   and no stale private preparation, native claim, attempt or helper.
+- A selected-peer read endpoint returning unavailable clears the detail and
+  retains an error, with exactly one read attempt (no retry/local fallback).
 - Unchanged receipts/jobs, terminal closure and verified owned-child shutdown.
 
 The registered name is the native `--machine` / `exec({on})` identifier; it is

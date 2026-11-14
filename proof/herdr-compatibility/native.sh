@@ -9,7 +9,11 @@ if [ "${1-}" != --owned ]; then
  mode=$1; shift
  case "$mode" in --local-corrections|--local-audits|--peer) ;; *) exit 64;; esac
  app=$(realpath "$1"); hc=$(realpath "$2"); guard=$(realpath "$3"); old=$(realpath "$4")
- test "$("$app" --version)" = 'herdr-app 0.1.14'
+ # Exact candidates only; passing this gate is not native acceptance.
+ case "$("$app" --version)" in
+  'herdr-app 0.1.14'|'herdr-app 0.1.15') ;;
+  *) echo 'Native proof requires herdr-app 0.1.14 or 0.1.15.' >&2; exit 1 ;;
+ esac
  test "$("$hc" --version)" = 'hc 0.1.19'
  : "${TMPDIR:?Supply verified job-scoped build scratch and Go cache}"
  export GOMAXPROCS=2
@@ -41,6 +45,9 @@ if [ "$mode" = --peer ]; then : > "$root/peer-transfer"; fi
 socket="$root/run/herdr-core/c.holder.00000000.sock"
 test "${#socket}" -le 107 || { echo 'Fixture root too long for Linux Unix sockets' >&2; exit 1; }
 for d in home config data cache run tmp zdot apphome machine-config machine-data machine-state; do mkdir -m 700 "$root/$d"; done
+# Only this fresh private app home: avoid a first-run window obscuring evidence.
+# Same retained setting as the shipped welcome's Skip action; no live home edits.
+printf '{"frame.welcomed":"skipped"}\n' > "$root/apphome/shared.json"
 if [ "$mode" = --peer ]; then
  # Documented HC shell argv is an explicit program, not an interactive shell.
  # space.new without argv uses this exact direct foreground command.

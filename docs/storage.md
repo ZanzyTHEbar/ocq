@@ -28,11 +28,19 @@ Normal operations enforce ownership/modes and check effective SQLite settings;
 the actual lock, file/directory sync and database operations must succeed. Errors
 remain errors, with the failed operation/SQLite diagnostic retained. An open is
 not a durability certificate, a cross-process lock certification or an execution
-readiness test. No destructive probe runs on every open. Existing writable opens
-do not initialize or migrate; Reader opens remain non-initializing and read-only
+readiness test. No destructive probe runs on every open. Dedicated existing-store
+writer APIs do not initialize or migrate; ordinary CLI queue opens can. Reader opens
+remain non-initializing and read-only
 (`mode=ro`, `query_only`), without write/sync/lock probes. SQLite may require or
 create WAL auxiliary files under its normal read-only WAL rules; Reader does not
 mean immutable media or a byte-for-byte unchanged directory.
+
+Existing-store readers/writers support schemas 5 and 6. Automatic observation
+requires schema 6's transactionally committed revision; it never performs the
+upgrade. Follow the [coordinated upgrade sequence](command-core.md#state-and-upgrades)
+before a newer initializing open. A foreground change wait holds no SQLite read
+transaction while blocked. Filesystem notifications are hints, not commit or
+durability proof; bounded expiry checks still read the SQLite revision.
 
 SQLite [requires same-host shared memory for WAL][wal]. Do not open one live queue
 from multiple hosts or guests, or concurrently from a VM guest and its host.
@@ -48,7 +56,10 @@ Use `--state-dir` or an absolute `XDG_STATE_HOME` on a retained volume. Mount th
 whole state directory, not just `queue.db`; WAL, shared memory, locks, journals and
 outputs belong together. Keep stable paths for workspaces and retained inputs too.
 Use SQLite's online backup API for a live database, not a raw copy of `queue.db`.
-State is private application data, not files to commit in a shared repository.
+OCQ provides no backup command. A database backup does not capture separate output
+files or operation journals; retain those under the same recovery policy. Never
+restore or replace state while clients are using it. State is private application
+data, not files to commit in a shared repository.
 
 - **VM block disks:** retained virtual disks are suitable when the backing stack
   meets the contract. ext4, XFS or Btrfs labels alone do not establish persistence.

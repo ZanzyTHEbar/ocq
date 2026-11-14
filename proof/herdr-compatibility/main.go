@@ -61,7 +61,7 @@ func proxy(root string) {
 	must(e)
 	must(json.NewEncoder(f).Encode(map[string]string{"mode": mode, "action": a[0]}))
 	must(f.Close())
-	if a[0] == "compatibility" && mode == "missing" {
+	if (a[0] == "compatibility" && mode == "missing") || (a[0] == "queue-job" && mode == "missing-read") {
 		os.Exit(127)
 	}
 	bin := filepath.Join(root, "bin", "bridge-real")
@@ -278,6 +278,8 @@ func main() {
 		Dispatcher                                     *core.CommandDispatcherStatus
 		Submission                                     *core.CommandSubmissionStatus
 		Detail                                         map[string]any
+		DetailError                                    string
+		DetailLoading                                  bool
 		Spaces                                         []struct {
 			ID           string  `json:"id"`
 			Machine      *string `json:"machine"`
@@ -554,6 +556,25 @@ func main() {
 	})
 	check(foreign.Detail["queue_identity"] == peerScope.Queue && !foreign.Ready && foreign.Compatibility == nil, "foreign stored view used local queue or authorized mutations")
 	save(filepath.Join(root, "foreign-context-snapshot.json"), foreign)
+	run(app, "shot", filepath.Join(root, "foreign-queued-job.png"))
+	status := run(app, "status")
+	var finalStatus struct {
+		Layout   string
+		Errors   []json.RawMessage
+		Overlays []string
+	}
+	must(json.Unmarshal(status, &finalStatus))
+	must(os.WriteFile(filepath.Join(root, "foreign-layout-status.json"), status, 0600))
+	check(finalStatus.Layout == "ocq-workspace" && len(finalStatus.Errors) == 0 && len(finalStatus.Overlays) == 0, "native layout has errors or obstructing overlays")
+	// A failed selected-peer read must clear the view, not retry on the local queue.
+	beforeMissing := beforeTrace()["queue-job"]
+	must(os.WriteFile(filepath.Join(root, "mode"), []byte("missing-read"), 0600))
+	checked("compat-foreign-open")
+	unavailable := settle(func(s snapshot) bool { return !s.DetailLoading && s.Detail == nil && s.DetailError != "" })
+	check(beforeTrace()["queue-job"] == beforeMissing+1, "unavailable peer read retried or fell back")
+	check(!unavailable.Ready && unavailable.Compatibility == nil, "unavailable peer read enabled mutations")
+	save(filepath.Join(root, "foreign-unavailable-snapshot.json"), unavailable)
+	must(os.WriteFile(filepath.Join(root, "mode"), []byte("matched"), 0600))
 	audit := checked("compat-audit")
 	check(len(audit.Denied) == len(actions), "foreign selection did not deny every mutation")
 	afterSwitch := beforeTrace()

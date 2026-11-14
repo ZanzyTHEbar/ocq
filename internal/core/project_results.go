@@ -32,8 +32,12 @@ func (s *store) projectResultsPage(projectID string, afterSeq int64, limit int, 
 		return out, err
 	}
 	defer tx.Rollback()
+	return s.projectResultsQuery(ctx, tx, projectID, afterSeq, limit, recent)
+}
 
-	_, err = dbquery.New(tx).ProjectByID(ctx, projectID)
+func (s *store) projectResultsQuery(ctx context.Context, tx sqlQueryer, projectID string, afterSeq int64, limit int, recent bool) (ProjectResultsOutput, error) {
+	var out ProjectResultsOutput
+	_, err := dbquery.New(tx).ProjectByID(ctx, projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, faults.Wrap(faults.CodeNotFound, fmt.Sprintf("project %s does not exist", projectID), err)
 	}
@@ -139,6 +143,10 @@ func (s *store) projectManifestBytes(projectID, digest string) (_ []byte, result
 		return nil, err
 	}
 	defer tx.Rollback()
+	return projectManifestQuery(ctx, tx, projectID, digest)
+}
+
+func projectManifestQuery(ctx context.Context, tx sqlQueryer, projectID, digest string) ([]byte, error) {
 	manifest, err := dbquery.New(tx).ProjectManifest(ctx, digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, faults.Wrap(faults.CodeNotFound, fmt.Sprintf("manifest %s does not exist in project %s", digest, projectID), err)
