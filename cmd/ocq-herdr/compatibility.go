@@ -59,7 +59,7 @@ func modRead(action string) bool {
 		"main-list", "main-status", "main-recover", "main-preview", "client-list", "client-status", "client-verify":
 		// Preview retains private authorization evidence, but never arms/submits.
 		return true
-	case "view-snapshot", "watch-wait":
+	case "view-snapshot", "watch-wait", "observation-read-status":
 		return true
 	case "compatibility", "projects", "board", "job", "recent-inbox", "inbox", "mail", "recent-results", "results", "manifest", "verify-worktree", "queue-jobs", "queue-job", "queue-log", "notifications", "notification", "agent-handoff-status", "agent-handoff-verify":
 		return true

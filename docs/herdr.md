@@ -73,6 +73,53 @@ Real multi-machine deployment, disconnect recovery and live
 permission handling are not yet end-to-end verified. A disconnected view never
 means execution stopped or permits a retry.
 
+### Native observation lifecycle limitation
+
+On Herdr 0.1.15, removing the mod during a bounded observation wait can leave
+its JavaScript Promise permanently pending. The host grants a removed copy
+250 ms for `View.close`, then retires its application generation and drops
+pending host-call callbacks without settling their Promises. OCQ returns its
+actual observer-drain Promise from async `close` and wakes a successor through
+that successor's context, which handles reads settling inside the grace period.
+It cannot extend the host deadline for a 20-second watch.
+
+Recovery first gives the old Promise its existing 26-second drain deadline.
+For new, exactly pinned reads it may then issue **one** bounded
+`observation-read-status` query to the original machine/space/folder. Each such
+foreground read has a random, nonsecret `--observation-read-id`. Before executing,
+the bridge retains a private receipt binding that ID to the exact command/request
+digest, queue/store/bridge/image/location and its Linux PID/start, boot and PID
+namespace. On return it records only the terminal read outcome, not a cached
+projection or permission.
+
+Status is an existing-store, read-only operation: it creates no queue, receipt
+or lock. It requires all retained pins to match the current executing bridge and
+host, a terminal receipt, and actual absence of the original PID/start identity.
+Even a terminal receipt with the original process still present (including a
+zombie) is insufficient. Missing, malformed, old-client or mismatched evidence
+stays blocked. Changed boot/namespace or an unobservable process stays blocked.
+
+Only that exact physical-exit proof permits retiring the orphaned callback slot;
+late callbacks remain fenced out. Recovery then uses the ordinary fresh
+compatibility and pinned full-snapshot transaction. Timeout, cancellation and
+receipt contents alone never authorize another observer or restore old action
+confirmations. This evidence concerns only observation helpers, never agent
+completion, jobs, capacity or mutation retries.
+
+Receipts live in the existing private state's `observation-reads-v1` directory,
+mode 0700 with 0600 files. Retention is capped at 4096 receipts of at most 8 KiB
+each; allocation fails closed when full. Nothing is automatically evicted or
+deleted. Explicit cleanup after quiescing all observation clients is required
+before reusing a full store. The status query never initiates that cleanup.
+Old clients/initial discovery without exact lifecycle pins remain fail-closed.
+
+One local, peer-free native acceptance on Herdr 0.1.15 / HC 0.1.21 exercised a
+running watch across view removal beyond the host close grace: explicit keyboard
+recovery proved the original helper's exit, accepted fresh compatibility and a
+pinned snapshot, cleared suspension and resumed nonoverlapping bounded waits.
+This does not establish general remote/disconnect recovery or mutation safety
+beyond the existing independent authorization and uncertain-attempt fences.
+
 ## Prepared work: server authoring, panel confirmation
 
 The parent Main / Integrator authors a request on the execution server using
@@ -210,6 +257,26 @@ for these new controls. Do not deploy them on the strength of syntax/build
 checks alone.
 
 ## Inspect and acknowledge
+
+### Recovering a suspended selected context
+
+Use **Recover selected context** in the suspension notice (also available under
+Context details). It invalidates old private confirmations, waits up to 26 seconds
+for the previous native observation promise to settle, then checks the selected
+machine/folder's bridge and reads a fresh snapshot pinned to that descriptor.
+Only a complete matching schema-6 snapshot clears the notice and resumes the
+existing observation lease. No additional projection poller is started.
+
+Recovery preserves the selected project and private attempt/receipt evidence.
+It never retries a submission, sends a prompt, answers a permission or releases
+capacity. Definitely unattempted intents require new previews; attempted or
+uncertain operations remain exact-recovery-only. Replacing an image/store does
+not rebind an old preview to the new context.
+
+If the previous observer cannot establish settlement, the bridge is unavailable,
+the queue needs an explicit upgrade, or context changes during recovery, the
+notice shows the current failure and retains the action. Nothing initializes,
+migrates, cancels or overlaps the unresolved observer automatically.
 
 The panel selects a unique project matching the active space's repository or
 offers a picker over loaded project pages. Automatic stored observation requires

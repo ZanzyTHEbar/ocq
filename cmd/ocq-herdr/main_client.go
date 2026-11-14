@@ -17,7 +17,9 @@ import (
 )
 
 var clientDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
-var nativeTerminalID = regexp.MustCompile(`^t[1-9][0-9]*$`)
+
+// HC 0.1.21 IDs use consonant/base-30 suffixes (e.g. t1b), not decimal.
+var nativeTerminalID = regexp.MustCompile(`^t[1-9][0-9bcdfghjkmnpqrstvwxyz]*$`)
 
 // No Main authoring/upload endpoint. Setup/profile/prompt files stay server-side.
 func mainClientCommands() []*cobra.Command {

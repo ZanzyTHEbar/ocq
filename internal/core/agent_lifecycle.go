@@ -119,6 +119,17 @@ func (s *store) launchAgent(j Job) error {
 		return err
 	}
 	j.Agent.Worktree = wanted
+	// A review must have an available effective catalog in its OWN checkout
+	// before any session intent/POST. Keep the independent pre-prompt check too.
+	isReview, err := s.isProjectReviewJob(context.Background(), j.ID)
+	if err != nil {
+		return err
+	}
+	if isReview {
+		if err := verifyReviewerRuntime(wanted, r.Agent, r.Permissions); err != nil {
+			return s.agentUnknown(j.ID, err.Error(), false)
+		}
+	}
 	body := map[string]any{"id": a.SessionID, "title": "ocq " + j.ID, "agent": r.Agent, "model": r.Model, "location": map[string]string{"directory": wanted}, "metadata": ownershipMetadata(j), "permissions": r.Permissions}
 	if err := s.agentIntent(j.ID, "session", body); err != nil {
 		return err

@@ -67,6 +67,12 @@ prompt was consumed. API calls use `opencode api` and its intended discovery and
 authentication context.
 
 There is no automatic continuation or mutation replay after a lost response.
+While an already-running job's single exact owned input is still in the inbox,
+the observer retains nonterminal running capacity if its durable prompt
+acknowledgement, delivery mode and inspected history match. It never resends or
+resumes that input, revives an unknown job, or treats auxiliary context as
+ownership proof. All inbox input must still drain before terminal proof.
+
 Lost Workmux acknowledgement remains unknown; session/prompt recovery uses exact
 supplied IDs only. Worktrees, branches, sessions and evidence are retained.
 
@@ -109,6 +115,17 @@ or tool payloads. Idle or CLI exit alone never releases ownership.
 
 ## Recovery
 
+Project reviews inspect the effective agent in the exact owned checkout before
+creating a session, and revalidate it before prompting. On source-pinned 2.3.0,
+session creation does not initialize location services and the agent route can
+observe an empty catalog during asynchronous plugin activation. The gate resolves
+`GET /api/location` with the explicit directory, then uses the read-only
+`GET /api/model` server-owned activation barrier before inspecting the agent.
+Location resolution alone is not readiness. No sleeps, GET retry loop, reload,
+agent substitution or policy relaxation is involved; unavailable inspection fails
+closed before a session POST. A retained worktree still has ownership and is not
+automatically released.
+
 Stop dispatch, inspect the exact recorded session/location and use:
 
 ```sh
@@ -120,6 +137,14 @@ resumes, answers permissions, cancels or cleans up resources. Client PID/boot
 identity cannot prove a shared-service agent stopped; `resolve` rejects agents.
 If known resources disappear after a runtime restart, investigate rather than
 retrying execution or guessing replacement IDs.
+
+An unprompted provisioning failure has no completion path in this contract.
+Reconciliation explicitly retains unknown when durable prompt intent is absent;
+empty transcript/inbox/requests, idle activity and no owned resources do not
+substitute for the consumed prompt and explicit terminal outcome. Releasing such
+a reservation would require a separately specified, explicitly authorized
+provisioning-abort capability with affirmative no-execution/fencing evidence,
+not a fabricated agent outcome or an automatic absence-based reconciliation.
 
 The Herdr Queue view also offers [explicit local reconciliation](herdr.md#reconcile-agent-jobs).
 Separate human review/confirmation binds the exact queue, receipt, session,

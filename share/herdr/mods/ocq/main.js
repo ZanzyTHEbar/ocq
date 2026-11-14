@@ -227,7 +227,14 @@ export default class OCQ extends View {
     this.updates.sync(cx);
   }
 
-  close() { this.closed = true; this.generation++; this.queue.generation++; this.publication.generation++; this.worktreeCheck.generation++; this.updates.dispose(); }
+  async close() {
+    this.closed = true; this.generation++; this.queue.generation++; this.publication.generation++; this.worktreeCheck.generation++;
+    // Herdr retains an async View.close until settlement or its own deadline.
+    // Returning early cancels this view's host calls without settling their JS
+    // promises, leaving the shared one-flight observer permanently draining.
+    // The host deadline still applies; expiry cannot be treated as settlement.
+    await this.updates.dispose();
+  }
 
   panelCurrent() { return panelVisible() && this.panelEpoch === panelEpoch(); }
 
@@ -324,6 +331,7 @@ export default class OCQ extends View {
   }
 
   resetObservationVersions() {
+    this.updates.suspendRecovery();
     this.workOperator.suspend("Context changed; retained work previews have no authority.");
     // New binding means new projection ownership, not just new version labels.
     // Keep private journals/reviews separate; never reuse their old authority.
@@ -1432,7 +1440,7 @@ export default class OCQ extends View {
       ![this.queue.cancel, this.queue.resolution, this.queue.reconciliation].some(helper => helper.confirm && helper.current(this));
     return v_flex().size_full().min_h(0).bg(t.background).text_color(t.foreground)
       .when(workspace, e => e.child(this.workspaceHeader(cx, t)))
-      .when(Boolean(this.observationReset) && !workspace, e => e.child(div().p(8).text_size(12).text_color(t.blocked).child("Prior context suspended · private journals/reviews retained as evidence only. Reopen a fresh selected context for a new review.")))
+      .when(Boolean(this.observationReset) || compatibility.observationBlocked || compatibility.legacyObservationBlocked, e => e.child(this.recoveryNotice(cx, t)))
       .child(compatibility.notice(cx, t, (id, label, action) => this.registerAction(id, label, action, this.compatibilityTargets)))
       .child(div().flex_1().min_h(0).child(content));
   }
@@ -1468,6 +1476,24 @@ export default class OCQ extends View {
     cx.notify();
   }
 
+  recoveryNotice(cx, t) {
+    const running = Boolean(this.updates.recovery?.running);
+    return v_flex().p(10).gap(4).text_size(12)
+      .child(div().text_color(t.blocked).child(this.observationReset || compatibility.reason))
+      .when(Boolean(this.updates.recovery) && !running && Boolean(this.updateHealth.reason) && this.updateHealth.reason !== this.observationReset,
+        e => e.child(div().text_color(t.blocked).child(this.updateHealth.reason)))
+      .child(div().text_color(t.muted).child("Recovery reads this selected context afresh. Old confirmations stay invalid; attempted or uncertain operations are never resent."))
+      .child(div().id("ocq-context-recover").role("button").accessibility_label("Recover selected context")
+        .px(8).py(5).rounded(5).cursor_pointer()
+        .when(running, e => e.opacity(0.4))
+        .when(this.navigationTarget === "ocq-context-recover", e => e.bg(t.hover))
+        .hover(e => e.bg(t.hover))
+        .on_click(this.registerAction("ocq-context-recover", "Recover selected context", cx => {
+          if (!this.updates.recovery?.running) this.updates.recover(cx);
+        }, this.compatibilityTargets))
+        .child(running ? "Recovering selected context…" : "Recover selected context"));
+  }
+
   workspaceHeader(cx, t) {
     const control = (id, label, action, selected = false) => div().id(id).role("button").accessibility_label(label)
       .px(8).py(5).rounded(5).cursor_pointer().when(selected, e => e.bg(t.hover).font_semibold())
@@ -1479,12 +1505,11 @@ export default class OCQ extends View {
       .child(div().font_semibold().child(`OCQ · ${this.machine ?? "This computer"}${this.machine !== null ? " · Only explicit prepared-work confirmation enabled remotely" : ""}`))
       .child(h_flex().gap(2).children(["overview", "projects", "queue", "inbox"].map(name => control(`ocq-workspace-${name}`, name[0].toUpperCase() + name.slice(1), cx => this.navigateWorkspace(name, cx), view === name))))
       .child(div().text_size(12).text_color(["waiting", "reading"].includes(this.updateHealth.state) ? t.muted : t.blocked).child(this.updateHealth.state === "waiting" ? "Automatic change waiting · stored observations" : this.updateHealth.state === "missing" ? "No existing queue · automatic creation waiting" : `${this.updateHealth.state.replace(/_/g, " ")} · stored observations may be stale`))
-      .when(Boolean(this.observationReset), e => e.child(div().text_size(12).text_color(t.blocked).child("Prior action authority suspended. Private reviews/journals retained separately; only freshly read projections are shown. Quiesce and reopen a fresh selected context before a new review.")))
       .child(control("ocq-context-details", this.contextDetails ? "Hide context details" : "Context details", cx => { this.contextDetails = !this.contextDetails; cx.notify(); }))
       .when(this.contextDetails, e => e.child(v_flex().gap(4)
         .child(div().text_size(12).text_color(t.muted).child(`Space: ${this.spaceID || "not selected"}\nFolder: ${this.folder || "not selected"}\nQueue: ${queueID || "identity not observed"}\nSnapshot revision: ${this.updates.revision || "not observed"}\nLatest snapshot read: ${this.updateHealth.readAt || "not yet read"}\nLatest project page read: ${this.projectsReadAt || "not yet read"}\n${this.updateHealth.reason || "No current read diagnostic."}`))
         .child(control("ocq-copy-update-diagnostics", "Copy update diagnostics", cx => cx.write_to_clipboard(JSON.stringify({ machine: this.machine, health: this.updateHealth, revision: this.updates.revision }))))
-        .child(control("ocq-workspace-read-again", "Read again", cx => this.queueMode ? this.queue.refresh(this, cx) : this.refresh(cx)))))
+        .child(control("ocq-workspace-read-again", "Recover selected context", cx => this.updates.recover(cx)))))
       .when(["stale", "unavailable"].includes(this.updateHealth.state), e => e.child(div().text_size(12).text_color(t.blocked).child("Updates unavailable; displayed observations may be stale.")));
   }
 

@@ -22,7 +22,7 @@ const hex = s => /^[0-9a-f]{64}$/.test(s || "");
 const same = (a, b) => !!a && !!b && ["id", "machine", "folder"].every(k => a[k] === b[k]);
 const active = () => { const s = spaces().find(s => s.active); return s && { id: s.id, machine: s.machine, folder: s.folder }; };
 const localSpace = s => s.machine !== null && s.id.startsWith(`${s.machine}/`) ? s.id.slice(s.machine.length + 1) : s.id;
-const reads = new Set(["view-snapshot", "watch-wait", "compatibility", "projects", "board", "job", "recent-inbox", "inbox", "mail", "recent-results", "results", "manifest", "verify-worktree", "queue-jobs", "queue-job", "queue-log", "notifications", "notification", "agent-handoff-status", "agent-handoff-verify"]);
+const reads = new Set(["view-snapshot", "watch-wait", "observation-read-status", "compatibility", "projects", "board", "job", "recent-inbox", "inbox", "mail", "recent-results", "results", "manifest", "verify-worktree", "queue-jobs", "queue-job", "queue-log", "notifications", "notification", "agent-handoff-status", "agent-handoff-verify"]);
 for (const action of ["compose-context", "compose-status", "compose-rendezvous", "intake-status", "intake-rendezvous", "notification-ack-status", "queued-cancel-status", "command-resolve-status", "command-resolve-rendezvous", "agent-reconcile-status", "command-submit-context", "command-submit-status", "command-submit-rendezvous", "agent-submit-context", "agent-submit-status", "agent-submit-rendezvous", "result-publish-context", "result-publish-list", "result-publish-status", "result-publish-rendezvous", "capture-context", "capture-list", "capture-status", "capture-rendezvous", "dispatcher-context", "dispatcher-status", "dispatcher-read"]) reads.add(action);
 // Preview writes retained private review evidence, but never claims/submits.
 for (const action of ["work-list", "work-status", "work-recover", "work-output", "work-handoff", "work-preview"]) reads.add(action);
@@ -33,7 +33,7 @@ export const compatibility = {
   epoch: 0,
   observe() {
     const s = active();
-    if (!same(s, this.scope)) { this.scope = s; this.epoch++; this.status = null; this.pin = null; this.pending = false; this.observationBlocked = false; this.legacyObservationBlocked = false; this.reason = s?.machine != null ? "Legacy remote mutations disabled. Prepared-work/Main/client actions require their own matched peer/context review; stored reads remain available." : "Mutations disabled: matched bridge not checked in this selected context."; }
+    if (!same(s, this.scope)) { this.scope = s; this.epoch++; this.status = null; this.pin = null; this.recovery = null; this.pending = false; this.observationBlocked = false; this.legacyObservationBlocked = false; this.reason = s?.machine != null ? "Legacy remote mutations disabled. Prepared-work/Main/client actions require their own matched peer/context review; stored reads remain available." : "Mutations disabled: matched bridge not checked in this selected context."; }
     const marker = panelEpoch();
     if (this.panelMarker !== undefined && marker !== this.panelMarker) {
       this.epoch++; this.serial = (this.serial || 0) + 1; this.status = null; this.pending = false;
@@ -49,16 +49,30 @@ export const compatibility = {
     this.observe();
     if (!panelVisible() || marker !== this.panelMarker || this.freshPanelMarker === marker) return;
     this.epoch++; this.serial = (this.serial || 0) + 1; this.status = null; this.pending = false;
-    this.pin = null; this.freshPanelMarker = marker; this.reopenAuthorization = true;
+    this.pin = null; this.recovery = null; this.freshPanelMarker = marker; this.reopenAuthorization = true;
   },
-  ready() { const s = this.observe(); return panelVisible() && !this.observationBlocked && !this.legacyObservationBlocked && !!s && s.machine === null && !!this.status && hex(this.status.queue_identity) && this.status.observation_schema === 6 && hex(this.status.observation_context) && hex(this.status.observation_store_context); },
-  workReady() { const s = this.observe(); return panelVisible() && !this.observationBlocked && !!s && !!this.status && hex(this.status.queue_identity) && this.status.observation_schema === 6 && hex(this.status.observation_context) && hex(this.status.observation_store_context); },
+  beginRecovery() {
+    // Called only after the selected owner has invalidated ALL old reviews.
+    this.observe();
+    this.epoch++; this.serial = (this.serial || 0) + 1; this.startedEpoch = this.epoch;
+    this.status = null; this.pin = null; this.pending = false;
+    this.observationBlocked = true; this.legacyObservationBlocked = true;
+    return this.recovery = {};
+  },
+  finishRecovery(token) {
+    if (this.recovery !== token) throw Error("Selected recovery changed");
+    this.recovery = null; this.observationBlocked = false; this.legacyObservationBlocked = false;
+    this.reopenAuthorization = false;
+    this.reason = "Fresh selected-context compatibility and snapshot verified. Start a new review; old confirmations and uncertain attempts were not restored.";
+  },
+  ready() { const s = this.observe(); return panelVisible() && !this.recovery && !this.observationBlocked && !this.legacyObservationBlocked && !!s && s.machine === null && !!this.status && hex(this.status.queue_identity) && this.status.observation_schema === 6 && hex(this.status.observation_context) && hex(this.status.observation_store_context); },
+  workReady() { const s = this.observe(); return panelVisible() && !this.recovery && !this.observationBlocked && !!s && !!this.status && hex(this.status.queue_identity) && this.status.observation_schema === 6 && hex(this.status.observation_context) && hex(this.status.observation_store_context); },
   invalidateObservation(reason) {
     this.observe();
-    if (this.observationBlocked) return;
+    if (this.observationBlocked && !this.recovery) return;
     this.observationBlocked = true; this.legacyObservationBlocked = true; this.status = null; this.pending = false;
     this.epoch++; this.serial = (this.serial || 0) + 1; this.startedEpoch = this.epoch;
-    this.reason = `${reason} Quiesce and reopen a fresh selected context before local actions; observational reconnect never restores authorization.`;
+    this.reason = `${reason} Use Recover selected context to drain the old observer and verify fresh reads. Prior confirmations and uncertain attempts are never restored.`;
   },
   transfer(current) {
     const status = this.status, epoch = this.epoch, serial = this.serial;
@@ -72,9 +86,9 @@ export const compatibility = {
     if (!v || v.protocol !== PROTOCOL || v.journal_claims !== CLAIMS || v.build_kind !== "local-development" || !hex(v.image_sha256) || !hex(v.bridge_context) || v.space_id !== localSpace(s) || v.folder !== s.folder || !v.actions || Object.keys(v.actions).length !== Object.keys(ACTIONS).length || Object.entries(ACTIONS).some(([a, value]) => v.actions[a] !== value) || (v.queue_identity !== "" && !hex(v.queue_identity))) throw Error("Bridge protocol, action semantics or context mismatch");
     return v;
   },
-  async check(current = () => true, workOnly = false, freshAuthorization = false) {
+  async check(current = () => true, workOnly = false, freshAuthorization = false, recovery = null) {
     const s = this.observe();
-    if (!s || (!workOnly && s.machine !== null) || !current()) throw Error("Compatibility context unavailable");
+    if (!s || (this.recovery && this.recovery !== recovery) || (!workOnly && s.machine !== null) || !current()) throw Error("Compatibility context unavailable");
     if (freshAuthorization) { this.epoch++; this.startedEpoch = this.epoch; }
     const epoch = this.epoch;
     const serial = this.serial = (this.serial || 0) + 1;
@@ -103,11 +117,14 @@ export const compatibility = {
         if (this.reopenAuthorization) this.legacyObservationBlocked = false;
         this.reopenAuthorization = false;
       }
-      this.reason = this.observationBlocked ? "Local actions remain suspended after an observation reset/disconnect. Quiesce and reopen a fresh selected context; rechecking does not revive old confirmations." : this.status.observation_schema !== 6 ? "This automatic workspace requires the matched schema-6 observation descriptor. Local actions disabled; nothing initialized or migrated." : this.status.queue_identity ? "Matched local bridge/action contracts. Each action rechecks image/context; this does not lock executable replacement." : "Matched bridge, but no supported existing queue. Mutations disabled; nothing initialized.";
+      this.reason = this.observationBlocked ? "Local actions remain suspended. Use Recover selected context to verify a fresh snapshot; rechecking alone does not restore old confirmations." : this.status.observation_schema !== 6 ? "This automatic workspace requires the matched schema-6 observation descriptor. Local actions disabled; nothing initialized or migrated." : this.status.queue_identity ? "Matched local bridge/action contracts. Each action rechecks image/context; this does not lock executable replacement." : "Matched bridge, but no supported existing queue. Mutations disabled; nothing initialized.";
       return this.status;
-    } catch (_e) {
-      if (same(this.observe(), s) && this.epoch === epoch && this.serial === serial) { this.status = null; this.reason = "Mutations disabled: bridge absent, malformed, incompatible, timed out or changed. Recheck reads only; if image/queue/context changed, quiesce and reopen in a fresh selected context."; }
-      throw Error("Bridge compatibility unavailable; no mutation attempted");
+    } catch (error) {
+      const reason = recovery
+        ? `Selected-context compatibility check failed: ${String(error.message || error).slice(0, 512)}`
+        : "Mutations disabled: bridge absent, malformed, incompatible, timed out or changed. Recheck reads only; use Recover selected context for a fresh pinned read.";
+      if (same(this.observe(), s) && this.epoch === epoch && this.serial === serial) { this.status = null; this.reason = reason; }
+      throw Error(reason);
     } finally { if (this.epoch === epoch && this.serial === serial) this.pending = false; }
   },
   authorize(action, args, current) {
@@ -144,7 +161,7 @@ export const compatibility = {
     this.observe();
     const epoch = this.epoch;
     const scope = this.scope;
-    if (this.scope?.machine === null && this.startedEpoch !== epoch) {
+    if (!this.recovery && this.scope?.machine === null && this.startedEpoch !== epoch) {
       this.startedEpoch = epoch;
       cx.spawn(async cx => { try { await this.check(() => same(active(), scope), false, Boolean(this.reopenAuthorization)); } catch (_) {} cx.notify(); });
     }
@@ -166,7 +183,7 @@ export const compatibility = {
 // actions fail closed; every mutation requires a caller's ORIGINAL live guard.
 export async function exec(bin, args, options = {}) {
   const { current, ...transport } = options;
-  const observationRead = args.length === 6 && args[0] === "--mod-space" && typeof args[1] === "string" && args[2] === "--mod-folder" && typeof args[3] === "string" && ["view-snapshot", "watch-wait"].includes(args[4]) && typeof args[5] === "string";
+   const observationRead = [6, 8].includes(args.length) && args[0] === "--mod-space" && typeof args[1] === "string" && args[2] === "--mod-folder" && typeof args[3] === "string" && ["view-snapshot", "watch-wait", "observation-read-status"].includes(args[4]) && typeof args[5] === "string" && (args.length === 6 || args[6] === "--observation-read-id" && /^[0-9a-f]{64}$/.test(args[7]));
   if (bin !== "ocq-herdr" || read(args[0]) || observationRead) return nativeExec(bin, args, transport);
   if (["work-confirm", "main-start", "client-prepare", "client-open"].includes(args[0])) {
     const flags = compatibility.authorizeWork(args.slice(1), options, args[0]);

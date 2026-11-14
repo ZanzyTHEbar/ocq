@@ -99,6 +99,8 @@ func (s *store) observeAgent(j Job) error {
 	if err := s.inspectAPI(j, "inbox", path+"/inbox", &inbox); err != nil {
 		return s.agentFailure(j, err)
 	}
+	ownedPending := 0
+	pendingDelivery := ""
 	for _, in := range inbox {
 		if in.SessionID == j.Agent.SessionID && (in.Type == "synthetic" || in.Type == "system") {
 			continue // Auxiliary context must drain before completion, not be adopted as our prompt.
@@ -106,13 +108,101 @@ func (s *store) observeAgent(j Job) error {
 		if !matchingInput(j, in) {
 			return s.interference(j, "foreign or changed inbox input detected; ownership/capacity retained")
 		}
+		ownedPending++
+		pendingDelivery = in.Delivery
+	}
+	if ownedPending > 1 {
+		return s.interference(j, "duplicate owned inbox input; exact single prompt required")
 	}
 	if len(inbox) > 0 {
+		// A successful prompt acknowledgement is an enqueued input, not proof
+		// of consumption. Only the already-running, durably acknowledged own
+		// prompt may remain pending here. Never turn an unknown job back into
+		// running, resend input, or use auxiliary context as ownership proof.
+		if ownedPending == 1 && j.State == "running" && j.Agent.Phase == "prompt_accepted" {
+			ack, err := os.ReadFile(filepath.Join(s.dir, "jobs", j.ID, "prompt-response.json"))
+			if err != nil {
+				return s.agentFailure(j, err)
+			}
+			var accepted inboxItem
+			if decodeData(ack, &accepted) != nil || !matchingInput(j, accepted) {
+				return s.agentUnknown(j.ID, "exact accepted prompt evidence unavailable; capacity held", false)
+			}
+			if (accepted.Delivery != "steer" && accepted.Delivery != "queue") || pendingDelivery != accepted.Delivery {
+				return s.interference(j, "unsupported or changed delivery of owned inbox input")
+			}
+			messages, err := s.transcript(j)
+			if err != nil {
+				return s.agentFailure(j, err)
+			}
+			anchors := 0
+			for _, m := range messages {
+				switch m.Type {
+				case "user":
+					if anchors != 0 || m.ID != j.Agent.PromptID || m.Text != j.agentRequest.Prompt || !jsonEqual(m.Metadata, ownershipMetadata(j)) || len(m.Files)+len(m.Agents)+len(m.Skills) != 0 {
+						return s.interference(j, "additional or mismatched user history while owned input pending")
+					}
+					anchors++
+				case "system", "synthetic": // Auxiliary only; no causality asserted.
+				case "assistant":
+					if anchors != 1 || m.Agent != j.agentRequest.Agent || m.Model != j.agentRequest.Model {
+						return s.interference(j, "unexpected assistant execution while owned input pending")
+					}
+				case "idle":
+					if anchors != 1 || (m.Outcome != "succeeded" && m.Outcome != "failed" && m.Outcome != "interrupted") {
+						return s.interference(j, "unsupported idle history while owned input pending")
+					}
+				default:
+					return s.interference(j, "unsupported execution input/history while owned input pending")
+				}
+			}
+			_, err = s.agentEvidence(j.ID, "owned-input-pending", []byte(`{"state":"pending","completion":false,"capacity":"held","reason":"exact acknowledged own input awaits consumption; auxiliary context is not ownership proof"}`))
+			return err // Keep running/agent_pending; all terminal fences below remain.
+		}
 		return s.agentUnknown(j.ID, "session input pending in inbox; no completion, resend, or resume", true)
 	}
 	messages, err := s.transcript(j)
 	if err != nil {
 		return s.agentFailure(j, err)
+	}
+	if j.State == "running" && j.Agent.Phase == "prompt_accepted" {
+		// A transcript read is not atomic with execution activity or the idle
+		// event append. Do not interpret an in-flight prefix as a failed terminal
+		// proof. Only preserve already-running, durably acknowledged ownership;
+		// unknown reconciliation must still satisfy all terminal fences below.
+		b, err := apiCall(j.Agent.Worktree, "get", "/api/session/active", nil)
+		if err != nil {
+			return s.agentFailure(j, err)
+		}
+		var active map[string]json.RawMessage
+		if err := decodeData(b, &active); err != nil || active == nil {
+			return s.agentUnknown(j.ID, "execution activity inspection unavailable; capacity held", false)
+		}
+		var sampled sessionInfo
+		if err := s.inspectAPI(j, "session-sampled-after-transcript", path, &sampled); err != nil {
+			return s.agentFailure(j, err)
+		}
+		if err := validateSession(j, sampled); err != nil {
+			return s.interference(j, err.Error())
+		}
+		if err := s.verifyProjectSessionPolicy(context.Background(), j, sampled); err != nil {
+			return s.interference(j, err.Error())
+		}
+		_, running := active[j.Agent.SessionID]
+		changing := before.Time != sampled.Time
+		settling := sampled.Time.Busy > 0 && sampled.Time.Idle < sampled.Time.Busy
+		if running || changing || settling {
+			evidence, err := json.Marshal(map[string]any{
+				"completion": false, "capacity": "held", "active": running,
+				"before": before.Time, "after": sampled.Time,
+				"reason": "running or non-atomic execution/transcript observation; next ordinary poll must reobserve",
+			})
+			if err != nil {
+				return err
+			}
+			_, err = s.agentEvidence(j.ID, "execution-observation-pending", evidence)
+			return err
+		}
 	}
 	if len(messages) == 0 {
 		return s.agentUnknown(j.ID, "exact prompt absent from durable history; acceptance/completion unresolved; never resend", false)

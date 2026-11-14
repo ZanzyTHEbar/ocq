@@ -55,6 +55,11 @@ func workID(id string) bool {
 	return true
 }
 
+// Reserved structural publication context for the local Work command core, NOT
+// a discovered/live Herdr space or a UI navigation target. Keep the same valid
+// target shape and ownership/publication fences as other publication callers.
+const workPublicationSpace = "spocqworkpublication"
+
 func workJournal(project string) string { return "project-work-" + sha256Hex([]byte(project)) }
 
 func decodeWork(raw []byte) (WorkPrepareRequest, error) {
@@ -535,7 +540,7 @@ func buildWorkPayload(r *Reader, dir *os.File, in WorkPrepareRequest, b ProjectB
 		if parent.Kind != "implementation" || parent.Job == nil || !parent.Job.TerminalProven {
 			return nil, errors.New("capture requires separately proven terminal implementation")
 		}
-		c, err := r.CapturePublicationContext("project-work", in.ProjectID, parent.Job.JobID)
+		c, err := r.CapturePublicationContext(workPublicationSpace, in.ProjectID, parent.Job.JobID)
 		if err != nil {
 			return nil, err
 		}
@@ -592,7 +597,7 @@ func buildWorkPayload(r *Reader, dir *os.File, in WorkPrepareRequest, b ProjectB
 		if _, err = parseManifestBytes(raw, "review_result", in.ProjectID); err != nil {
 			return nil, err
 		}
-		c, err := r.ResultPublicationContext("project-work", in.ProjectID, parent.Job.JobID)
+		c, err := r.ResultPublicationContext(workPublicationSpace, in.ProjectID, parent.Job.JobID)
 		if err != nil {
 			return nil, err
 		}

@@ -1,12 +1,14 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func clientFile(pointer, suffix string) string { return ".client-" + pointer + "." + suffix + ".json" }
@@ -272,6 +274,21 @@ func RunProjectClient(dir, project, digest string) error {
 	if err != nil {
 		return err
 	}
+	// Rebind the scoped authentication handoff to the same pinned instance
+	// immediately before launch admission. No credential enters the pointer.
+	service, err := discoverNativeService(p.Cwd)
+	if err != nil {
+		return err
+	}
+	if service.Origin != p.ServerOrigin || service.Identity != p.ServiceIdentity {
+		return errors.New("native service changed before scoped authentication handoff")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	password, err := nativePassword(ctx, p.Cwd, service)
+	cancel()
+	if err != nil {
+		return err
+	}
 	if err = nativeJournalRoom(owned.dir, 1); err != nil {
 		return err
 	}
@@ -279,7 +296,7 @@ func RunProjectClient(dir, project, digest string) error {
 		return err
 	}
 	env := []string{}
-	for _, entry := range os.Environ() {
+	for _, entry := range nativeCommandEnvironment(password) {
 		if !strings.HasPrefix(entry, "OPENCODE_CLI_CONFIG_CONTENT=") {
 			env = append(env, entry)
 		}

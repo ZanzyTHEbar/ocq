@@ -3,10 +3,12 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,6 +28,8 @@ type sessionInfo struct {
 	Permissions []permissionRule `json:"permissions"`
 	Time        struct {
 		Updated float64 `json:"updated"`
+		Busy    float64 `json:"busy"`
+		Idle    float64 `json:"idle"`
 	} `json:"time"`
 }
 type message struct {
@@ -92,6 +96,7 @@ type inboxItem struct {
 	ID        string `json:"id"`
 	SessionID string `json:"sessionID"`
 	Type      string `json:"type"`
+	Delivery  string `json:"delivery"`
 	Payload   struct {
 		Text     string            `json:"text"`
 		Metadata json.RawMessage   `json:"metadata"`
@@ -116,6 +121,8 @@ func jsonEqual(a, b any) bool {
 
 // The supported CLI owns shared-service discovery/authentication. Never replace
 // it with an unauthenticated localhost client or a private/standalone server.
+var apiHTTPStatus = regexp.MustCompile(`\bHTTP(?:/\S+)?\s+([1-5][0-9]{2})\b`)
+
 func apiCall(directory, method, path string, body any) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -131,9 +138,28 @@ func apiCall(directory, method, path string, body any) ([]byte, error) {
 	c.Dir = directory
 	b, err := c.Output() // normal environment preserves configured discovery/auth context
 	if err != nil {
-		return nil, diagnostic(faults.CodeRuntimeFailed, "OpenCode CLI request failed; mutation acknowledgment may be lost; never retry POST")
+		// Preserve only bounded diagnostic categories, never raw response bodies,
+		// headers or CLI stderr (which may contain private configuration).
+		detail := "process start/wait failed"
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			detail = fmt.Sprintf("exit=%d", exit.ExitCode())
+			if status := apiHTTPStatus.FindSubmatch(exit.Stderr); len(status) == 2 {
+				detail += ", HTTP=" + string(status[1])
+			}
+		}
+		if ctx.Err() != nil {
+			detail += ", deadline exceeded"
+		}
+		if strings.EqualFold(method, "get") || strings.EqualFold(method, "head") {
+			return nil, diagnostic(faults.CodeRuntimeFailed, "OpenCode read inspection failed ("+detail+"); no execution mutation requested; observation unavailable")
+		}
+		return nil, diagnostic(faults.CodeRuntimeFailed, "OpenCode mutation request failed ("+detail+"); acknowledgment may be lost; never retry the attempted mutation")
 	}
 	if !json.Valid(b) {
+		if strings.EqualFold(method, "get") || strings.EqualFold(method, "head") {
+			return nil, diagnostic(faults.CodeRuntimeFailed, "OpenCode read response was not JSON; observation unavailable")
+		}
 		return nil, diagnostic(faults.CodeRuntimeFailed, "OpenCode response was not JSON; acknowledgment uncertain")
 	}
 	return b, nil

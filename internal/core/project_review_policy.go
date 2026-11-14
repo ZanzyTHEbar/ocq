@@ -34,6 +34,38 @@ func verifyReviewerRuntime(directory, agent string, rules []permissionRule) erro
 		return diagnostic(faults.CodeConfigInvalid, "review policy requires source-validated OpenCode server version 2.2.6 or 2.3.0")
 	}
 	query := url.Values{"location[directory]": {directory}}
+	// Session creation stores a location reference; it does not initialize its
+	// services. Resolve the canonical location before inspecting its catalog.
+	b, err = apiCall(directory, "get", "/api/location?"+query.Encode(), nil)
+	if err != nil {
+		return diagnosticWrap(faults.CodeRuntimeFailed, "review policy location inspection", err)
+	}
+	var location struct {
+		Directory string `json:"directory"`
+	}
+	if err := json.Unmarshal(b, &location); err != nil || location.Directory != directory {
+		return diagnostic(faults.CodeRuntimeFailed, "review policy canonical location mismatch")
+	}
+	if server.Version == "2.3.0" {
+		// Pinned 2.3 starts Agent with an empty map and activates its plugins
+		// asynchronously. agent.get does not await activation; model.list does
+		// (server/handlers/model.ts and server/location.ts: awaitPlugins).
+		// Use that bounded server-owned barrier, not sleeps or catalog retries.
+		// Location.get alone is NOT an activation barrier.
+		b, err = apiCall(directory, "get", "/api/model?"+query.Encode(), nil)
+		if err != nil {
+			return diagnosticWrap(faults.CodeRuntimeFailed, "review policy location activation", err)
+		}
+		var models struct {
+			Location struct {
+				Directory string `json:"directory"`
+			} `json:"location"`
+			Data []json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(b, &models); err != nil || models.Location.Directory != directory || models.Data == nil {
+			return diagnostic(faults.CodeRuntimeFailed, "review policy location activation response mismatch")
+		}
+	}
 	b, err = apiCall(directory, "get", "/api/agent/"+url.PathEscape(agent)+"?"+query.Encode(), nil)
 	if err != nil {
 		return diagnosticWrap(faults.CodeRuntimeFailed, "review policy agent inspection", err)

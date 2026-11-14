@@ -8,46 +8,39 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
 
 type nativeService struct {
-	Origin   string `json:"origin"`
-	Identity string `json:"identity"`
+	Origin         string `json:"origin"`
+	Identity       string `json:"identity"`
+	PID            int    `json:"pid"`
+	RegistrationID string `json:"registration_id"`
 }
 
-// service status is read-only discover, unlike api's automatic ensure/start.
-// Explicit --server uses only the inherited intended authentication environment.
+// Same-user read-only Service.discover registration contract; never ensure/start,
+// CLI service configuration or a credential-bearing persistent nativeService.
 func discoverNativeService(directory string) (nativeService, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	c := exec.CommandContext(ctx, "opencode", "service", "status")
-	c.Dir = directory
-	c.WaitDelay = handoffWaitDelay
-	var out handoffOutput
-	c.Stdout = &out
-	c.Stderr = io.Discard
-	if err := c.Run(); err != nil {
-		return nativeService{}, errors.New("OpenCode service discovery unavailable; no start/restart attempted")
+	reg, err := readNativeRegistration(ctx, directory)
+	if err != nil {
+		return nativeService{}, err
 	}
-	origin := strings.TrimSpace(out.String())
-	u, err := url.Parse(origin)
-	if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || strings.ContainsAny(origin, "\r\n\x00") {
-		return nativeService{}, errors.New("exact credential-free existing service origin unavailable")
-	}
-	body, err := nativeCall(directory, nativeService{Origin: origin}, "get", "/api/info", nil)
+	service := nativeService{Origin: reg.URL, PID: reg.PID, RegistrationID: reg.ID}
+	body, err := nativeCallContext(ctx, directory, service, "get", "/api/info", nil)
 	if err != nil {
 		return nativeService{}, err
 	}
 	var info map[string]any
-	if json.Unmarshal(body, &info) != nil || info["version"] != "2.3.0" || info["pid"] == nil || info["hostname"] == nil {
+	if json.Unmarshal(body, &info) != nil || info["version"] != "2.3.0" || info["pid"] != float64(reg.PID) || info["hostname"] == nil {
 		return nativeService{}, errors.New("native client requires source-validated OpenCode server 2.3.0 identity")
 	}
-	identity, _ := json.Marshal(map[string]any{"origin": origin, "version": info["version"], "pid": info["pid"], "hostname": info["hostname"]})
-	return nativeService{origin, sha256Hex(identity)}, nil
+	identity, _ := json.Marshal(map[string]any{"origin": reg.URL, "version": info["version"], "pid": info["pid"], "hostname": info["hostname"], "registration_id": reg.ID})
+	service.Identity = sha256Hex(identity)
+	return service, nil
 }
 
 func nativeCall(directory string, service nativeService, method, path string, body any) ([]byte, error) {
@@ -57,12 +50,17 @@ func nativeCall(directory string, service nativeService, method, path string, bo
 func nativeCallContext(parent context.Context, directory string, service nativeService, method, path string, body any) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
+	password, err := nativePassword(ctx, directory, service)
+	if err != nil {
+		return nil, err
+	}
 	args := []string{"--server", service.Origin, "api", method, path}
 	if body != nil {
-		return nativePrivateBody(ctx, service, method, path, body)
+		return nativePrivateBody(ctx, service, method, path, body, password)
 	}
 	c := exec.CommandContext(ctx, "opencode", args...)
 	c.Dir = directory
+	c.Env = nativeCommandEnvironment(password)
 	c.WaitDelay = handoffWaitDelay
 	var out handoffOutput
 	c.Stdout = &out
@@ -78,10 +76,9 @@ func nativeCallContext(parent context.Context, directory string, service nativeS
 
 // Official 2.3.0 api --data has no stdin/file form. Main inputs therefore use
 // this bounded no-redirect, fresh-connection transport, AFTER the explicit CLI
-// GET verified the discovered origin/auth. Credentials exactly mirror
-// packages/cli/src/{env.ts,services/server-connection.ts}: inherited password
-// (legacy name second), Basic username opencode. Never guessed auth or argv data.
-func nativePrivateBody(ctx context.Context, service nativeService, method, path string, body any) ([]byte, error) {
+// GET verified the discovered origin/auth. Auth is selected from the exact
+// official managed registration or explicit inherited choice before transport.
+func nativePrivateBody(ctx context.Context, service nativeService, method, path string, body any, password string) ([]byte, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -94,13 +91,7 @@ func nativePrivateBody(ctx context.Context, service nativeService, method, path 
 		return nil, errors.New("private Main request unavailable")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	password, present := os.LookupEnv("OPENCODE_PASSWORD")
-	if !present {
-		password, present = os.LookupEnv("OPENCODE_SERVER_PASSWORD")
-	}
-	if present {
-		req.SetBasicAuth("opencode", password)
-	}
+	req.SetBasicAuth("opencode", password)
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DisableKeepAlives: true, MaxConnsPerHost: 1, ResponseHeaderTimeout: 10 * time.Second}
 	defer transport.CloseIdleConnections()
 	client := http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

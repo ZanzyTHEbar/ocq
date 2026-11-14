@@ -463,6 +463,12 @@ report, approval and a matching current snapshot. It **always** returns
 `integration_authorized=false` and `validation=not_run`. Nothing applies,
 commits, merges, pushes or deploys changes.
 
+The local Work command core uses the reserved structural publication context
+`spocqworkpublication` for capture and review-result payloads. It is not a live
+Herdr space, does not navigate/create a host space, and grants no UI authority.
+Public Herdr target validation is unchanged; local Work still applies the same
+queue/receipt, ownership, lane/base, terminal-parent and binding publication fences.
+
 ### Work-intent recovery and observation
 
 `ocq-work-v1` uses caller-known nonsecret request IDs, scoped to a project.
@@ -633,8 +639,22 @@ complete metadata hash, current profile, service, release images and effective
 CLI plugin configuration. Worker profiles remain immutable; Main navigation pins
 its current legitimate human-selected profile.
 
-Only `opencode --server EXACT_VERIFIED_ORIGIN` is executed, with inherited intended
-authentication. There is no `--session`, `--continue`, prompt/profile flag or
+New Main create/adopt profiles must explicitly select a model variant; use
+`"default"` for OpenCode's default variant. Empty variants are refused before
+preview/session creation because OpenCode 2.3 projects an omitted variant as
+`"default"`. Existing retained intents remain readable without normalization or
+loosening their exact profile fence.
+
+Only `opencode --server EXACT_VERIFIED_ORIGIN` is executed, with scoped intended
+authentication. For the source-validated local 2.3.0 service, the documented
+`Service.discover` registration contract supplies authentication in memory when
+no explicit inherited password was selected. The launcher reads only the
+installed CLI's official private registration, validates same-user ownership,
+mode 0600, no-follow access and exact literal-loopback origin/PID/instance, and
+passes authentication solely in the child environment. An explicit inherited
+choice is never retried with another credential. No service config/password
+getter, process-environment scrape, automatic start or global edit is used.
+There is no `--session`, `--continue`, prompt/profile flag or
 standalone fallback. In source-validated 2.3.0, explicit `--server` suppresses the
 startup terminal-environment write. The trusted TUI-only extension does exact GET
 verification then public router navigation; an absent target stays home, never

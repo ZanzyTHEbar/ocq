@@ -43,7 +43,7 @@ type observationWireSnapshot struct {
 }
 
 func observationCommands() []*cobra.Command {
-	return []*cobra.Command{
+	commands := []*cobra.Command{
 		{Use: "view-snapshot REQUEST_JSON", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 			req, err := core.DecodeObservationRequest([]byte(args[0]))
 			if err != nil {
@@ -122,6 +122,11 @@ func observationCommands() []*cobra.Command {
 			}{result, binding.ObservationContext})
 		}},
 	}
+	for _, cmd := range commands {
+		cmd.Flags().String("observation-read-id", "", "Exact private foreground-read resource identity")
+		cmd.RunE = withObservationReceipt(cmd.RunE)
+	}
+	return append(commands, observationReadStatus())
 }
 
 // Never fall back to serializing an unfamiliar core type. Existing reviewed

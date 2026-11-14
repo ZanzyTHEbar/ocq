@@ -45,7 +45,7 @@ function clientStatus(value, scope, digest) {
   pointer(value.pointer, scope);
   if (value.pointer.pointer_sha256 !== value.pointer_sha256) throw Error("Different client pointer");
   const terminal = value.terminal;
-  if (terminal && (!/^t[1-9][0-9]*$/.test(terminal.returned_terminal_id || "") ||
+  if (terminal && (!/^t[1-9][0-9bcdfghjkmnpqrstvwxyz]*$/.test(terminal.returned_terminal_id || "") ||
     terminal.returned_terminal_id !== terminal.observed_terminal_id || typeof terminal.peer !== "string" ||
     terminal.cwd !== value.pointer.cwd || JSON.stringify(terminal.argv) !== JSON.stringify(value.pointer.launcher_argv) ||
     terminal.labels?.["ocq.handoff"] !== value.pointer_sha256)) throw Error("Invalid native terminal receipt");

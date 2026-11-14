@@ -263,6 +263,19 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 	} else if !errors.Is(e, syscall.ENOENT) {
 		return MainStatus{}, e
 	}
+	if in.Mode == "create" || in.Mode == "adopt" {
+		profile, e := parseMainProfile(in.Profile)
+		if e != nil {
+			return MainStatus{}, e
+		}
+		// OpenCode 2.3 projects an omitted variant as "default". Refuse new
+		// selections before preview/POST rather than hash a different profile.
+		// Keep historical intent decoding/recovery unchanged, even if its
+		// original selection omitted the variant.
+		if strings.TrimSpace(profile.Variant) == "" {
+			return MainStatus{}, errors.New("explicit Main model variant required before preview; select \"default\" for the OpenCode default variant")
+		}
+	}
 	entries, err := workEntries(j.dir)
 	if err != nil {
 		return MainStatus{}, err
@@ -356,18 +369,30 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 		var agent struct {
 			Location struct {
 				Directory string `json:"directory"`
-				Project   struct {
-					ID string `json:"id"`
-				} `json:"project"`
 			} `json:"location"`
 			Data struct {
 				ID string `json:"id"`
 			} `json:"data"`
 		}
-		if json.Unmarshal(agentBody, &agent) != nil || agent.Location.Directory != rec.Repo || agent.Data.ID != profile.Agent || agent.Location.Project.ID == "" {
+		if json.Unmarshal(agentBody, &agent) != nil || agent.Location.Directory != rec.Repo || agent.Data.ID != profile.Agent {
 			return MainStatus{}, errors.New("exact configured Main agent/project/location unavailable")
 		}
-		rec.ProjectID = agent.Location.Project.ID
+		// Agent responses carry Location.PublicRef, not PublicInfo. Resolve
+		// project identity through the supported read-only location endpoint.
+		locationBody, e := nativeCall(rec.Repo, rec.Server, "get", "/api/location"+locationQuery(rec.Repo), nil)
+		if e != nil {
+			return MainStatus{}, e
+		}
+		var location struct {
+			Directory string `json:"directory"`
+			Project   struct {
+				ID string `json:"id"`
+			} `json:"project"`
+		}
+		if json.Unmarshal(locationBody, &location) != nil || location.Directory != rec.Repo || location.Project.ID == "" {
+			return MainStatus{}, errors.New("exact Main location/project identity unavailable")
+		}
+		rec.ProjectID = location.Project.ID
 		create := map[string]any{"id": rec.SessionID, "title": "Main / Integrator: " + in.Label, "agent": profile.Agent, "model": generic["model"], "permissions": generic["permissions"], "metadata": json.RawMessage(rec.Metadata), "location": map[string]string{"directory": rec.Repo}}
 		b, _ := json.Marshal(create)
 		rec.SessionJSON = string(b)

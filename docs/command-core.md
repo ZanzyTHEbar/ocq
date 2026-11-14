@@ -135,6 +135,13 @@ All launching/running/unknown demand counts conservatively. The earliest queued
 job alone is considered; a blocked head prevents backfill. Missing memory data
 closes admission. See [admission architecture](architecture.md#admission).
 
+An already-admitted unknown job is not a queued FIFO head, but still reserves
+one slot and its full declared memory. An explicitly budgeted two-slot private
+dispatcher can therefore retain one unknown reservation and admit one new queued
+job; this neither retries/releases the unknown job nor bypasses a queued head.
+Agent/LLM concurrency must be budgeted separately; two slots do not authorize
+two new workers in addition to the unknown reservation.
+
 `dispatch --commands-only` neither admits agents nor polls their APIs. A queued
 agent at the FIFO head still blocks later commands, and existing unknown agent
 ownership still counts. Plain `dispatch` also handles supported agent jobs.
