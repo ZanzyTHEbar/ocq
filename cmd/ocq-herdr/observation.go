@@ -37,6 +37,9 @@ type observationWireSnapshot struct {
 	BridgeContext string                     `json:"bridge_context"`
 	Slots         []observationWireSlot      `json:"slots"`
 	Log           *core.ObservationLogOutput `json:"log,omitempty"`
+	Work          any                        `json:"work,omitempty"`
+	Main          any                        `json:"main,omitempty"`
+	Clients       any                        `json:"clients,omitempty"`
 }
 
 func observationCommands() []*cobra.Command {
@@ -125,6 +128,21 @@ func observationCommands() []*cobra.Command {
 // project converters remain the sole allowlist for private core detail views.
 func observationWire(s core.ObservationSnapshot) (observationWireSnapshot, error) {
 	out := observationWireSnapshot{Protocol: s.Protocol, Status: s.Status, QueueIdentity: s.QueueIdentity, Schema: s.Schema, Revision: s.Revision, ReadAt: s.ReadAt, Consistency: s.Consistency, StoreContext: s.StoreContext, Log: s.Log, Slots: []observationWireSlot{}}
+	if s.Work != nil {
+		var err error
+		out.Work, err = workProjection(s.Work)
+		if err != nil {
+			return out, err
+		}
+		out.Main, err = workProjection(s.Main)
+		if err != nil {
+			return out, err
+		}
+		out.Clients, err = workProjection(s.Clients)
+		if err != nil {
+			return out, err
+		}
+	}
 	for _, slot := range s.Slots {
 		var safe any
 		if slot.Status == "ready" {

@@ -36,12 +36,13 @@ type ObservationSelector struct {
 }
 
 type ObservationRequest struct {
-	Protocol      string                `json:"protocol"`
-	QueueIdentity string                `json:"queue_identity,omitempty"`
-	StoreContext  string                `json:"store_context,omitempty"`
-	BridgeContext string                `json:"bridge_context,omitempty"`
-	Selectors     []ObservationSelector `json:"selectors"`
-	Log           *ObservationLogCursor `json:"log,omitempty"`
+	Protocol      string                 `json:"protocol"`
+	QueueIdentity string                 `json:"queue_identity,omitempty"`
+	StoreContext  string                 `json:"store_context,omitempty"`
+	BridgeContext string                 `json:"bridge_context,omitempty"`
+	Selectors     []ObservationSelector  `json:"selectors"`
+	Log           *ObservationLogCursor  `json:"log,omitempty"`
+	Work          *WorkObservationCursor `json:"work,omitempty"`
 }
 
 // Data is deliberately NOT serializable: callers must explicitly project each
@@ -67,6 +68,9 @@ type ObservationSnapshot struct {
 	Consistency   string                `json:"consistency"`
 	Slots         []ObservationSlot     `json:"slots"`
 	Log           *ObservationLogOutput `json:"log,omitempty"`
+	Work          *WorkList             `json:"work,omitempty"`
+	Main          *MainList             `json:"main,omitempty"`
+	Clients       []ClientStatus        `json:"clients,omitempty"`
 }
 
 func observationDecimal(s string) (int64, error) {
@@ -86,7 +90,7 @@ func DecodeObservationRequest(raw []byte) (ObservationRequest, error) {
 }
 
 func (req ObservationRequest) validate() error {
-	if req.Protocol != ObservationProtocol || (len(req.Selectors) < 1 && req.Log == nil) || len(req.Selectors) > 8 {
+	if req.Protocol != ObservationProtocol || (len(req.Selectors) < 1 && req.Log == nil && req.Work == nil) || len(req.Selectors) > 8 {
 		return faults.New(faults.CodeValidationFailed, "observation requires ocq-observe-v1 and 1..8 selectors")
 	}
 	if req.QueueIdentity != "" && !isValidHexLen(req.QueueIdentity, 64) {
@@ -102,6 +106,11 @@ func (req ObservationRequest) validate() error {
 	}
 	if req.Log != nil {
 		if err := req.Log.validate(); err != nil {
+			return err
+		}
+	}
+	if req.Work != nil {
+		if err := req.Work.validate(false); err != nil {
 			return err
 		}
 	}
@@ -329,6 +338,23 @@ func observeSnapshot(ctx context.Context, dir string, req ObservationRequest) (r
 	if req.Log != nil {
 		log := observeLog(ctx, s, *req.Log, true)
 		out.Log = &log
+	}
+	if req.Work != nil {
+		work, err := ListProjectWork(s.dir, req.Work.ProjectID)
+		if err != nil {
+			return out, err
+		}
+		out.Work = &work
+		main, err := ListProjectMain(s.dir, req.Work.ProjectID)
+		if err != nil {
+			return out, err
+		}
+		out.Main = &main
+		clients, err := ListProjectClients(s.dir, req.Work.ProjectID)
+		if err != nil {
+			return out, err
+		}
+		out.Clients = clients
 	}
 	after, err := notificationQueueIdentity(s)
 	if err != nil || after != identity {

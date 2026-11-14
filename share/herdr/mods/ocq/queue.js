@@ -63,7 +63,7 @@ export class QueueInspection {
 
   current(owner, generation) {
     const active = spaces().find((s) => s.active);
-    return !owner.closed && generation === this.generation && owner.queueMode && active && active.id === owner.spaceID && active.machine === owner.machine && active.folder === owner.folder;
+    return !owner.closed && owner.panelCurrent() && generation === this.generation && owner.queueMode && active && active.id === owner.spaceID && active.machine === owner.machine && active.folder === owner.folder;
   }
 
   read(owner, slot, args, cx, notify = true) {

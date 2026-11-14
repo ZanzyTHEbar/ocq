@@ -1,0 +1,8 @@
+OCQ personal workspace chrome includes a modified copy of the tabs mod from
+herdrdev/herdr-app v0.1.15, distributed under the Apache License, Version 2.0.
+Source: https://github.com/herdrdev/herdr-app/blob/v0.1.15/defaults/mods/tabs/main.js
+
+OCQ modifications add the adjacent OCQ panel toggle, per-space visibility,
+confirmation invalidation, and keyboard activation. No shipped Herdr mod is
+modified by this personal copy. The OCQ repository's root MIT LICENSE remains
+unchanged; this directory's derived chrome is covered by its included LICENSE.

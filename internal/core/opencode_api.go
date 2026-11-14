@@ -29,6 +29,9 @@ type sessionInfo struct {
 	} `json:"time"`
 }
 type message struct {
+	// Preserve the complete wire object for evidence and stability comparisons,
+	// including fields not interpreted by this conservative observer.
+	source   json.RawMessage
 	ID       string            `json:"id"`
 	Type     string            `json:"type"`
 	Text     string            `json:"text"`
@@ -44,6 +47,25 @@ type message struct {
 		Completed float64 `json:"completed"`
 	} `json:"time"`
 	Content []messagePart `json:"content"`
+}
+
+func (m *message) UnmarshalJSON(data []byte) error {
+	type decoded message
+	var value decoded
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*m = message(value)
+	m.source = append(json.RawMessage(nil), data...)
+	return nil
+}
+
+func (m message) MarshalJSON() ([]byte, error) {
+	if len(m.source) != 0 {
+		return m.source, nil
+	}
+	type decoded message
+	return json.Marshal(decoded(m))
 }
 
 // Tool input/output and metadata stay in private evidence, never stdout.

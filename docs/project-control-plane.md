@@ -358,9 +358,18 @@ large for review.
 
 Rules must deny `*`/`*`, then explicitly allow native read/glob/grep after the last
 catch-all deny. Other allows and `ask` are rejected. The gate checks the named
-agent at the exact Location and requires OpenCode server **2.2.6**; it repeats
+agent at the exact Location and requires OpenCode server **2.2.6 or 2.3.0**; it repeats
 checks in the owned checkout before the sole prompt and requires a fresh empty
 session. Failed verification sends no prompt and retains uncertain resources.
+
+The 2.3.0 policy was checked against official tag commit
+`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`: `packages/core/src/permission.ts`
+merges agent then session rules, uses the last match, and rejects configured
+denies before saved approvals or permission hooks. `session/context.ts` passes
+the same ordered rules to `tool.ts`; the catch-all deny disables Code Mode and
+all tools except the explicit native read/glob/grep allows. Exact agent lookup
+does not substitute a default. This remains a cooperative policy, not a sandbox
+or proof of successful live review execution.
 
 This is not hostile-user filesystem confinement. OpenCode path checks and tool
 rules do not prove symlink targets or global instructions stay inside the
@@ -371,3 +380,278 @@ merge or push results. Complete implementation-to-review execution remains an
 end-to-end verification gap, not an automatic workflow.
 
 For the panel's supported subset and local mutation recovery, see [Herdr](herdr.md).
+
+## Parent-driven operator work
+
+`ocq project work` removes envelope/session-ID shuttling for an **already
+registered** project. The main conversation remains the coordinator: there is
+no dependent scheduler and no automatic message injected into that conversation.
+The selected binding supplies the repository, commit anchor and main session.
+Worker execution still uses the ordinary dispatcher and dedicated unparented
+sessions/worktrees. Admission does not start dispatch or certify execution.
+
+Author files on the execution server. Select the exact binding revision from
+`project show PROJECT` and an explicit profile file:
+
+```json
+{"agent":"build","provider_id":"PROVIDER","model_id":"MODEL","variant":"","memory_bytes":"67108864","permissions":[{"action":"*","resource":"*","effect":"ask"}]}
+```
+
+No model, agent, memory or permissions are inferred. A reviewer profile must
+instead use the existing catch-all deny followed by explicit read/glob/grep allows.
+Profile JSON rejects unknown/duplicate fields; memory is canonical decimal text.
+
+```text
+ocq --state-dir STATE project work prepare --request-id implement-1 --binding-revision REV --profile-file implementation-profile.json --brief-file task.txt PROJECT
+ocq --state-dir STATE project work list PROJECT
+ocq --state-dir STATE project work preview PROJECT implement-1
+ocq --state-dir STATE project work confirm --preview-sha256 REVIEWED_DIGEST PROJECT implement-1
+ocq --state-dir STATE project work status PROJECT implement-1
+ocq --state-dir STATE project work output PROJECT implement-1
+```
+
+Preview contains the full frozen original input, request/envelope, prompt,
+profile/ordered permissions, binding/base and digests. Treat it as private:
+review retained bytes fully before pointer confirmation; do not put them in
+argv or public logs. CLI authorization pins the **CLI image**. A Herdr bridge
+authorization separately pins its own bridge image, peer/space/folder and the
+exact queue/store. The two image identities are not interchangeable.
+
+Once ordinary execution has separately established terminal proof, prepare and
+review a machine snapshot, then submit the explicit second job:
+
+```text
+ocq --state-dir STATE project work capture-prepare --request-id capture-1 --binding-revision REV --implementation implement-1 PROJECT
+ocq --state-dir STATE project work preview PROJECT capture-1
+ocq --state-dir STATE project work confirm --preview-sha256 REVIEWED_DIGEST PROJECT capture-1
+ocq --state-dir STATE project work review-prepare --request-id review-1 --binding-revision REV --capture capture-1 --profile-file reviewer-profile.json --criteria-file criteria.txt --rules-file rules.txt PROJECT
+ocq --state-dir STATE project work preview PROJECT review-1
+ocq --state-dir STATE project work confirm --preview-sha256 REVIEWED_DIGEST PROJECT review-1
+```
+
+Review freezes the selected capture's exact association, manifest digest, full
+diff and contents; it never selects the latest result. The normal intake and
+pre-prompt reviewer gates still enforce distinct job/session/worktree identities.
+Capture preparation journals intent **before** filesystem observation.
+Confirmation publishes only retained snapshot bytes, never silently recaptures.
+
+After the reviewer has separately proven terminal execution:
+
+```text
+ocq --state-dir STATE project work output PROJECT review-1
+ocq --state-dir STATE project work review-result-prepare --request-id review-result-1 --binding-revision REV --review review-1 PROJECT
+ocq --state-dir STATE project work preview PROJECT review-result-1
+ocq --state-dir STATE project work confirm --preview-sha256 REVIEWED_DIGEST PROJECT review-result-1
+ocq --state-dir STATE project work handoff PROJECT review-result-1
+```
+
+The generated review rules require a final, standalone JSON report containing
+`verdict`, `findings` and nonempty `limitations`. The default result preparation
+strictly decodes the final assistant text from retained terminal evidence: no
+prose/fence stripping or casual approval parsing. An explicit `--result-file`
+can instead import the same typed report. Both publications retain
+`author_import` / `structure_hash_linkage_only`; they do not verify correctness.
+The snapshot retains `machine_capture` / `machine_verified_snapshot`, with test
+validation `not_run`.
+
+Handoff follows only the frozen implementation/capture/review/result request
+chain. It includes exact manifests, original admission receipts, stored terminal
+execution observations, final reviewer output and a separate current-worktree
+comparison. `ready_for_integrator_review` additionally requires successful proven
+implementation/review outcomes, exact agreement with the strict final reviewer
+report, approval and a matching current snapshot. It **always** returns
+`integration_authorized=false` and `validation=not_run`. Nothing applies,
+commits, merges, pushes or deploys changes.
+
+### Work-intent recovery and observation
+
+`ocq-work-v1` uses caller-known nonsecret request IDs, scoped to a project.
+Original input bytes, binding, queue path/device/inode and payload digests are
+retained in private request-addressable journals. An identical prepare recovers
+the same intent; changed bytes under that ID fail. A partial prepare stays
+`preparing`, never permission to recapture. Confirmation synchronizes the exact
+preview/authorization, then writes arm and irreversible attempt markers before
+one admission/publication call. Repeated confirmation only observes the original
+SQLite receipt; an armed/uncertain state or absent receipt never authorizes
+another attempt. SQLite remains the sole job/result authority.
+
+List/status are bounded non-initializing reads: at most 128 intents/project and
+2048 journal files, with explicit failure rather than silent truncation. They
+never reconcile, answer permissions, resume agents or release capacity.
+Observation snapshots may select `work: {project_id,fingerprint}`. Journal
+metadata is `filesystem_non_atomic`, separate from the SQL snapshot/revision.
+The existing bounded observation lease watches only that project's fixed journal
+or its next existing ancestor; hints and expiry compare fingerprints. Journal
+changes set `work_changed` without manufacturing a database revision. Clients
+carry this cursor in the existing lease, not a second polling timer.
+
+## Persistent project Main / Integrator
+
+Main is a persistent, multi-turn OpenCode conversation on the project's explicit
+**primary MAIN checkout**. It is not a queued worker, Workmux checkout, slot,
+machinewide coordinator or Herdr shell. Existing registration/CAS remains the
+only binding authority; `elephant_session_id` is the compatibility field for its
+exact session. A legacy coordinator is **not** silently reinterpreted as Main.
+
+Configure once with an explicit Main profile, separate from worker profiles:
+
+```json
+{"role":"integrator","agent":"CONFIGURED_MAIN_AGENT","provider_id":"PROVIDER","model_id":"MODEL","variant":"","permissions":[{"action":"*","resource":"*","effect":"ask"}]}
+```
+
+There is no Main memory/slot demand and no invented elephant/guppy agent ID.
+Select an actual configured agent/model and ordered permission profile. Initial
+setup requires the canonical primary checkout and full branch ref explicitly:
+
+```text
+ocq --state-dir STATE project main prepare --operation-id main-setup-1 --mode create --repo MAIN_CHECKOUT --main-branch refs/heads/main --expected-revision 0 --label LABEL --profile-file main-profile.json --role-file main-role.json --prompt-file initial-prompt.txt PROJECT
+ocq --state-dir STATE project main preview PROJECT main-setup-1
+ocq --state-dir STATE project main start --preview-sha256 REVIEWED_DIGEST PROJECT main-setup-1
+ocq --state-dir STATE project main recover PROJECT
+```
+
+`--prompt-file -` reads private stdin. Prompt/profile/permission/token content is
+never placed in process argv. First setup is server-local; a trusted main
+assistant can perform this plumbing from one user request using the explicitly
+selected profile. Herdr does not upload a remote textarea through `exec`.
+After registration, normal SQL observation discovers the project and its Main
+link; subsequent human messages use the official native OpenCode composer.
+
+`main-role.json` selects exact bounded implementation and reviewer profiles once:
+
+```json
+{"protocol":"ocq-main-role-v1","implementation_profile":"EXACT WorkProfile JSON TEXT","review_profile":"EXACT WorkProfile JSON TEXT"}
+```
+
+These are explicit configured profiles, not invented Elephant/Guppy IDs. Setup
+retains a versioned operating contract with these selections, canonical
+project/queue/state pointers and the actual local CLI path/image digest. Preview
+discloses its complete bytes. Before binding or the first prompt, bootstrap
+journals a separate arm/one attempt for OpenCode 2.3.0's session-scoped instruction
+entry PUT, then requires exact GET read-back. Lost acknowledgement is recovered
+by GET only; conflicting/removed instructions are never silently overwritten.
+This ordinary instruction entry persists across turns/compaction without a fake
+system event, tracked AGENTS.md change or global profile edit.
+
+`project main role PROJECT` reads the retained contract without a live API call.
+Its instructions keep one user goal alive through prepare/preview/confirm,
+implementation wait, terminal-gated capture, independent exact-snapshot review,
+strict review-result publication and usable handoff. Normal stage progression
+does not require another human prompt. Actual permissions, blockers or unknown
+ownership still require human attention. This is Main's ordinary agent/tool
+loop, not an OCQ dependency scheduler or automatic integration authority.
+
+The additive read-only wait is:
+
+```text
+ocq --state-dir STATE project work wait PROJECT REQUEST --timeout-seconds 20
+```
+
+Timeout is 1–20 seconds (default 20). Main can renew `pending` under the same goal.
+The separate `ocq-work-wait-v1` result wrapper leaves frozen Work DTOs unchanged:
+`terminal` requires stored cooperative terminal proof (inspect its outcome),
+`published` means an exact recorded result association, and `attention` means
+unproved admission, a blocker or unknown execution. Timeout returns `pending`,
+never completion. Waiting pins the exact intent/receipt/lineage and queue/store,
+uses the existing observation lease's watch-before-check and expiry verification,
+and reads projections only initially or after a relevant change. Unchanged
+leases inspect metadata only. It never initializes a queue, dispatches, polls a
+live session, answers permissions or changes jobs. SQL and filesystem evidence
+remain separately non-atomic.
+
+Creation is allowed only for a genuinely absent project. `--mode adopt` with the
+exact existing revision and a matching explicit profile validates a legacy
+coordinator and commits a new registration CAS. Adoption does not rewrite its
+metadata/profile. Worker-owned or already-Main-owned sessions cannot be disguised
+as legacy. A missing or mismatched bound session is blocked/unknown, never replaced.
+
+Preparation retains complete target/input/profile bytes and preallocates exact
+session/prompt IDs once. New sessions have distinct `ocq_main` ownership metadata,
+not a job/capacity claim. Preview exposes its ownership **digest**, never its
+private token. Session creation, role installation, registration and first prompt each have a
+separate synchronized arm/attempt before the effect. An attempted POST is never
+repeated. Exact GET/receipt recovery may establish a previous effect; only an
+explicit confirmed start may advance a later **unattempted** stage. Registration
+CAS failure retains the created session and evidence without deletion/adoption.
+
+Main accepts ordinary multi-turn human input and explicit human model/permission
+changes. Creation-time profile is not a permanent worker fence. Later operations
+reuse the SQL-selected setup and pin the **current observed** profile:
+
+```text
+ocq --state-dir STATE project main prepare --operation-id main-open-2 --mode reopen PROJECT
+ocq --state-dir STATE project main prepare --operation-id main-send-3 --mode send --prompt-file next-prompt.txt PROJECT
+```
+
+Preview/start the chosen operation as above. Reopen sends nothing. Each explicit
+server-originated send has a new operation/message identity; the original prompt
+is never resent by opening Main. `status` is stored-only; `recover` performs
+bounded exact GETs, never POSTs, continuation, permission answers or cancellation.
+`ready`/`busy` describe Main availability, not job completion or validation.
+
+The configured primary checkout must still own exactly the selected branch.
+Detached, another branch, a linked worker checkout or ambiguous inventory fails
+without checkout/reset/stash or alternate-worktree creation. Dirty MAIN is fine
+for these open/setup/read operations; Git inspections disable optional index
+writes, hooks and fsmonitor for that child only. No integration action is implied.
+After an authorized integration advances MAIN, explicitly refresh the binding
+anchor using a new previewed CAS operation:
+
+```text
+ocq --state-dir STATE project main recover PROJECT
+ocq --state-dir STATE project main prepare --operation-id main-anchor-4 --mode refresh --expected-revision CURRENT_REV PROJECT
+```
+
+Recovery reports `head_advanced` against the selected binding. Refresh retains
+the same Main session/setup/branch and records the current HEAD; it never switches
+branches or integrates changes itself.
+
+## Exact native client navigation
+
+`ocq project client` is separate from execution and Main bootstrap. It prepares
+an immutable, caller-known navigation pointer for either `worker` or `integrator`.
+The bridge separately arms and consumes one native-HC admission attempt, records
+the exact returned **and observed** terminal ID/peer/argv/cwd/label receipt before
+focus, and thereafter may focus only that known terminal. Lost response or a
+missing terminal never authorizes label/title/latest matching or blind respawn.
+Project-scoped retained navigation history is available without manual ID copying.
+
+An original terminal receipt is **not** proof of the TUI's current selected
+session: a human may use the native picker. Core reports
+`current_route: "unverified"` even after backend verification. Repeating the same
+navigation intent recovers only its original terminal receipt. Optional focus
+must say **Focus existing inspection terminal**, with the target identified as
+original launch context. A distinct explicit navigation intent may open one
+fresh inspection client; no singleton-client or current-route claim is made.
+
+The packaged launcher resolves the canonical executable symlink and the matched
+CLI sibling (not the bridge image), with release-relative
+`share/opencode/ocq-handoff/tui.js`. Missing, symlinked, writable or changed assets
+fail; no checkout/host-path fallback or package install occurs. Before launch it
+revalidates the exact SQL binding/receipt, existing session/location/project,
+complete metadata hash, current profile, service, release images and effective
+CLI plugin configuration. Worker profiles remain immutable; Main navigation pins
+its current legitimate human-selected profile.
+
+Only `opencode --server EXACT_VERIFIED_ORIGIN` is executed, with inherited intended
+authentication. There is no `--session`, `--continue`, prompt/profile flag or
+standalone fallback. In source-validated 2.3.0, explicit `--server` suppresses the
+startup terminal-environment write. The trusted TUI-only extension does exact GET
+verification then public router navigation; an absent target stays home, never
+creates a replacement. Ordinary native viewed/draft state is not OCQ execution.
+
+The per-launch environment overlay preserves effective existing CLI plugin
+declarations from JSONC and inherited inline overrides before appending the
+handoff plugin. Arrays replace, not append; unsupported/invalid safe merges fail
+explicitly rather than dropping plugins. The launcher does not write global
+configuration, expose credentials/owner tokens or send approval replies.
+It deliberately overlays client-only `session.permissions="prompt"` before
+launch, defeating inherited autoaccept while preserving other session fields
+and plugins. Unsupported session objects fail closed. This is not a change to
+the backend session's permission rules or a permission reply.
+
+Main/client evidence shares the selected project's bounded auxiliary filesystem
+journal under reserved names. Existing work-list DTOs stay unchanged. Main and
+client safe projections are separate snapshot fields, with the existing Work
+fingerprint/watch/expiry covering their writes. No new poller, SQL revision,
+scheduler or session registry is introduced.

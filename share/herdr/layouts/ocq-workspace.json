@@ -29,7 +29,7 @@
     {
       "id": "work", "type": "column", "resizable": false,
       "children": [
-        { "id": "tabs", "type": "block", "size": { "px": 42 }, "window_drag": true, "content": { "mod": "tabs" } },
+        { "id": "tabs", "type": "block", "size": { "px": 42 }, "window_drag": true, "content": { "mod": "ocq-chrome" } },
         {
           "id": "work-body", "type": "row", "padding": 8, "gap": 8,
           "children": [

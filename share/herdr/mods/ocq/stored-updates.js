@@ -71,7 +71,7 @@ export class StoredUpdates {
     // Never discard an unresolved native promise or claim physical cancellation.
   }
 
-  current() { return !this.disposed && physical.desired === this && this.scope && currentScope(this.scope); }
+  current() { return !this.disposed && physical.desired === this && this.scope && currentScope(this.scope) && this.owner.panelCurrent(); }
   readAgain(cx) {
     this.stopped = false;
     for (const entry of this.entries.values()) entry.dirty = true;
@@ -84,6 +84,7 @@ export class StoredUpdates {
     if (this.cx?.phase() !== "render") this.cx?.notify();
   }
   invalidate(reason, clearProjections = false) {
+    this.owner.workOperator.suspend(reason);
     if (currentScope(this.scope)) {
       compatibility.invalidateObservation(reason);
       if (this.owner.queue.detail.data?.job || this.owner.queue.detail.data?.event) this.owner.queue.blockDetailActions(undefined, null, "Observation connection/context changed; action scope suspended.");
@@ -110,8 +111,9 @@ export class StoredUpdates {
     this.publish("reconnecting", `Stored observations may be stale. Read-only recovery in about ${Math.round(delay / 1000)} seconds. ${reason}`);
     this.cx.spawn(async cx => {
       await cx.sleep(Math.round(delay));
-      if (!this.current() || this.retryToken !== token) return;
-      this.retryPending = false; this.kick();
+      if (this.retryToken !== token) return;
+      this.retryPending = false;
+      if (this.current()) this.kick();
     });
   }
 
@@ -123,6 +125,7 @@ export class StoredUpdates {
     return entry;
   }
   log() { return this.owner.queue.observationLog(this.owner); }
+  work() { return this.owner.workOperator.observation(); }
 
   kick() {
     if (!this.current() || this.stopped || this.retryPending) return;
@@ -139,12 +142,13 @@ export class StoredUpdates {
       return entry.dirty || entry.target !== descriptor.target || entry.revision !== this.revision || descriptor.dirty;
     }).sort((a, b) => (this.entry(a).attempt || 0) - (this.entry(b).attempt || 0));
     const log = this.log();
+    const work = this.binding ? this.work() : null;
     if (physical.flight) {
       if (physical.flight.controller !== this || physical.flight.scope !== this.scope) this.publish("draining", "Waiting for the previous selected-location native promise to settle; physical cancellation is not claimed.");
       else if (!this.missing && physical.flight.command === "watch-wait" && (needed.length || log?.needsRead)) this.publish("reading", "Selected view has pending selectors; showing its last accepted timestamp until the bounded wait settles.");
       return;
     }
-    if (!this.missing && (!this.binding || needed.length || log?.needsRead || this.needsSnapshot)) {
+    if (!this.missing && (!this.binding || needed.length || log?.needsRead || work?.needsRead || this.needsSnapshot)) {
       const selected = needed.slice(0, 8);
       if (this.needsSnapshot && !selected.length && plan[0]) selected.push(plan[0]);
       // Discovery always has a bounded database selector. Retained file cursors
@@ -153,11 +157,13 @@ export class StoredUpdates {
       if ((!selected.length || !selected[0]) && !log) return;
       const request = { protocol, ...(this.binding || {}), selectors: selected.map(item => item.selector) };
       if (this.binding && log?.needsRead) request.log = log.cursor;
-      this.launch("view-snapshot", request, { selected, log: request.log ? log : null });
+      if (work?.needsRead) request.work = work.cursor;
+      this.launch("view-snapshot", request, { selected, log: request.log ? log : null, work: request.work ? work : null });
     } else {
       const request = { protocol, ...this.binding, revision: this.revision || "0", wait_seconds: 20 };
       if (log?.watch) request.log = log.cursor;
-      this.launch("watch-wait", request, { selected: [], log: log?.watch ? log : null });
+      if (work && hex(work.cursor.fingerprint)) request.work = work.cursor;
+      this.launch("watch-wait", request, { selected: [], log: log?.watch ? log : null, work: request.work ? work : null });
     }
   }
 
@@ -247,6 +253,7 @@ export class StoredUpdates {
     if (flight.command === "watch-wait") {
       if (!["changed", "unchanged", "reset"].includes(result.status)) throw new Error("Unsupported wait status");
       if (result.log_changed || result.reset_scope === "log") this.owner.queue.observationLogHint(flight.capture.log, result.log, result.reset_scope === "log", cx);
+      if (result.work_changed) this.owner.workOperator.hint(flight.capture.work);
       // No projection fetch for unchanged renewals; kick only observes revision,
       // selector ownership and selected-stream metadata.
       this.publish("waiting", result.watch === "degraded" ? "Automatic change waiting · degraded filesystem hints; bounded expiry checks remain active." : "Automatic change waiting · bounded foreground read, not push."); return;
@@ -265,6 +272,10 @@ export class StoredUpdates {
       }
     }
     if (result.log && flight.capture.log) this.owner.queue.applyLogObservation(flight.capture.log, result.log, cx);
+    if (flight.capture.work) {
+      if (!result.work) throw Error("Missing separate filesystem work observation");
+      this.owner.workOperator.apply(flight.capture.work, result.work, result.revision, cx, result.main, result.clients);
+    }
     this.health.readAt = result.read_at;
     this.needsSnapshot = false; this.failures = 0;
     this.publish("waiting");

@@ -36,6 +36,8 @@ func run(args []string) error {
 	root.AddCommand(intakeCommands()...)
 	root.AddCommand(resultPublicationCommands()...)
 	root.AddCommand(capturePublicationCommands()...)
+	root.AddCommand(workCommands()...)
+	root.AddCommand(mainClientCommands()...)
 	installCompatibility(root)
 	root.SetArgs(args)
 	return root.Execute()

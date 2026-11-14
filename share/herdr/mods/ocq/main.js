@@ -1,6 +1,7 @@
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { nextCommand, spaces, theme } from "herdr";
+import { panelEpoch, panelVisible } from "./panel-state.js";
 import { exec, compatibility, enabledButton } from "./compatibility.js";
 import { connect } from "net";
 import { createHash, randomBytes } from "crypto";
@@ -13,6 +14,8 @@ import { SubmissionForm } from "./submission.js";
 import { ComposeForm } from "./compose-form.js";
 import { composeProof, composeEqual, composeDecode, socketFrames } from "./private-frames.js";
 import { StoredUpdates, acceptObservationVersion } from "./stored-updates.js";
+import { WorkOperator } from "./work-operator.js";
+import { MainClientControls } from "./main-client.js";
 
 function emptyCollection() {
   return { pages: [{ start: "0" }], items: [], history: [], recent: [], readTimes: {}, cursor: "0", readAt: null, loaded: false, loading: false, hasMore: false, error: null };
@@ -165,6 +168,8 @@ export default class OCQ extends View {
   init(_props, cx) {
     this.queue = new QueueInspection();
     this.updates = new StoredUpdates(this, cx);
+    this.workOperator = new WorkOperator(this);
+    this.mainClient = new MainClientControls(this);
     this.projectPages = [{ start: "0" }];
     this.lanePages = [{ start: "0" }];
     this.boardToken = {};
@@ -184,6 +189,7 @@ export default class OCQ extends View {
     this.error = null;
     this.loading = false;
     this.generation = 0;
+    this.panelEpoch = panelEpoch();
     this.detailGeneration = 0;
     this.detail = null;
     this.detailJob = null;
@@ -222,6 +228,26 @@ export default class OCQ extends View {
   }
 
   close() { this.closed = true; this.generation++; this.queue.generation++; this.publication.generation++; this.worktreeCheck.generation++; this.updates.dispose(); }
+
+  panelCurrent() { return panelVisible() && this.panelEpoch === panelEpoch(); }
+
+  syncPanelEpoch(cx) {
+    const marker = panelEpoch();
+    if (marker === this.panelEpoch) return;
+    const job = this.detailJob, manifest = this.manifestDigest;
+    const queueArgs = this.queue.inspecting ? this.queue.detail.snapshot?.args ?? this.queue.detail.pending?.args : null;
+    this.panelEpoch = marker;
+    // Retain selection, not confirmation authority. Pending private operations
+    // may still finish; their receipts remain recovery evidence, never a retry.
+    this.resetObservationVersions();
+    compatibility.freshPanel(marker);
+    this.observationReset = "OCQ panel was hidden or restored. Selection retained; inspect and review afresh before any action.";
+    this.detailJob = job; this.manifestDigest = manifest;
+    if (job) this.detailLoading = true;
+    if (manifest) this.manifestLoading = true;
+    if (queueArgs && this.queueMode) this.queue.read(this, "detail", queueArgs, cx, false);
+    this.updates.readAgain(cx);
+  }
 
   observationSelectors() {
     const descriptors = [], scope = { space: this.spaceID, machine: this.machine, folder: this.folder, generation: this.generation, project: this.selected };
@@ -298,6 +324,7 @@ export default class OCQ extends View {
   }
 
   resetObservationVersions() {
+    this.workOperator.suspend("Context changed; retained work previews have no authority.");
     // New binding means new projection ownership, not just new version labels.
     // Keep private journals/reviews separate; never reuse their old authority.
     this.observationReset = "Stored observation context changed; prior authority suspended.";
@@ -384,7 +411,7 @@ export default class OCQ extends View {
 
   composeLocal() {
     const active = spaces().find((s) => s.active);
-    return Boolean(!this.closed && active && active.machine === null && this.machine === null && active.id === this.spaceID && active.folder === this.folder);
+    return Boolean(!this.closed && this.panelCurrent() && active && active.machine === null && this.machine === null && active.id === this.spaceID && active.folder === this.folder);
   }
 
   composeContext(lane) {
@@ -1394,6 +1421,7 @@ export default class OCQ extends View {
   }
 
   render(cx) {
+    this.syncPanelEpoch(cx);
     compatibility.observe();
     this.renderTargets = []; this.headerTargets = []; this.compatibilityTargets = [];
     const content = this.renderContent(cx);
@@ -1434,6 +1462,7 @@ export default class OCQ extends View {
   }
 
   navigateWorkspace(view, cx) {
+    if (view !== "projects") this.workOperator.suspend();
     if (view === "queue") { if (!this.queueMode) this.openQueue(cx); }
     else { if (this.queueMode) this.leaveQueue(cx); this.workspaceView = view; this.keyboardMode = false; }
     cx.notify();
@@ -1447,7 +1476,7 @@ export default class OCQ extends View {
     const queueID = this.queue.jobs.data?.queue_identity || compatibility.status?.queue_identity;
     const view = this.queueMode ? "queue" : this.workspaceView;
     return v_flex().id("ocq-workspace-header").flex_none().p(10).gap(5).border_b(1).border_color(t.border)
-      .child(div().font_semibold().child(`OCQ · ${this.machine ?? "This computer"}${this.machine !== null ? " · Remote read-only" : ""}`))
+      .child(div().font_semibold().child(`OCQ · ${this.machine ?? "This computer"}${this.machine !== null ? " · Only explicit prepared-work confirmation enabled remotely" : ""}`))
       .child(h_flex().gap(2).children(["overview", "projects", "queue", "inbox"].map(name => control(`ocq-workspace-${name}`, name[0].toUpperCase() + name.slice(1), cx => this.navigateWorkspace(name, cx), view === name))))
       .child(div().text_size(12).text_color(["waiting", "reading"].includes(this.updateHealth.state) ? t.muted : t.blocked).child(this.updateHealth.state === "waiting" ? "Automatic change waiting · stored observations" : this.updateHealth.state === "missing" ? "No existing queue · automatic creation waiting" : `${this.updateHealth.state.replace(/_/g, " ")} · stored observations may be stale`))
       .when(Boolean(this.observationReset), e => e.child(div().text_size(12).text_color(t.blocked).child("Prior action authority suspended. Private reviews/journals retained separately; only freshly read projections are shown. Quiesce and reopen a fresh selected context before a new review.")))
@@ -1656,7 +1685,7 @@ export default class OCQ extends View {
            .child(div().text_color(t.ansi1).child(`Cannot read stored projects on ${this.machine ?? "this computer"}. Check the selected machine and bridge. Displayed data may be stale.`))
            .child(button("ocq-project-diagnostics", this.diagnostics ? "Hide diagnostics" : "Diagnostics", cx => { this.diagnostics = !this.diagnostics; cx.notify(); }))
            .when(this.diagnostics, e => e.child(div().child(this.error)).child(button("ocq-project-diagnostics-copy", "Copy diagnostics", cx => cx.write_to_clipboard(this.error)))))
-          .when(Boolean(active) && Boolean(this.projectPages[0].readAt) && !this.error && !this.projectsHasMore && this.projects.length === 0, (e) => e.child(div().text_color(t.muted).child("No projects registered in this queue. Queue contains standalone jobs separately.")))
+          .when(Boolean(active) && Boolean(this.projectPages[0].readAt) && !this.error && !this.projectsHasMore && this.projects.length === 0, (e) => e.child(div().text_color(t.muted).child("No projects registered in this queue. Initial Main setup is server-local: prepare, preview and start with an explicit canonical checkout, Main profile, role mapping and optional private prompt file. The project appears automatically after registration. This panel does not upload prompts/profiles or turn its workspace shell into Main. Queue contains standalone jobs separately.")))
           .when(Boolean(this.boardError), e => e.child(this.readFault(this.boardError, "selected project", t)))
          .when(this.workspaceView === "overview", e => e
            .child(div().font_semibold().child("Overview"))
@@ -1671,7 +1700,8 @@ export default class OCQ extends View {
           .when(Boolean(this.selected) && this.workspaceView !== "overview", (e) => e
            .child(div().font_semibold().child(project?.label ?? this.selected))
            .child(div().text_size(12).text_color(t.muted).child(`Project snapshot read · ${project?.read_at ?? "not available"}`))
-           .when(this.workspaceView === "projects", e => e.child(h_flex().gap(2).children(["work", "results", "lanes", "binding"].map(view => button(`ocq-project-tab-${view}`, view[0].toUpperCase() + view.slice(1), cx => { this.projectView = view; cx.notify(); }).when(this.projectView === view, e => e.bg(t.hover).font_semibold())))))
+           .when(this.workspaceView === "projects", e => e.child(h_flex().gap(2).children(["operator", "work", "results", "lanes", "binding"].map(view => button(`ocq-project-tab-${view}`, view[0].toUpperCase() + view.slice(1), cx => { if (view !== this.projectView) this.workOperator.suspend(); this.projectView = view; cx.notify(); }).when(this.projectView === view, e => e.bg(t.hover).font_semibold())))))
+           .when(this.workspaceView === "projects" && this.projectView === "operator", e => e.child(this.workOperator.render(cx, t, button)))
            .when(this.workspaceView === "projects" && this.projectView === "binding", e => e
            .child(button("ocq-project-overview", "View project and binding", (cx) => this.openTarget("summary", undefined, cx)))
            .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Project intake / binding…", cx => this.openIntake(cx))))

@@ -17,13 +17,14 @@ import (
 )
 
 type ObservationWaitRequest struct {
-	Protocol      string                `json:"protocol"`
-	QueueIdentity string                `json:"queue_identity"`
-	StoreContext  string                `json:"store_context"`
-	BridgeContext string                `json:"bridge_context"`
-	Revision      string                `json:"revision"`
-	WaitSeconds   int                   `json:"wait_seconds"`
-	Log           *ObservationLogCursor `json:"log,omitempty"`
+	Protocol      string                 `json:"protocol"`
+	QueueIdentity string                 `json:"queue_identity"`
+	StoreContext  string                 `json:"store_context"`
+	BridgeContext string                 `json:"bridge_context"`
+	Revision      string                 `json:"revision"`
+	WaitSeconds   int                    `json:"wait_seconds"`
+	Log           *ObservationLogCursor  `json:"log,omitempty"`
+	Work          *WorkObservationCursor `json:"work,omitempty"`
 }
 
 type ObservationWaitOutput struct {
@@ -37,6 +38,7 @@ type ObservationWaitOutput struct {
 	Watch           string                `json:"watch"`
 	DatabaseChanged bool                  `json:"database_changed"`
 	LogChanged      bool                  `json:"log_changed"`
+	WorkChanged     bool                  `json:"work_changed"`
 	ResetScope      string                `json:"reset_scope,omitempty"`
 	Log             *ObservationLogOutput `json:"log,omitempty"`
 }
@@ -59,6 +61,11 @@ func (req ObservationWaitRequest) validate() error {
 	}
 	if req.Log != nil {
 		if e := req.Log.validate(); e != nil {
+			return e
+		}
+	}
+	if req.Work != nil {
+		if e := req.Work.validate(true); e != nil {
 			return e
 		}
 	}
@@ -145,6 +152,38 @@ func ObserveWait(ctx context.Context, dir string, req ObservationWaitRequest) (O
 		defer unix.Close(logFD)
 	}
 	logWD := -1
+	workFD, workWD := -1, -1
+	var workTarget, workFilter string
+	if req.Work != nil {
+		workFD, err = unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
+		if err != nil {
+			out.Watch = "degraded"
+			return observationWaitExpiry(ctx, caller, dir, req, out)
+		}
+		defer unix.Close(workFD)
+	}
+	installWork := func() error {
+		if req.Work == nil {
+			return nil
+		}
+		next, component, e := observationWatchTarget(workObservationPath(dir, *req.Work))
+		if e != nil {
+			return e
+		}
+		if next == workTarget && component == workFilter && workWD >= 0 {
+			return nil
+		}
+		if workWD >= 0 {
+			unix.InotifyRmWatch(workFD, uint32(workWD))
+			workWD = -1
+		}
+		w, e := unix.InotifyAddWatch(workFD, next, unix.IN_CREATE|unix.IN_DELETE|unix.IN_MOVED_FROM|unix.IN_MOVED_TO|unix.IN_MODIFY|unix.IN_CLOSE_WRITE|unix.IN_ATTRIB|unix.IN_DELETE_SELF|unix.IN_MOVE_SELF|unix.IN_UNMOUNT)
+		if e != nil {
+			return e
+		}
+		workWD, workTarget, workFilter = w, next, component
+		return nil
+	}
 	var logTarget, logFilter string
 	installLog := func() error {
 		if req.Log == nil {
@@ -211,6 +250,10 @@ func ObserveWait(ctx context.Context, dir string, req ObservationWaitRequest) (O
 		out.Watch = "degraded"
 		return observationWaitExpiry(ctx, caller, dir, req, out)
 	}
+	if err := installWork(); err != nil {
+		out.Watch = "degraded"
+		return observationWaitExpiry(ctx, caller, dir, req, out)
+	}
 	check := func(final bool) (bool, error) {
 		head, e := observeSnapshot(caller, dir, ObservationRequest{})
 		if e != nil {
@@ -240,6 +283,9 @@ func ObserveWait(ctx context.Context, dir string, req ObservationWaitRequest) (O
 				return true, nil
 			}
 			if observationWaitLog(caller, dir, req, &out) {
+				return true, nil
+			}
+			if observationWaitWork(dir, req, &out) {
 				return true, nil
 			}
 			if final {
@@ -284,6 +330,9 @@ func ObserveWait(ctx context.Context, dir string, req ObservationWaitRequest) (O
 		if logFD >= 0 {
 			poll = append(poll, unix.PollFd{Fd: int32(logFD), Events: unix.POLLIN})
 		}
+		if workFD >= 0 {
+			poll = append(poll, unix.PollFd{Fd: int32(workFD), Events: unix.POLLIN})
+		}
 		_, e := unix.Poll(poll, ms)
 		if e == unix.EINTR {
 			continue
@@ -296,16 +345,22 @@ func ObserveWait(ctx context.Context, dir string, req ObservationWaitRequest) (O
 			out.Watch = "degraded"
 			break
 		}
-		if len(poll) > 1 && poll[1].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+		badPoll := false
+		anyInput := false
+		for _, p := range poll {
+			badPoll = badPoll || p.Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0
+			anyInput = anyInput || p.Revents&unix.POLLIN != 0
+		}
+		if badPoll {
 			out.Watch = "degraded"
 			break
 		}
-		if poll[0].Revents&unix.POLLIN == 0 && (len(poll) == 1 || poll[1].Revents&unix.POLLIN == 0) {
+		if !anyInput {
 			continue
 		}
 		hint, lost := false, false
 		// One bounded drain; extra queued hints will be coalesced on the next pass.
-		for index, p := range poll {
+		for _, p := range poll {
 			if p.Revents&unix.POLLIN == 0 {
 				continue
 			}
@@ -318,8 +373,12 @@ func ObserveWait(ctx context.Context, dir string, req ObservationWaitRequest) (O
 				break
 			}
 			activeWD, activeFilter := wd, filter
-			if index == 1 {
+			if int(p.Fd) == logFD {
 				activeWD, activeFilter = logWD, logFilter
+			}
+			isWork := int(p.Fd) == workFD
+			if isWork {
+				activeWD, activeFilter = workWD, workFilter
 			}
 			for offset := 0; offset+unix.SizeofInotifyEvent <= n; {
 				eventWD := int32(binary.NativeEndian.Uint32(buf[offset:]))
@@ -338,7 +397,7 @@ func ObserveWait(ctx context.Context, dir string, req ObservationWaitRequest) (O
 					if mask&(unix.IN_IGNORED|unix.IN_UNMOUNT|unix.IN_DELETE_SELF|unix.IN_MOVE_SELF) != 0 {
 						lost = true
 					}
-					if (activeFilter != "" && name == activeFilter) || (activeFilter == "" && (name == "queue.db" || name == "queue.db-wal")) {
+					if (activeFilter != "" && name == activeFilter) || (activeFilter == "" && (isWork || name == "queue.db" || name == "queue.db-wal")) {
 						hint = true
 					}
 				}
@@ -374,6 +433,10 @@ func ObserveWait(ctx context.Context, dir string, req ObservationWaitRequest) (O
 			break
 		}
 		if err := installLog(); err != nil {
+			out.Watch = "degraded"
+			break
+		}
+		if err := installWork(); err != nil {
 			out.Watch = "degraded"
 			break
 		}
@@ -414,6 +477,9 @@ func observationWaitExpiry(ctx, caller context.Context, dir string, req Observat
 		return out, nil
 	}
 	if head.Status == "ready" && observationWaitLog(caller, dir, req, &out) {
+		return out, nil
+	}
+	if head.Status == "ready" && observationWaitWork(dir, req, &out) {
 		return out, nil
 	}
 	if head.Status == "upgrade_required" || head.Status == "reset" {
@@ -469,9 +535,29 @@ func observationWaitFinal(parent context.Context, dir string, req ObservationWai
 		}
 		if out.Status == "unchanged" {
 			observationWaitLog(ctx, dir, req, &out)
+			if out.Status == "unchanged" {
+				observationWaitWork(dir, req, &out)
+			}
 		}
 	}
 	return out, nil
+}
+
+func observationWaitWork(dir string, req ObservationWaitRequest, out *ObservationWaitOutput) bool {
+	if req.Work == nil {
+		return false
+	}
+	journal, err := ProjectWorkJournalObservation(dir, req.Work.ProjectID)
+	if err != nil {
+		out.Status = "unavailable"
+		return true
+	}
+	if journal.Fingerprint != req.Work.Fingerprint {
+		out.Status = "changed"
+		out.WorkChanged = true
+		return true
+	}
+	return false
 }
 
 func observationWaitLog(ctx context.Context, dir string, req ObservationWaitRequest, out *ObservationWaitOutput) bool {

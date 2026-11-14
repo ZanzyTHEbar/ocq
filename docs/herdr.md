@@ -6,11 +6,16 @@ or project intake after preview and confirmation. It is not a scheduler or a liv
 permission client. Queue also offers an explicit local commands-only dispatcher
 lifecycle, separate from submission.
 
+The **Projects → Operator** view also discovers server-prepared implementation,
+capture, independent-review and review-result requests. Its versioned,
+pointer-only confirmation is available on the selected local or remote machine.
+It does not enable older remote submission or execution controls.
+
 ## Install
 
 The installer requires a running **herdr-app 0.1.14 or 0.1.15** and an initialized app home.
 It accepts only those exact versions, validates the mod, refuses to overwrite an existing
-OCQ mod or `ocq-workspace` layout, and requests activation of a separate personal
+OCQ mod, personal `ocq-chrome` mod or `ocq-workspace` layout, and requests activation of a separate personal
 layout. It does not merge or replace the previous layout.
 
 The 0.1.15 compatibility check used the official Linux x86-64 app with HC 0.1.19
@@ -61,10 +66,148 @@ support schema 5); reads never initialize or migrate it. The panel
 does not install/configure the server, OpenCode or Workmux. Its explicit local
 dispatcher control uses the fixed command-only policy described below.
 
-Selected-machine read routing is supported. **Remote command/agent submission, compose
-and project intake are disabled.** Real multi-machine deployment, disconnect recovery and live
+Selected-machine read routing is supported. **Legacy remote command/agent submission, compose
+and project intake are disabled.** The new prepared-work confirmation described below
+is the only remote queue/publication mutation admitted by this panel.
+Real multi-machine deployment, disconnect recovery and live
 permission handling are not yet end-to-end verified. A disconnected view never
 means execution stopped or permits a retry.
+
+## Prepared work: server authoring, panel confirmation
+
+The parent Main / Integrator authors a request on the execution server using
+`ocq project work prepare`, with a private brief file and an explicit profile
+file. Later it prepares capture, review and review-result requests with their
+exact parent request IDs. These are separate actions, not an automatic dependency
+scheduler. See [project control plane](project-control-plane.md) for the CLI.
+
+In Herdr, select that project and open **Projects → Operator**:
+
+1. Prepared requests appear automatically. The human does not copy request IDs
+   from a conversation. A project-scoped filesystem cursor shares the existing
+   observation lease, including journal-only changes that do not advance SQLite's
+   revision. Journal reads have their own timestamp and
+   `filesystem_non_atomic` label; they are not part of the SQL snapshot.
+2. Choose a request and **Retain and review exact server preview**. This writes
+   private review evidence, but does not arm, submit or publish anything.
+   The preview includes the complete original input, exact payload, execution
+   profile and ordered permissions, binding, and caller context.
+3. Read every retained-byte page, then review the confirmation and confirm the
+   exact pointer once. Only nonsecret IDs, digest and scope pins travel in argv;
+   task text, profiles, permissions and credentials do not.
+4. If the response is lost or refused, use **Recover exact server record /
+   receipt**. Recovery only reads the exact record. A missing receipt does not
+   permit resend, recapture or session replacement. The panel retains a private
+   nonsecret client-attempt marker before sending and does not offer another
+   confirmation for that attempted intent.
+
+Every preview binds the selected peer alias, native space, folder, queue/store,
+actual bridge image and action contract. A peer alias is a routing pin, not an
+authenticated server identity. Core independently validates its queue/store and
+the bridge validates its own executing image. CLI previews use a different image
+role and cannot authorize panel confirmation. Context changes, disconnects,
+changed request state, panel collapse or leaving the review suspend old authority.
+Watching a changed journal never confirms or retries anything.
+
+`recorded_observed` means the original admission or publication receipt was
+observed. It does **not** mean the job finished. The operator exposes exact job,
+result-manifest, stored final-assistant-output and integration-handoff reads.
+Terminal execution proof, machine capture provenance, imported review claims,
+reviewer verdict and worktree drift remain distinct. Even
+`ready_for_integrator_review` keeps `integration_authorized=false` and
+`validation=not_run`; only the Main / Integrator can decide the next authorized
+integration step.
+
+The bridge endpoints are `work-list`, `work-preview`, `work-status`,
+`work-confirm`, `work-recover`, `work-output` and `work-handoff`.
+There is deliberately no bridge authoring/upload endpoint. Listing is bounded
+to 128 intents per project; oversized/corrupt journals and responses fail rather
+than truncate into an apparently complete view. Existing SQL selector and
+observation byte limits are unchanged.
+
+### Collapsing OCQ
+
+The personal workspace adds an **OCQ** toggle beside the native **Files** and
+**Changes** buttons, before the window controls. It releases the panel's layout
+width when hidden and remembers visibility per space. Enter/Space activates the
+toggle when its personal chrome is focused; the public `ocq-chrome.toggle`
+command is also available for a user-selected key binding. Installation does not
+edit global keys.
+
+Collapsing does not stop Main, workers, or dispatch. One outstanding observation
+read may settle normally; the hidden panel does not renew it. Reopening retains
+project/job selection, reads afresh and does not revive old confirmations.
+The personal chrome derives from Herdr 0.1.15's tabs mod because that version
+has no custom panel-toggle slot. Its Apache-2.0 license and attribution ship
+alongside it; the repository's MIT license is unchanged. No shipped Herdr mod is
+overwritten.
+
+These new operator/toggle controls still require joint-release native and
+multi-machine acceptance checks; earlier native dashboard checks are not proof
+of this new workflow.
+
+### Persistent Main and native inspection clients
+
+The Operator view separates **Main / Integrator** from bounded assignments.
+Main is the persistent conversation on the explicitly configured canonical
+primary checkout and branch. It is not a queue job, capacity owner, or ordinary
+workspace shell.
+
+Initial setup is server-local: use `ocq project main prepare` with an explicit
+canonical checkout, branch, Main profile file and **`--role-file`** for create
+or adopt. The role selection contains the exact implementation and independent
+review profiles, not inferred agent/model names. Preview and explicitly start
+the setup through the CLI before the newly registered project can appear here.
+See [project control plane](project-control-plane.md) for the full CLI contract.
+Subsequent server-prepared operations appear in the selected project's Operator
+view without copying IDs. The panel has no prompt/profile upload endpoint.
+
+For a prepared operation, review all retained pages, including the complete
+`MainRoleContract`, exact profile mapping, disclosed instructions, input,
+session/registration/prompt bytes and scope pins. Explicit Start uses the frozen
+preview once. Instruction installation, registration and optional first prompt
+have separate durable attempt fences. An uncertain response offers exact
+GET/receipt recovery, not prompt resend, replacement session or automatic
+continuation. A durable marker proving transport was never invoked permits a
+fresh preview; a potentially invoked operation remains blocked from resend.
+
+Main's retained role instructions carry one goal through bounded implementation,
+read-only wait renewal, proven-terminal capture, independent review of the exact
+snapshot and integration handoff. The additive `project work wait` command does
+not dispatch or retry: timeout means pending, not completion. This panel displays
+stored progress through its existing observation lease, not another scheduler.
+Main/client journals share the Work filesystem fingerprint and remain separate
+from the SQLite snapshot. Automatic reads never query live sessions or HC.
+
+**Prepare NEW Main inspection client** creates a distinct navigation intent for
+the SQL-selected Main; the worker action pins its exact Work request instead.
+Review the resulting pointer and explicitly open once. The bridge durably arms
+and attempts before `hc run`, observes the exact returned terminal ID, and stores
+the matching cwd/argv/peer/label receipt before showing it. A lost or ambiguous
+HC response stays unknown. Replaying that pointer never spawns another client.
+An explicitly new navigation intent can open one fresh inspection client.
+
+The packaged TUI-only extension uses an authenticated existing-session GET and
+the public router on OpenCode 2.3.0. It checks the exact session, directory,
+project, metadata and current profile digests before navigation. It never uses
+`--session`, creates an absent target, sends a prompt or answers a permission.
+The core launcher pins the exact discovered server, preserves effective plugins,
+and forces child-only `session.permissions="prompt"`; inherited autoaccept does
+not silently approve requests. Missing assets, authentication, incompatible
+configuration or changed identity fail closed without fallback.
+
+**Show existing inspection terminal** verifies its retained launch/backend
+context and displays that ordinary native terminal. Its current TUI session is
+always **unverified**: a human may have used the native session picker since
+launch. Never infer current route from argv, title or cwd. A fresh inspection
+intent does not change Main's persistent backend ID or history.
+
+Closing/collapsing OCQ does not request backend cancellation. Native quit,
+permission-overlay keys and terminal hangup are distinct actions; permission
+overlays may interpret quit keys as Reject/Dismiss. No runtime close-safety,
+initial-route, remote-client or complete one-goal execution proof is claimed
+for these new controls. Do not deploy them on the strength of syntax/build
+checks alone.
 
 ## Inspect and acknowledge
 
@@ -641,7 +784,11 @@ The bridge refuses headerless mutation calls, but cannot stop an old
 panel using an old still-executable bridge. Do not replace/retarget queue files
 concurrently or use a database/schema rollback to bypass incompatibility.
 
-## Local human OpenCode handoff
+## Legacy local human OpenCode handoff
+
+This older stored-job copy/verify surface remains separate from the
+Operator's new packaged inspection-client flow above. Its version pins and
+remote restrictions are unchanged.
 
 An agent's stored job view offers exact recorded session/worktree handoff details
 and an explicit clipboard copy. Refreshing the view reads stored SQLite state

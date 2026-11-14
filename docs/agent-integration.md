@@ -90,9 +90,9 @@ retain unknown ownership; a later idle response does not clear it.
 
 The `foreground-shell-v1` extension accepts terminal completed/error states for
 native read, edit, write, patch, glob, grep and shell tools. Nonterminal,
-unrecognized or unsupported tools hold capacity. Tool errors are recorded, not
-converted to tool success. Delegation, plugin/codemode execution and persistent
-terminals are outside this supported boundary.
+unrecognized, provider-executed or unsupported tools hold capacity. Tool errors
+are recorded, not converted to tool success. Delegation, plugin/codemode execution
+and persistent terminals are outside this supported boundary.
 
 A completed shell tool may still own a running background shell. OCQ checks
 location-scoped shell lists before prompting and during terminal observation,
@@ -141,5 +141,50 @@ hostile same-user API mutation. Ownership metadata detects accidental mismatches
 not forgery. A shared-server tool is not contained by the client's cgroup.
 General tool support, unattended agent supervision and complete project
 implementation-to-review execution are not end-to-end verified. The project
-static-review gate specifically requires source-validated OpenCode server
-**2.2.6**; see [review constraints](project-control-plane.md#static-review).
+static-review gate accepts only source-validated OpenCode server
+**2.2.6 or 2.3.0**; see [review constraints](project-control-plane.md#static-review).
+Source compatibility is not live implementation-to-review execution validation.
+
+## Main-conversation handoff
+
+For an existing project binding, use
+[`project work`](project-control-plane.md#parent-driven-operator-work): prepare
+from a plain task file and explicit execution profile, inspect the complete
+frozen preview, then confirm its pointer once. Status/output resolve the exact
+original receipt and owned worker without choosing a latest session. Keep the
+main conversation outside bounded worker jobs; do not change a worker's prompt
+or profile to manufacture completion.
+
+After separately proven terminal execution, prepare/confirm machine capture,
+prepare/confirm the independent exact-snapshot review, and prepare/confirm the
+strict final review report. Handoff returns integration evidence, never merge
+authority or invented test validation. Unknown tools/resources, pending requests
+and missing shell IDs retain capacity exactly as before.
+
+The admission-only acceptance entrypoint is `proof/operator-work`. It requires a
+fresh explicit queue path, an existing exact coordinating session/checkout and
+an explicit profile. It exercises real CLI/SQLite admission, receipt recovery and
+journal observation without dispatching or creating any agent session/worktree.
+Actual implementation/review execution requires a separately allocated runtime
+budget and remains a distinct validation phase.
+
+Use [persistent Main](project-control-plane.md#persistent-project-main--integrator)
+for the product's multi-turn integrator conversation, not another bounded job.
+Bootstrap/adopt once from an explicitly selected Main role profile and private
+prompt file, preview/start, then use its exact SQL-bound identity. Native human
+input and human profile changes are legitimate there; they are not legitimate
+shortcuts around worker one-prompt/profile/resource completion fences.
+Initial setup also requires `--role-file` selecting the exact implementation and
+review WorkProfiles. Its previewed persistent operating instructions explicitly
+carry one goal through implementation → capture → independent review → strict
+review result → handoff. `project main role PROJECT` reads this retained contract;
+`project work wait PROJECT REQUEST --timeout-seconds 20` reuses the read-only
+observation lease. Main renews pending waits without a fresh human prompt, but
+permissions/unknown ownership remain human attention—not permission to retry.
+
+The [native client launcher](project-control-plane.md#exact-native-client-navigation)
+opens verified existing targets only. Main bootstrap is the separate explicitly
+confirmed creation path. Main mutation bodies use the verified explicit-server
+origin/authentication in a bounded private HTTP request because OpenCode 2.3.0's
+`api --data` accepts argv text only. No prompt, permissions, token or credentials
+are put in argv; no service discovery/authentication settings are changed.

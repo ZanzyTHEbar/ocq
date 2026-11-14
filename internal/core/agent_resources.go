@@ -171,6 +171,12 @@ func terminalTool(part messagePart) (string, error) {
 	if part.ID == "" {
 		return "", diagnostic(faults.CodeRuntimeFailed, "tool identity missing")
 	}
+	// OpenCode's executed flag means providerExecuted, not local execution.
+	// A provider-hosted call cannot inherit the lifetime contract of a native
+	// tool merely by reporting the same name.
+	if part.Executed != nil && *part.Executed {
+		return "", diagnostic(faults.CodeRuntimeFailed, "provider-executed tool is outside native foreground resource accounting")
+	}
 	if part.State.Status != "completed" && part.State.Status != "error" {
 		return "", diagnostic(faults.CodeRuntimeFailed, fmt.Sprintf("tool %s/%s is %q; wait for completed/error", part.Name, part.ID, part.State.Status))
 	}

@@ -27,9 +27,10 @@ if ! HERDR_APP_HOME="$home" "$app" status >/dev/null; then
   exit 1
 fi
 mod="$home/mods/ocq"
+chrome="$home/mods/ocq-chrome"
 layout="$home/layouts/ocq-workspace.json"
-if [ -e "$mod" ] || [ -L "$mod" ] || [ -e "$layout" ] || [ -L "$layout" ]; then
-  echo "OCQ mod or ocq-workspace layout already exists; refusing to overwrite either." >&2
+if [ -e "$mod" ] || [ -L "$mod" ] || [ -e "$chrome" ] || [ -L "$chrome" ] || [ -e "$layout" ] || [ -L "$layout" ]; then
+  echo "OCQ mod, personal chrome or ocq-workspace layout already exists; refusing to overwrite any." >&2
   exit 1
 fi
 
@@ -40,6 +41,9 @@ echo "This installer does not upgrade/overwrite a live panel or quiesce old work
 mkdir "$mod"
 cp "$here/mods/ocq/main.js" "$mod/main.js"
 cp "$here/mods/ocq/compatibility.js" "$mod/compatibility.js"
+cp "$here/mods/ocq/panel-state.js" "$mod/panel-state.js"
+cp "$here/mods/ocq/work-operator.js" "$mod/work-operator.js"
+cp "$here/mods/ocq/main-client.js" "$mod/main-client.js"
 cp "$here/mods/ocq/queue.js" "$mod/queue.js"
 cp "$here/mods/ocq/stored-updates.js" "$mod/stored-updates.js"
 cp "$here/mods/ocq/queued-cancel.js" "$mod/queued-cancel.js"
@@ -56,6 +60,15 @@ cp "$here/mods/ocq/command-submission.js" "$mod/command-submission.js"
 cp "$here/mods/ocq/agent-submission.js" "$mod/agent-submission.js"
 cp "$here/mods/ocq/command-dispatcher.js" "$mod/command-dispatcher.js"
 cp "$here/mods/ocq/mod.json" "$mod/mod.json"
+mkdir "$chrome"
+cp "$here/mods/ocq-chrome/main.js" "$chrome/main.js"
+cp "$here/mods/ocq-chrome/mod.json" "$chrome/mod.json"
+cp "$here/mods/ocq-chrome/LICENSE" "$chrome/LICENSE"
+cp "$here/mods/ocq-chrome/NOTICE" "$chrome/NOTICE"
+if ! HERDR_APP_HOME="$home" "$app" check "$chrome"; then
+  echo "Personal chrome check failed; new directories retained for inspection." >&2
+  exit 1
+fi
 if ! HERDR_APP_HOME="$home" "$app" check "$mod"; then
   echo "Mod check failed; the newly created mod directory was retained for inspection." >&2
   exit 1

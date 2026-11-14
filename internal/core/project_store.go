@@ -44,6 +44,12 @@ func sqlStringPtr(value *string) sql.NullString {
 
 // RegisterProject accepts the exact retained registration bytes for idempotency.
 func (q *Queue) RegisterProject(rawBytes []byte) (_ ProjectRegistrationResult, resultErr error) {
+	return q.registerProject(rawBytes, verifyRegistrationLive)
+}
+
+// Main's explicit-server verifier avoids api's automatic service startup while
+// retaining this SAME receipt-first registration and transactional CAS authority.
+func (q *Queue) registerProject(rawBytes []byte, verifyLive func(context.Context, ProjectRegistrationRequest) (string, string, string, error)) (_ ProjectRegistrationResult, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeRuntimeFailed, resultErr) }()
 	s := q.store
 	var empty ProjectRegistrationResult
@@ -60,7 +66,7 @@ func (q *Queue) RegisterProject(rawBytes []byte) (_ ProjectRegistrationResult, r
 	}
 
 	ctx := context.Background()
-	repoRoot, gitCommonDir, verifiedAt, verifyErr := verifyRegistrationLive(ctx, req)
+	repoRoot, gitCommonDir, verifiedAt, verifyErr := verifyLive(ctx, req)
 	if verifyErr != nil {
 		// Recheck key in case a concurrent identical call won while live checks ran.
 		if existing, found, err := s.lookupProjectRegistration(s.db, req.Key, rawBytes, regDigest); err == nil && found {
