@@ -23,7 +23,7 @@ function currentScope(scope) {
 // background retry or legacy transport fallback.
 export class StoredUpdates {
   constructor(owner, cx) {
-    this.owner = owner; this.entries = new Map(); this.serial = 0;
+    this.owner = owner; this.serial = 0;
     this.connectionGeneration = 0; this.bindingEpoch = 0; this.control = 0;
     this.connection = new PushConnection(this);
     this.health = { state: "starting", reason: "Configure an explicit push connection.", readAt: null };
@@ -47,7 +47,6 @@ export class StoredUpdates {
       }
       this.scope = Object.freeze(next); this.disposed = false;
       this.binding = null; this.revision = null; this.bindingEpoch++;
-      this.entries.clear();
       this.subscription = null; this.lastKey = null;
       this.publish("unavailable", "Configure and connect this selected context explicitly.");
     }
@@ -103,11 +102,6 @@ export class StoredUpdates {
   plan() { return this.owner.observationSelectors(); }
   log() { return this.owner.queue.observationLog(this.owner); }
   work() { return this.owner.workOperator.observation(); }
-  entry(d) {
-    const key = JSON.stringify(d.selector);
-    if (!this.entries.has(key)) this.entries.set(key, {});
-    return this.entries.get(key);
-  }
   kick() {
     if (!this.current() || !this.binding || this.connection.state !== "connected") return;
     const planned = this.plan(), selected = planned.slice(0, 8);
@@ -166,9 +160,7 @@ export class StoredUpdates {
       const key = JSON.stringify(d.selector), slot = result.slots.find(s => s.slot === d.selector.slot);
       if (!visible.some(v => JSON.stringify(v.selector) === key && v.target === d.target)) continue;
       const meta = { binding: JSON.stringify([this.scope, this.binding, this.bindingEpoch]), queue_identity: result.queue_identity, revision: result.revision, serial: flight.serial, selector: key };
-      if (d.apply(slot, meta, result.read_at, cx) !== false) {
-        const entry = this.entry(d); entry.target = d.target; entry.revision = result.revision; entry.dirty = false;
-      }
+      d.apply(slot, meta, result.read_at, cx);
     }
     if (result.log && flight.capture.log) this.owner.queue.applyLogObservation(flight.capture.log, result.log, cx);
     if (flight.capture.work) {

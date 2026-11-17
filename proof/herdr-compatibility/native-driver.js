@@ -1,7 +1,7 @@
 // Private commands invoke product gates/callbacks; boundary responses are fault
 // injected by the real process proxy, never by replacing the queue or API.
 import { exec as rawExec, spaces, panes, terminals, machines } from "herdr";
-import { compatibility, ACTIONS, exec as bridgeExec } from "./compatibility.js";
+import { compatibility, ACTIONS, bridgeCommand } from "./compatibility.js";
 import { div } from "gpui-kit";
 
 // Installed-copy scheduling hook only: real sockets, receiver and product
@@ -20,11 +20,11 @@ export async function nativeAction(owner, command, cx) {
       cx.spawn(async cx => {
         let refused = false;
         try {
-          if (config.Family === "compose") await owner.composeExchange("compose-receive", null, config.Raw, () => owner.machine === null && spaces().some(s => s.active && s.id === owner.spaceID), cx);
+          if (config.Family === "compose") await owner.composeController.composeExchange("compose-receive", null, config.Raw, () => owner.machine === null && spaces().some(s => s.active && s.id === owner.spaceID), cx);
           else if (config.Family === "intake") {
             const context = Object.freeze({ machine: owner.machine, space: owner.spaceID, folder: owner.folder, selection: owner.selected });
             owner.intake.context = context; owner.intake.screen = true;
-            await owner.intakeExchange("receive", "registration", null, config.Raw, context, cx);
+            await owner.intakeController.intakeExchange("receive", "registration", null, config.Raw, context, cx);
           } else if (config.Family === "publication" || config.Family === "capture") {
             const p = owner.publication;
             if (config.Family === "capture") p.captureID = config.CaptureID;
@@ -89,7 +89,7 @@ export async function nativeAction(owner, command, cx) {
     else if (command === "compat-audit") {
       const before = spaces().find(s => s.active);
       for (const action of Object.keys(ACTIONS)) {
-        try { await bridgeExec("ocq-herdr", [action, before.id, compatibility.status?.queue_identity || "0".repeat(64)], { on: null, current: () => spaces().some(s => s.active && s.id === before.id && s.machine === before.machine && s.folder === before.folder) }); throw Error(`Mutation crossed boundary: ${action}`); }
+        try { await bridgeCommand([action, before.id, compatibility.status?.queue_identity || "0".repeat(64)], { on: null, current: () => spaces().some(s => s.active && s.id === before.id && s.machine === before.machine && s.folder === before.folder) }); throw Error(`Mutation crossed boundary: ${action}`); }
         catch (e) { if (String(e).includes("crossed boundary")) throw e; denied.push(action); }
       }
     } else if (command === "compat-open") {

@@ -1,9 +1,6 @@
 package core
 
-import (
-	"encoding/json"
-	"errors"
-)
+import "errors"
 
 func PrepareCommandResolutionBytes(dir string, t CommandResolutionTarget, raw []byte) (CommandResolutionStatus, error) {
 	initial, err := InspectCommandResolution(dir, t)
@@ -26,24 +23,7 @@ func PrepareCommandResolutionBytes(dir string, t CommandResolutionTarget, raw []
 	if state != "none" {
 		return initial, errors.New("retained resolution exists; inspect only")
 	}
-	r, err := OpenReader(dir)
-	if err != nil {
-		return initial, err
-	}
-	observation, err := resolutionObservation(r, t)
-	err = errors.Join(err, r.Close())
-	if err != nil {
-		return initial, err
-	}
-	if !resolutionEligible(observation, p.Scope) {
-		return initial, errors.New("exact unknown command observation changed")
-	}
-	record := commandResolutionRecord{1, t, sha256Hex(raw), raw}
-	b, err := json.Marshal(record)
-	if err != nil || len(b) > commandResolutionRecordLimit {
-		return initial, errors.New("resolution exceeds bound")
-	}
-	if err = j.create("intent.json", record); err != nil {
+	if err = prepareCommandResolutionLocked(dir, j, t, p, raw, "resolution exceeds bound"); err != nil {
 		return initial, err
 	}
 	return InspectCommandResolution(dir, t)

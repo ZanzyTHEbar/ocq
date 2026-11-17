@@ -3,7 +3,7 @@ import { v_flex, h_flex } from "gpui-base";
 import { run, terminals } from "herdr";
 import { randomBytes } from "crypto";
 import { Buffer } from "buffer";
-import { exec, compatibility } from "./compatibility.js";
+import { bridgeCommand, compatibility } from "./compatibility.js";
 import { decimal } from "./stored-updates.js";
 
 const hex = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
@@ -95,7 +95,7 @@ export class MainClientControls {
     const mutation = ["main-start", "client-prepare", "client-open"].includes(action);
     const args = mutation ? [action, ...positions] : [action,
       ...(contextual ? ["--work-observation-context", scope.bridge] : []), "--", ...positions];
-    const response = await exec("ocq-herdr", args, { on: scope.machine, timeout: 60000, hcBinding, ...(guard ? { current: guard } : {}) });
+    const response = await bridgeCommand(args, { on: scope.machine, hcBinding, ...(guard ? { current: guard } : {}) });
     if (response.code !== 0 || Buffer.from(response.stdout || "").length > 1048576) throw Error("Main/client response unavailable");
     return JSON.parse(response.stdout);
   }

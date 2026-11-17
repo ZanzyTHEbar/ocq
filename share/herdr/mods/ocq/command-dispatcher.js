@@ -1,7 +1,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
 import { run, focused, spaces, panes, terminals } from "herdr";
-import { exec, compatibility, enabledButton } from "./compatibility.js";
+import { bridgeCommand, compatibility, enabledButton } from "./compatibility.js";
 
 const hex = s => typeof s === "string" && /^[0-9a-f]{64}$/.test(s);
 const warning = "Commands only · 2 slots · 6 GiB floor. Start may execute queued commands immediately. Unknown demand holds capacity.";
@@ -79,7 +79,7 @@ export class CommandDispatcher {
   async call(action, current, extra = []) {
     const args = action === "read" ? [this.scope.space_id, this.scope.queue_identity] :
       [...this.args(), ...(!["status", "prepare"].includes(action) ? [this.status.id] : []), ...extra];
-    const r = await exec("ocq-herdr", [`dispatcher-${action}`, ...args],
+    const r = await bridgeCommand([`dispatcher-${action}`, ...args],
       { on: null, current, hcBinding: compatibility.hc?.approvedDigest() });
     if (r.code !== 0) throw Error("Dispatcher reply unavailable/refused. Read the exact record; do not retry launch or signal.");
     return this.validate(JSON.parse(r.stdout));
@@ -126,7 +126,7 @@ export class CommandDispatcher {
       try {
         if (!current()) return;
         if (action === "load") {
-          const r = await exec("ocq-herdr", ["dispatcher-context", this.space], { on: null });
+          const r = await bridgeCommand(["dispatcher-context", this.space], { on: null });
           if (!current()) return;
           if (r.code !== 0) throw Error("Existing queue unavailable");
           this.scope = JSON.parse(r.stdout);

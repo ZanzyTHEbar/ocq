@@ -1,6 +1,6 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { exec, compatibility } from "./compatibility.js";
+import { bridgeCommand, compatibility } from "./compatibility.js";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
 import { composeDecode } from "./private-frames.js";
@@ -51,7 +51,7 @@ export class CommandSubmission {
   }
   async call(action, id) {
     const target = this.t, status = this.status;
-    const r = await exec("ocq-herdr", [`${this.route}-${action}`, ...this.args(), ...(id ? [id] : [])], { on: null, timeout: 30000, current: () => this.boundCurrent?.() && this.t === target && this.status === status });
+    const r = await bridgeCommand([`${this.route}-${action}`, ...this.args(), ...(id ? [id] : [])], { on: null, current: () => this.boundCurrent?.() && this.t === target && this.status === status });
     if (r.code !== 0) throw new Error("Command admission response unavailable");
     return this.validate(JSON.parse(r.stdout));
   }
@@ -113,7 +113,7 @@ export class CommandSubmission {
     cx.spawn(async (cx) => {
       try {
         if (action === "load") {
-          const r = await exec("ocq-herdr", [`${this.route}-context`, this.space], { on: null });
+          const r = await bridgeCommand([`${this.route}-context`, this.space], { on: null });
           if (!this.current(owner)) return;
           const t = JSON.parse(r.stdout);
           if (r.code !== 0 || t.machine !== "local" || t.space_id !== this.space || !hex(t.queue_identity)) throw new Error("Queue unavailable");

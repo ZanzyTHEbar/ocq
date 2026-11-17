@@ -114,12 +114,12 @@ export const compatibility = {
   },
 };
 
-// Legacy helpers use the selected socket's explicit command allowlist. They
+// Bridge commands use the selected socket's explicit command allowlist. They
 // cannot fall back to execution, polling or a separately provisioned listener.
-export async function exec(bin, args, options = {}) {
+export async function bridgeCommand(args, options = {}) {
   compatibility.observe();
   const connection = compatibility.pushConnection;
-  if (bin !== "ocq-herdr" || options.on !== compatibility.scope?.machine || connection?.state !== "connected") return unavailable();
+  if (options.on !== compatibility.scope?.machine || connection?.state !== "connected") return unavailable();
   let request = args;
   const native = args[0] === "client-open" || args[0] === "client-verify" || args[0] === "dispatcher-status" ||
     args[0].startsWith("dispatcher-") && ACTIONS[args[0]];

@@ -303,32 +303,7 @@ func PrepareCapturePublication(dir string, t ResultPublicationTarget, id, launch
 			return err
 		}
 		defer r.Close()
-		if err = r.store.readSchema5(captureFence(r.store, request)); err != nil {
-			return err
-		}
-		// Persist and sync BEFORE the only filesystem read. Failure leaves a
-		// recoverable preparing pointer, not an invitation to run capture again.
-		if err = j.create(id+".started.json", request); err != nil {
-			return err
-		}
-		prepared, err := r.store.prepareCapture(CaptureRequest{ProjectID: t.Project, JobID: t.Job, Worktree: request.Context.Worktree, Supersedes: request.Supersedes, IgnoredExclusions: request.IgnoredExclusions})
-		if err != nil {
-			return err
-		}
-		var association ProjectResultAssociation
-		if err = r.store.publishCapture(prepared, &association, captureFence(r.store, request), true, false); err != nil {
-			return err
-		}
-		manifest, err := marshalCanonicalManifestJSON(prepared.manifest)
-		if err != nil {
-			return err
-		}
-		p := ResultPublicationPayload{t, request.Context.OwnershipDigest, string(manifest), request.Supersedes}
-		payload, err := json.Marshal(p)
-		if err != nil {
-			return err
-		}
-		if err = j.create(id+".intent.json", publicationRecord{1, sha256Hex(payload), payload}); err != nil {
+		if err = prepareCapturePublicationLocked(r, j, t, id, request); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintln(conn, "PREPARED "+id)
@@ -338,6 +313,35 @@ func PrepareCapturePublication(dir string, t ResultPublicationTarget, id, launch
 		return CapturePublicationStatus{}, err
 	}
 	return InspectCapturePublication(dir, t, id)
+}
+
+// The caller holds the journal lock, has refused retained captures and owns r.
+func prepareCapturePublicationLocked(r *Reader, j *composeJournal, t ResultPublicationTarget, id string, request CapturePreparationRequest) error {
+	if err := r.store.readSchema5(captureFence(r.store, request)); err != nil {
+		return err
+	}
+	// Persist and sync BEFORE the only filesystem read. Failure leaves a
+	// recoverable preparing pointer, not an invitation to run capture again.
+	if err := j.create(id+".started.json", request); err != nil {
+		return err
+	}
+	prepared, err := r.store.prepareCapture(CaptureRequest{ProjectID: t.Project, JobID: t.Job, Worktree: request.Context.Worktree, Supersedes: request.Supersedes, IgnoredExclusions: request.IgnoredExclusions})
+	if err != nil {
+		return err
+	}
+	var association ProjectResultAssociation
+	if err = r.store.publishCapture(prepared, &association, captureFence(r.store, request), true, false); err != nil {
+		return err
+	}
+	manifest, err := marshalCanonicalManifestJSON(prepared.manifest)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(ResultPublicationPayload{t, request.Context.OwnershipDigest, string(manifest), request.Supersedes})
+	if err != nil {
+		return err
+	}
+	return j.create(id+".intent.json", publicationRecord{1, sha256Hex(payload), payload})
 }
 
 func CapturePublicationRendezvous(dir string, t ResultPublicationTarget, launch string) (ComposeRendezvous, error) {

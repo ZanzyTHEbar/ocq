@@ -1,18 +1,15 @@
 import { View, div } from "gpui-kit";
-import { h_flex, v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
+import { h_flex, v_flex, Textarea } from "gpui-base";
 import { nextCommand, spaces, theme } from "herdr";
 import { PrivateHCBinding } from "./hc-binding.js";
 import { panelEpoch, panelVisible } from "./panel-state.js";
-import { exec, compatibility, enabledButton } from "./compatibility.js";
-import { createHash, randomBytes } from "crypto";
-import { Buffer } from "buffer";
+import { bridgeCommand, compatibility, enabledButton } from "./compatibility.js";
+import { createHash } from "crypto";
 import { QueueInspection } from "./queue.js";
 import { WorktreeVerification } from "./worktree-check.js";
 import { ResultPublication } from "./result-publication.js";
-import { RegistrationForm } from "./registration.js";
-import { SubmissionForm } from "./submission.js";
-import { ComposeForm } from "./compose-form.js";
-import { composeDecode } from "./private-frames.js";
+import { ComposeController } from "./compose-controller.js";
+import { IntakeController } from "./intake-controller.js";
 import { StoredUpdates, acceptObservationVersion } from "./stored-updates.js";
 import { WorkOperator } from "./work-operator.js";
 import { MainClientControls } from "./main-client.js";
@@ -52,119 +49,13 @@ function attentionDetail(job) {
   };
 }
 
-// The bridge has already run the core's duplicate-key and schema validation on
-// these retained bytes. The panel supports only these exact spellings and shapes;
-// unsupported wrappers, aliases, roles or unsafe numbers are never summarized.
-function intakeObject(value, allowed) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("unsupported object");
-  for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error("unsupported field");
-  return value;
-}
-
-function intakeEmbedded(value) {
-  if (typeof value === "string") value = JSON.parse(value);
-  if (!value || typeof value !== "object" || Array.isArray(value) || Object.prototype.hasOwnProperty.call(value, "canonical")) throw new Error("unsupported embedded representation");
-  return value;
-}
-
-function visibleString(value) {
-  const invisible = /[\p{Cc}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]/u;
-  const s = JSON.stringify(value);
-  return Array.from(s, (c) => invisible.test(c) ? Array.from({ length: c.length }, (_, n) => `\\u${c.charCodeAt(n).toString(16).padStart(4, "0")}`).join("") : c).join("");
-}
-
-function intakeStructured(kind, raw, exact = null) {
-  const parsed = JSON.parse(raw), sections = [];
-  const walk = (label, value) => {
-    if (typeof value === "string") {
-      if (composeDecode(Buffer.from(value, "utf8")) !== value) throw new Error("unsupported Unicode");
-      sections.push({ title: label, text: visibleString(value) });
-    } else if (value === null || typeof value === "boolean") sections.push({ title: label, text: String(value) });
-    else if (typeof value === "number") {
-      if (!Number.isSafeInteger(value) || Object.is(value, -0)) throw new Error("unsupported number");
-      sections.push({ title: label, text: String(value) });
-    } else if (Array.isArray(value)) {
-      if (!value.length) sections.push({ title: label, text: "[]" });
-      else value.forEach((item, n) => walk(`${label} [${n + 1}]`, item));
-    } else if (value && typeof value === "object") {
-      const keys = Object.keys(value);
-      if (!keys.length) sections.push({ title: label, text: "{}" });
-       else for (const key of keys) {
-         if (composeDecode(Buffer.from(key, "utf8")) !== key) throw new Error("unsupported Unicode key");
-         walk(`${label} · ${visibleString(key)}`, value[key]);
-       }
-    } else throw new Error("unsupported value");
-  };
-  const fieldList = (label, object, skip = []) => {
-    for (const key of Object.keys(object)) if (!skip.includes(key)) walk(`${label} · ${key}`, object[key]);
-  };
-  const model = (value) => intakeObject(value, ["id", "providerID", "variant"]);
-  const permissions = (value) => {
-    if (!Array.isArray(value)) throw new Error("unsupported permissions");
-    for (const rule of value) intakeObject(rule, ["action", "resource", "effect"]);
-  };
-  const manifest = (value) => {
-    const common = ["version", "kind", "project_id", "source", "observed_at"];
-    const fields = {
-      handoff: ["intent", "decisions", "risks", "outstanding_job_ids", "outstanding_event_ids", "outstanding_manifest_digests", "notes"],
-      brief: ["goal", "scope", "exclusions", "acceptance_criteria", "base", "agent", "model", "permissions", "allowed_actions", "context_references"],
-      result: ["claim_label", "job_id", "request_digest", "base", "worktree", "staged_status", "unstaged_status", "untracked_paths", "before_status_digest", "after_status_digest", "before_content_digest", "after_content_digest", "ignored_exclusions", "changed_files", "diff", "inline_output", "evidence_digests", "claimed_validation"],
-      review_brief: ["target_job_id", "target_result_digest", "base", "criteria", "rules", "diff", "changed_files"],
-      review_result: ["claim_label", "review_job_id", "review_session_id", "target_job_id", "reviewed_result_digest", "verdict", "findings", "limitations"],
-    };
-    const m = intakeEmbedded(value);
-    if (!fields[m.kind]) throw new Error("unsupported manifest kind");
-    intakeObject(m, [...common, ...fields[m.kind]]);
-    if (m.kind === "brief") { model(m.model); permissions(m.permissions); }
-    if (m.changed_files !== undefined) { if (!Array.isArray(m.changed_files)) throw new Error("unsupported changed files"); for (const f of m.changed_files) intakeObject(f, ["path", "old_mode", "new_mode", "contents"]); }
-    if (m.kind === "result") intakeObject(m.claimed_validation, ["status", "commands", "results", "provenance", "limitations"]);
-    if (m.kind === "review_result") { if (!Array.isArray(m.findings)) throw new Error("unsupported findings"); for (const f of m.findings) intakeObject(f, ["location", "severity", "message"]); }
-    return m;
-  };
-  const bytes = (label, part) => {
-    if (!part || typeof part.raw !== "string" || createHash("sha256").update(part.raw).digest("hex") !== part.sha256) throw new Error("exact embedded bytes unavailable");
-    walk(`${label} · SHA-256 of exact bytes`, part.sha256);
-    walk(`${label} · exact embedded JSON bytes`, part.raw);
-  };
-  if (exact && (exact.raw !== raw || createHash("sha256").update(raw).digest("hex") !== exact.sha256)) throw new Error("retained envelope changed");
-  if (kind === "registration") {
-    const request = intakeObject(parsed, ["version", "key", "project_id", "label", "expected_revision", "repo", "commit_anchor", "elephant_session_id", "expected_opencode_project_id", "expected_opencode_directory", "auth_ref", "handoff_manifest_digest", "handoff_manifest"]);
-    const handoff = intakeObject(intakeEmbedded(request.handoff_manifest), ["version", "kind", "project_id", "source", "observed_at", "intent", "decisions", "risks", "outstanding_job_ids", "outstanding_event_ids", "outstanding_manifest_digests", "notes"]);
-    if (handoff.kind !== "handoff") throw new Error("unsupported manifest");
-    fieldList("Registration and binding", request, ["handoff_manifest"]);
-    fieldList("Handoff", handoff);
-    if (exact?.handoff) bytes("Handoff", exact.handoff);
-  } else if (kind === "submission") {
-    const request = intakeObject(parsed, ["version", "key", "project_id", "binding_revision", "role", "lane_id", "fsfork_driver", "request", "brief_digest", "brief_manifest_digest", "brief_manifest", "target_job_id", "target_result_digest", "referenced_manifests"]);
-    if (!["implementation", "review"].includes(request.role) || request.referenced_manifests !== undefined && !Array.isArray(request.referenced_manifests)) throw new Error("unsupported submission representation");
-    const agent = intakeObject(intakeEmbedded(request.request), ["version", "kind", "repo", "base", "prompt", "agent", "model", "permissions", "provision_policy", "memory_bytes"]);
-    model(agent.model); permissions(agent.permissions);
-    const brief = manifest(request.brief_manifest);
-    if (brief.kind !== (request.role === "review" ? "review_brief" : "brief") || brief.project_id !== request.project_id || brief.base !== agent.base) throw new Error("brief context mismatch");
-    if (request.role === "review" && (brief.target_job_id !== request.target_job_id || brief.target_result_digest !== request.target_result_digest)) throw new Error("review target mismatch");
-    const refs = request.referenced_manifests || [];
-    if (exact && (!exact.request || !exact.brief || (exact.references || []).length !== refs.length)) throw new Error("embedded review incomplete");
-    fieldList("Submission and binding", request, ["request", "brief_manifest", "referenced_manifests"]);
-    if (!request.lane_id) walk("Submission and binding · effective lane_id (derived from key)", `lane-${createHash("sha256").update(request.key).digest("hex").slice(0, 16)}`);
-    if (!request.fsfork_driver) walk("Submission and binding · effective fsfork_driver (default)", "git_worktree");
-    fieldList("Agent request", agent);
-    if (exact) bytes("Agent request", exact.request);
-    fieldList(brief.kind === "review_brief" ? "Review brief (core deterministic prompt inputs)" : "Brief", brief);
-    if (exact) bytes("Brief", exact.brief);
-    walk("Referenced manifests · count", refs.length);
-    refs.forEach((value, n) => {
-      const ref = manifest(value), label = `Referenced manifest [${n + 1}]`;
-      if (ref.project_id !== request.project_id) throw new Error("reference context mismatch");
-      fieldList(label, ref);
-      if (exact) bytes(label, exact.references[n]);
-    });
-  } else throw new Error("unsupported kind");
-  return sections;
-}
-
 // The bridge is a short-lived Go process. OCQ's database remains authoritative;
 // no Herdr status, pane state, or mod state is interpreted as job completion.
 export default class OCQ extends View {
+  // Stored-view consumers read the actual controller state, never a copy.
+  get compose() { return this.composeController.compose; }
+  get intake() { return this.intakeController.intake; }
+
   init(_props, cx) {
     this.queue = new QueueInspection();
     this.updates = new StoredUpdates(this, cx);
@@ -205,14 +96,8 @@ export default class OCQ extends View {
     this.collections = { inbox: emptyCollection(), results: emptyCollection() };
     this.mailActions = {};
     this.mailConfirmation = null;
-    this.compose = { screen: false, state: "loading", id: null, preview: null, working: false, error: null };
-    this.intake = { screen: false, state: "loading", id: null, kind: "registration", preview: null, page: 0, working: false, error: null, context: null, confirm: false, uncertainID: null, observation: null };
-    this.intakeInput = TextareaState.new({ placeholder: "Paste an exact registration or submission JSON envelope", rows: 8 });
-    this.intakeInputFocused = false;
-    this.intakeInput.on("change", (_e, cx) => cx.notify());
-    this.intakeInput.on("focus", (_e, cx) => { this.intakeInputFocused = true; cx.notify(); });
-    this.intakeInput.on("blur", (_e, cx) => { this.intakeInputFocused = false; cx.notify(); });
-    this.intakeInput.on("submit", () => this.handle.focus());
+    this.composeController = new ComposeController(this);
+    this.intakeController = new IntakeController(this);
     this.spaceID = spaces().find((s) => s.active)?.id ?? null;
     this.machine = spaces().find((s) => s.active)?.machine ?? null;
     this.folder = spaces().find((s) => s.active)?.folder ?? null;
@@ -377,8 +262,8 @@ export default class OCQ extends View {
     this.boardVersion = null; this.boardError = null; this.lanes = [];
     this.lanePages = [{ start: "0" }];
     this.mailConfirmation = null;
-    this.compose = { ...this.compose, screen: false, preview: null, context: null, form: null, options: null, confirm: false, working: false };
-    this.intake = { ...this.intake, screen: false, preview: null, context: null, confirm: false, working: false };
+    this.composeController.clearInspection();
+    this.intakeController.clearInspection();
   }
 
   refresh(cx, notify = true) {
@@ -425,580 +310,6 @@ export default class OCQ extends View {
     return Boolean(!this.closed && this.panelCurrent() && active && active.machine === null && this.machine === null && active.id === this.spaceID && active.folder === this.folder);
   }
 
-  composeContext(lane) {
-    if (!this.composeLocal() || !this.selected || !lane?.lane_id || !lane?.owner_job_id) return null;
-    return Object.freeze({ space: this.spaceID, folder: this.folder, project: this.selected, lane: lane.lane_id, job: lane.owner_job_id });
-  }
-
-  composeContextCurrent(context) {
-    return Boolean(context && this.composeLocal() && context.space === this.spaceID && context.folder === this.folder && context.project === this.selected &&
-      (this.board?.project?.lanes ?? []).some((lane) => lane.lane_id === context.lane && lane.owner_job_id === context.job));
-  }
-
-  composeCurrent(c, context) {
-    return !c.authoritySuspended && this.compose === c && c.screen && c.context === context && this.composeContextCurrent(context);
-  }
-
-  composeQuoted(value) { return visibleString(value); }
-
-  async composeStoredContext(context, manifest = "", reply = "") {
-    const result = await exec("ocq-herdr", ["compose-context", context.project, context.lane, manifest, reply], { on: null });
-    if (result.code !== 0) throw new Error("stored compose links unavailable");
-    const info = JSON.parse(result.stdout);
-    if (info.project_id !== context.project || info.lane_id !== context.lane || info.job_id !== context.job || info.manifest !== manifest || info.reply_to !== reply || typeof info.lane_path !== "string" || !Array.isArray(info.integrator_senders) || !Array.isArray(info.recipient_lanes)) throw new Error("stored owner changed");
-    return info;
-  }
-
-  composeRoute(request, info = null, recovered = true) {
-    if (request.Kind === "lane.blocked") return [`lane:${request.LaneID}`, `job:${request.JobID}`].includes(request.From) && request.To === `integrator:${request.ProjectID}`;
-    return request.Kind === "lane.assigned" && typeof request.From === "string" && request.From.startsWith("integrator:") && typeof request.To === "string" && request.To.startsWith("lane:") &&
-      (!info || info.recipient_lanes.some((lane) => request.To === `lane:${lane}`)) && (recovered || info?.integrator_senders.includes(request.From));
-  }
-
-  composePreviewPages(request, info = null, raw = "") {
-    const pages = [];
-    const path = request.FsforkPath ?? "", implicit = path === "";
-    for (const [label, value] of [
-      ["Machine", "this computer"], ["Project", request.ProjectID], ["Lane", request.LaneID], ["Job", request.JobID],
-      ["From", request.From], ["To", request.To], ["Kind", request.Kind],
-      ["Identity meaning", "Stored routing metadata only; not OS identity, authentication, permission or execution approval."],
-      [`Manifest (${request.Manifest === undefined ? "omitted → none" : request.Manifest === "" ? "explicit empty → none" : "retained attachment"})`, request.Manifest ?? ""],
-      [`Reply to (${request.ReplyTo === undefined ? "omitted → no reply" : request.ReplyTo === "" ? "explicit empty → no reply" : "retained same-project message"})`, request.ReplyTo ?? ""],
-      [`Requested FsforkPath (${request.FsforkPath === undefined ? "omitted → empty/default" : implicit ? "explicit empty → lane default" : "nonempty literal override"})`, path],
-      ["Reviewed stored lane default (empty remains empty)", info ? info.lane_path : "UNAVAILABLE — cannot confirm"],
-      ["Effective path to recheck/pin at claim", implicit ? info ? info.lane_path : "UNAVAILABLE — cannot confirm" : path],
-      ["Path meaning", implicit ? "Use the stored lane default, even if that default is empty. A changed default requires a new review." : "Exact literal metadata override, even if its text says lane default. No path is opened or created."],
-      ["Retained link lookup", info ? "Manifest/reply IDs checked in this project's stored SQLite snapshot; send rechecks in its transaction." : "Unavailable; raw fields may be read/cancelled, never confirmed."],
-      ["Subject", request.Subject], [request.Body === undefined ? "Message (omitted → empty)" : "Message", request.Body ?? ""],
-      ["Exact retained request SHA-256", createHash("sha256").update(raw).digest("hex")],
-    ]) {
-      const tokens = visibleString(value).match(/\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])|[\s\S]/gu) || [];
-      for (let start = 0; start < tokens.length;) {
-        let end = start, length = 0;
-        while (end < tokens.length && length + tokens[end].length <= 160) length += tokens[end++].length;
-        pages.push(`${label}${start ? " (continued)" : ""}:\n${tokens.slice(start, end).join("")}`);
-        start = end;
-      }
-    }
-    return pages;
-  }
-
-  advanceComposePage(delta, cx) {
-    const c = this.compose, p = c.preview;
-    if (!p || c.working || c.confirm || !this.composeCurrent(c, c.context)) return;
-    const next = Math.max(0, Math.min(p.pages.length - 1, c.page + delta));
-    if (delta === 1 && c.page === p.openedThrough && next === c.page + 1) p.openedThrough = next;
-    c.page = next; cx.notify();
-  }
-
-  canReviewCompose() {
-    const c = this.compose, p = c.preview;
-    return Boolean(!c.working && c.state === "prepared" && p?.state === "prepared" && p.id === c.id && p.info && this.composeCurrent(c, c.context) && c.page === p.pages.length - 1 && p.openedThrough === p.pages.length - 1);
-  }
-
-  refreshCompose(cx) {
-    if (this.queueMode) return;
-    const c = this.compose;
-    if (!this.composeLocal() || c.working) return;
-    const scope = { space: this.spaceID, folder: this.folder, project: this.selected, screen: c.screen };
-    const current = () => !c.authoritySuspended && this.compose === c && c.screen === scope.screen && this.composeLocal() && scope.space === this.spaceID && scope.folder === this.folder && scope.project === this.selected;
-    c.working = true;
-    cx.spawn(async (cx) => {
-      try {
-        const result = await exec("ocq-herdr", ["compose-status"], { on: null });
-        if (result.code !== 0 || !current()) throw new Error("status unavailable");
-        const status = JSON.parse(result.stdout);
-        if (!["idle", "busy", "prepared", "armed", "dispatch_intent", "completed", "cancelled", "blocked"].includes(status.state)) throw new Error("invalid status");
-        if (c.state === "uncertain") {
-          if (status.id === c.id && ["prepared", "armed"].includes(status.state)) {
-            if (c.recoveryState !== status.state) c.preview = null;
-            c.recoveryState = status.state;
-            c.error = "The exact intent is unattempted now. A delayed claim or send may still race; preview and explicitly cancel under the journal lock. Do not resend.";
-            return;
-          }
-          c.recoveryState = null; c.preview = null;
-          if (status.id !== c.id || !["dispatch_intent", "completed", "cancelled"].includes(status.state)) {
-            c.error = "Send outcome remains uncertain. A busy, unavailable or different journal does not authorize a retry.";
-            return;
-          }
-        }
-        if (c.id !== (status.id ?? null) || c.state !== status.state) c.observation = null;
-        c.state = status.state; c.id = status.id ?? null; c.observation = status.observation ?? null; c.recoveryState = null;
-        if (c.preview && (!["prepared", "armed"].includes(status.state) || c.preview.id !== status.id || c.preview.state !== status.state)) c.preview = null;
-        c.error = null;
-        if (c.state === "idle" && this.composeCurrent(c, c.context)) {
-          const context = c.context;
-          const info = await this.composeStoredContext(context);
-          if (!current() || !this.composeCurrent(c, context)) throw new Error("context changed");
-          c.options = info;
-        }
-      } catch (_e) { if (current()) { if (c.state !== "uncertain") c.state = "blocked"; c.preview = null; c.error = "Compose status/options unavailable. Do not send; check the local store."; } }
-      finally { if (current()) { c.working = false; cx.notify(); } }
-    });
-  }
-
-  openCompose(lane, cx) {
-    const previous = this.compose;
-    if (previous.working && previous.screen && this.composeContextCurrent(previous.context)) return;
-    const c = this.compose = { ...previous, authoritySuspended: false, working: false, preview: null, form: null, options: null, context: null };
-    c.screen = true; c.confirm = false; c.error = null;
-    if (lane && ["idle", "loading"].includes(c.state)) {
-      c.context = this.composeContext(lane);
-      if (c.context) c.form = new ComposeForm(this, c.context);
-    }
-    this.handle.focus();
-    this.keyboardMode = false;
-    this.refreshCompose(cx);
-    cx.notify();
-  }
-
-  composeMode(kind, cx) {
-    const c = this.compose;
-    if (c.working || c.state !== "idle" || !this.composeCurrent(c, c.context) || !["lane.blocked", "lane.assigned"].includes(kind)) return;
-    const context = Object.freeze({ ...c.context });
-    this.compose = { ...c, context, form: new ComposeForm(this, context, kind), preview: null, confirm: false, error: null };
-    this.handle.focus(); cx.notify();
-  }
-
-  closeCompose(cx) {
-    // Keep recovery identity/state, not the form, confirmation or callback scope.
-    this.compose = { ...this.compose, screen: false, working: false, context: null, form: null, options: null, preview: null, confirm: false };
-    cx.notify();
-  }
-
-  async composeExchange(command, id, payload, current, cx) {
-    current = compatibility.transfer(current);
-    if (!current()) throw new Error("context changed");
-    const launch = randomBytes(32).toString("hex");
-    const value = await compatibility.exchange(command, command === "compose-preview" ? [id, launch] : [launch], payload, current);
-    if (command === "compose-preview") {
-      if (value.status?.id !== id || !["prepared", "armed"].includes(value.status.state) || typeof value.response !== "string") throw Error("preview status mismatch");
-      return value;
-    }
-    if (!/^PREPARED [0-9a-f]{64}$/.test(value.response)) throw Error("preparation uncertain");
-    return value.response;
-  }
-
-  prepareCompose(cx) {
-    const c = this.compose, context = c.context, form = c.form;
-    if (c.working || c.state !== "idle" || !form || !c.options || !this.composeCurrent(c, context)) return;
-    const snapshot = form.snapshot(), current = () => this.composeCurrent(c, context);
-    let request, payload;
-    try {
-      request = form.request(context, c.options);
-      for (const value of Object.values(request)) if (typeof value !== "string" || composeDecode(Buffer.from(value, "utf8")) !== value) throw new Error("invalid text");
-      if (!request.Subject || Buffer.from(request.Subject).length > 512 || Buffer.from(request.Body).length > 16384 || request.Subject.includes("\0") || request.Body.includes("\0")) throw new Error("invalid subject/body");
-      payload = JSON.stringify(request);
-      if (Buffer.from(payload).length + 1 > 131072) throw new Error("message frame too large");
-    } catch (_e) { c.error = "Select a legal stored route and valid retained link IDs; enter subject/body within 512/16384 UTF-8 bytes. A literal path override must be nonempty. Nothing was prepared."; cx.notify(); return; }
-    c.working = true; c.error = null; c.observation = null;
-    cx.spawn(async (cx) => {
-      let launched = false;
-      try {
-        const options = await this.composeStoredContext(context, request.Manifest, request.ReplyTo);
-        if (!current() || c.form !== form || form.snapshot() !== snapshot || !this.composeRoute(request, options, false)) throw new Error("form/route changed");
-        launched = true;
-        const reply = await this.composeExchange("compose-receive", null, payload, current, cx);
-        if (current()) { c.id = reply.slice(9); c.state = "prepared"; c.preview = null; }
-      } catch (_e) { if (current()) { if (launched) c.state = "blocked"; c.error = launched ? "Preparation outcome unknown. Refresh journal status before doing anything else." : "Stored route, attachment or reply unavailable/changed. Nothing was prepared."; } }
-      finally { if (current()) { c.working = false; this.handle.focus(); cx.notify(); } }
-    });
-    cx.notify();
-  }
-
-  previewCompose(cx) {
-    const c = this.compose, id = c.id, initialState = c.state, initialRecovery = c.recoveryState;
-    if (c.working || !(["prepared", "armed"].includes(c.state) || (c.state === "uncertain" && ["prepared", "armed"].includes(c.recoveryState))) || !id || !this.composeLocal() || !this.selected) return;
-    // The selected project must be explicit; the returned lane/job is checked
-    // against the current stored board before it can be confirmed.
-    const context = { space: this.spaceID, folder: this.folder, project: this.selected };
-    const current = () => !c.authoritySuspended && this.compose === c && c.screen && c.id === id && c.state === initialState && c.recoveryState === initialRecovery && this.composeLocal() && context.space === this.spaceID && context.folder === this.folder && context.project === this.selected;
-    c.working = true; c.error = null; c.preview = null; c.confirm = false;
-    cx.spawn(async (cx) => {
-      try {
-        const { response, status } = await this.composeExchange("compose-preview", id, null, current, cx);
-        if (!current() || ((initialState === "armed" || initialRecovery === "armed") && status.state !== "armed")) throw new Error("preview state changed");
-        const request = JSON.parse(response);
-        const allowed = ["ProjectID", "From", "To", "LaneID", "JobID", "Kind", "Subject", "Body", "Manifest", "ReplyTo", "FsforkPath"];
-        if (!request || Array.isArray(request) || Object.keys(request).some((key) => !allowed.includes(key)) || Object.values(request).some((value) => typeof value !== "string" || composeDecode(Buffer.from(value)) !== value)) throw new Error("unsupported fields");
-        const actual = Object.freeze({ ...context, lane: request.LaneID, job: request.JobID });
-        if (!current() || !this.composeContextCurrent(actual) || request.ProjectID !== context.project || !this.composeRoute(request)) throw new Error("context mismatch");
-        let info = null;
-        try { info = await this.composeStoredContext(actual, request.Manifest ?? "", request.ReplyTo ?? ""); } catch (_e) { /* Allow exact recovery/cancel, never confirmation with unavailable links. */ }
-        if (!current() || (info && !this.composeRoute(request, info))) throw new Error("route/context changed");
-        if (initialState === "uncertain") c.recoveryState = status.state;
-        else c.state = status.state;
-        c.context = actual; c.preview = { id, state: status.state, request, raw: response, info, pages: this.composePreviewPages(request, info, response), openedThrough: 0 }; c.page = 0; c.confirm = false;
-        if (!info) c.error = "Retained links/default unavailable. Exact fields remain readable and cancellable, but cannot be confirmed.";
-      } catch (_e) {
-        if (current()) { if (c.state !== "uncertain") c.state = "blocked"; c.error = "Preview unavailable or belongs to another project/lane. Refresh journal status; nothing was sent."; }
-      }
-      finally { if (this.compose === c && c.screen && this.composeLocal() && context.space === this.spaceID && context.folder === this.folder && context.project === this.selected) { c.working = false; this.handle.focus(); cx.notify(); } }
-    });
-    cx.notify();
-  }
-
-  composeAction(action, cx) {
-    const c = this.compose, id = c.id, preview = c.preview, wasUncertain = c.state === "uncertain", context = c.context;
-    if (c.working || !id || !this.composeLocal()) return;
-    if (action === "dispatch" && (!c.confirm || !this.canReviewCompose())) return;
-    if (action === "cancel" && !((["prepared", "armed"].includes(c.state) || (wasUncertain && ["prepared", "armed"].includes(c.recoveryState))) && preview?.id === id && this.composeCurrent(c, context))) return;
-    if (action === "reconcile" && !["dispatch_intent", "uncertain", "completed"].includes(c.state)) return;
-    if (action === "retire" && !["completed", "cancelled"].includes(c.state)) return;
-    if (!["dispatch", "cancel", "reconcile", "retire"].includes(action)) return;
-    const scope = { space: this.spaceID, folder: this.folder, project: this.selected };
-    const current = () => !c.authoritySuspended && this.compose === c && c.screen && this.composeLocal() && scope.space === this.spaceID && scope.folder === this.folder && scope.project === this.selected;
-    c.working = true; c.confirm = false; c.error = null;
-    cx.spawn(async (cx) => {
-      let claimLaunched = false, claimKnown = false, sendLaunched = false;
-      try {
-        if (action === "dispatch") {
-          const exact = await this.composeExchange("compose-preview", id, null, () => current() && this.composeCurrent(c, context) && c.preview === preview, cx);
-          const info = await this.composeStoredContext(context, preview.request.Manifest ?? "", preview.request.ReplyTo ?? "");
-          if (!current() || !this.composeCurrent(c, context) || c.preview !== preview || exact.response !== preview.raw || exact.status.state !== "prepared" || info.lane_path !== preview.info.lane_path || !this.composeRoute(preview.request, info)) throw new Error("retained fields/default changed");
-          // The send process is never launched until this separate, durable
-          // claim has been acknowledged. A delayed claim cannot send by itself.
-          c.state = "uncertain"; c.recoveryState = null; c.preview = null; claimLaunched = true;
-          const claim = await exec("ocq-herdr", ["compose-arm", id], { on: null, timeout: 30000, current: () => current() && c.id === id });
-          if (claim.code !== 0) throw new Error("claim outcome unavailable");
-          const armed = JSON.parse(claim.stdout);
-          if (armed.id !== id || armed.state !== "armed") throw new Error("claim identity mismatch");
-          claimKnown = true;
-          if (!current() || !this.composeCurrent(c, context)) return;
-          const afterClaim = await this.composeStoredContext(context, preview.request.Manifest ?? "", preview.request.ReplyTo ?? "");
-          if (!current() || !this.composeCurrent(c, context)) return;
-          if (afterClaim.lane_path !== preview.info.lane_path || !this.composeRoute(preview.request, afterClaim)) throw new Error("claimed context changed");
-        }
-        if (!current() || c.id !== id || action === "cancel" && (c.preview !== preview || !this.composeCurrent(c, context))) throw new Error("context changed");
-        if (action === "dispatch") sendLaunched = true;
-        const result = await exec("ocq-herdr", [`compose-${action}`, id], { on: null, timeout: 30000, current: () => current() && c.id === id });
-        if (result.code !== 0 || !current()) throw new Error("action unavailable");
-        const status = JSON.parse(result.stdout);
-        if (status.id !== id) throw new Error("identity mismatch");
-        if (action === "retire" && status.state === "retired") { c.state = "idle"; c.id = null; c.preview = null; c.context = null; c.form = null; c.options = null; c.observation = null; }
-        else if (["dispatch_intent", "completed", "cancelled"].includes(status.state)) { c.state = status.state; c.observation = status.observation; c.preview = null; c.recoveryState = null; }
-        else throw new Error("unexpected state");
-      } catch (_e) { if (current()) {
-        if (action === "dispatch" && !claimLaunched) { c.preview = null; c.error = "Exact retained fields, links or lane default changed/unavailable. Nothing was claimed. Preview again."; }
-        else if (action === "dispatch" && claimKnown && !sendLaunched) { c.state = "armed"; c.preview = null; c.error = "Claim retained, but route/default changed or became unavailable. No send launched; refresh, preview and cancel."; }
-        else { c.error = action === "dispatch" || action === "reconcile" || wasUncertain ? "Outcome uncertain. Refresh and check the stored intent; do not resend." : "Action outcome unavailable. Refresh journal status."; if (wasUncertain || action === "dispatch") { c.state = "uncertain"; c.recoveryState = null; c.preview = null; } else if (action !== "reconcile") c.state = "blocked"; }
-      } }
-      finally { if (current()) { c.working = false; cx.notify(); } }
-    });
-    cx.notify();
-  }
-
-  intakeCurrent(context) {
-    return Boolean(!this.intake.authoritySuspended && context && this.intake.context === context && this.intake.screen && this.composeLocal() && context.machine === this.machine && context.space === this.spaceID && context.folder === this.folder && context.selection === this.selected);
-  }
-
-  intakeSubmission(raw) {
-    const r = JSON.parse(raw);
-    return Object.freeze({ project: r.project_id, revision: r.binding_revision, role: r.role, lane: r.lane_id || `lane-${createHash("sha256").update(r.key).digest("hex").slice(0, 16)}`, driver: r.fsfork_driver || "git_worktree", target: r.target_job_id || null, digest: r.target_result_digest || null });
-  }
-
-  intakeMatches(kind, raw, context, admission = false) {
-    const request = JSON.parse(raw);
-    if (!request || typeof request !== "object" || Array.isArray(request) || typeof request.project_id !== "string" || !/^proj-[A-Za-z0-9_-]+$/.test(request.project_id)) return false;
-    if (context.reviewTarget && kind !== "submission") return false;
-    if (context.generatedSubmission && createHash("sha256").update(raw).digest("hex") !== context.generatedSubmission) return false;
-    if (kind === "registration") {
-      if (context.registration && createHash("sha256").update(raw).digest("hex") !== context.registration.digest) return false;
-      if (admission && context.registration && (context.newProject ? this.projects.some((p) => p.project_id === request.project_id) : this.board?.project?.current_binding?.revision !== context.revision)) return false;
-      return request.repo === context.folder && request.expected_opencode_directory === context.folder && (context.newProject ? request.expected_revision === 0 : (!context.project || request.project_id === context.project));
-    }
-    if (kind !== "submission" || !context.project || request.project_id !== context.project) return false;
-    if (admission && (this.board?.project?.current_binding?.repo_root !== context.folder || this.board?.project?.current_binding?.revision !== context.revision || request.binding_revision !== context.revision)) return false;
-    const scope = this.intakeSubmission(raw);
-    if (context.submission && Object.keys(scope).some((k) => scope[k] !== context.submission[k])) return false;
-    if (context.reviewTarget && (scope.role !== "review" || scope.target !== context.reviewTarget.job || scope.digest !== context.reviewTarget.digest)) return false;
-    let embedded = request.request;
-    for (let n = 0; n < 4; n++) {
-      if (typeof embedded === "string") embedded = JSON.parse(embedded);
-      else if (embedded && typeof embedded === "object" && !Array.isArray(embedded) && Object.prototype.hasOwnProperty.call(embedded, "canonical") && !Object.prototype.hasOwnProperty.call(embedded, "version")) embedded = embedded.canonical;
-      else break;
-    }
-    return Boolean(embedded && typeof embedded === "object" && !Array.isArray(embedded) && embedded.repo === context.folder);
-  }
-
-  // Reversible ASCII rendering: each page is a slice of one JSON string
-  // literal, so whitespace, control characters and Unicode remain explicit.
-  intakePages(raw) {
-    const escaped = JSON.stringify(raw).replace(/[ \u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
-    const pages = [];
-    for (let i = 0; i < escaped.length; i += 120) pages.push(escaped.slice(i, i + 120).match(/.{1,40}/g).join("\n"));
-    return pages;
-  }
-
-  intakeReviewPages(kind, raw, exact = null) {
-    const pages = [];
-    for (const section of intakeStructured(kind, raw, exact)) {
-      const chars = Array.from(section.text);
-      const count = Math.max(1, Math.ceil(chars.length / 160));
-      for (let n = 0; n < count; n++) pages.push({ title: section.title, text: chars.slice(n * 160, (n + 1) * 160).join(""), part: n + 1, parts: count });
-    }
-    if (!pages.length) throw new Error("empty review");
-    return pages;
-  }
-
-  openIntake(cx, newProject = false, reviewTarget = null) {
-    if (this.intake.working && this.intakeCurrent(this.intake.context)) return;
-    const i = this.intake = { ...this.intake, authoritySuspended: false, working: false };
-    i.screen = true; i.context = Object.freeze({ machine: this.machine, space: this.spaceID, folder: this.folder, selection: this.selected, project: newProject ? null : this.selected, revision: this.board?.project?.current_binding?.revision ?? null, newProject, reviewTarget: reviewTarget ? Object.freeze({ association: reviewTarget.association, job: reviewTarget.job, digest: reviewTarget.digest, source: reviewTarget.source, verification: reviewTarget.verification }) : null, submission: null, registration: null, generatedSubmission: null });
-    if (newProject) i.kind = "registration";
-    else if (reviewTarget) i.kind = "submission";
-    i.entry = "form";
-    this.registrationForm = new RegistrationForm(this, cx, i.context);
-    this.submissionForm = new SubmissionForm(this, i.context);
-    i.preview = null; i.error = null; i.state = "loading"; i.id = null; i.confirm = false; i.observation = null;
-    this.keyboardMode = false; this.handle.focus();
-    this.refreshIntake(cx); cx.notify();
-  }
-
-  refreshIntake(cx) {
-    const i = this.intake, context = i.context;
-    if (i.working || !this.intakeCurrent(context)) return;
-    i.working = true;
-    cx.spawn(async (cx) => {
-      try {
-        const result = await exec("ocq-herdr", ["intake-status"], { on: null });
-        if (!this.intakeCurrent(context) || result.code !== 0) throw new Error("status unavailable");
-        const status = JSON.parse(result.stdout);
-        if (!["idle", "prepared", "armed", "attempted", "completed", "cancelled", "blocked"].includes(status.state)) throw new Error("invalid status");
-        if (i.uncertainID && status.id !== i.uncertainID) throw new Error("uncertain intent changed");
-        if (i.id !== (status.id ?? null) || i.state !== status.state) i.preview = null;
-        i.state = status.state; i.id = status.id ?? null; i.confirm = false; i.observation = status.observation ?? null;
-        i.error = i.uncertainID && status.state === "prepared" ? "Claim response was lost. Do not confirm again; preview and cancel this unattempted intent." : null;
-      } catch (_e) { if (this.intakeCurrent(context)) { i.state = "blocked"; i.preview = null; i.error = "Status unavailable. Refresh before preparing; do not retry an uncertain operation."; } }
-      finally { if (this.intakeCurrent(context)) { i.working = false; cx.notify(); } }
-    });
-  }
-
-  openReviewIntake(association, cx) {
-    if (!this.composeLocal() || association?.project_id !== this.selected || association.kind !== "result" || association.availability !== "available" || !/^[0-9a-f]{64}$/.test(association.manifest_digest) || !association.job_id) return;
-    if (this.intake.working && this.intakeCurrent(this.intake.context)) return;
-    this.intakeInput.set_value("");
-    this.openIntake(cx, false, { association: association.id, job: association.job_id, digest: association.manifest_digest, source: association.source, verification: association.verification });
-  }
-
-  openImplementationIntake(cx) {
-    if (!this.composeLocal() || !this.selected || (this.intake.working && this.intakeCurrent(this.intake.context))) return;
-    this.intake.kind = "submission";
-    this.openIntake(cx);
-  }
-
-  async intakeExchange(mode, kind, id, raw, context, cx) {
-    if (!this.intakeCurrent(context)) throw new Error("context changed");
-    const current = compatibility.transfer(() => this.intakeCurrent(context));
-    const launch = randomBytes(32).toString("hex");
-    const command = mode === "receive" ? ["intake-receive-text", kind, launch] : mode === "draft" ? [`intake-${kind}-draft`, launch] : ["intake-review-preview", id, launch];
-    if (mode !== "preview") {
-      const bytes = Buffer.from(raw, "utf8");
-      if (!bytes.length || bytes.length > (mode === "draft" && kind === "registration" ? 16384 : 131072) || composeDecode(bytes) !== raw) throw Error("invalid request");
-    }
-    const value = await compatibility.exchange(command[0], command.slice(1), raw, current);
-    if (mode === "receive") {
-      if (!/^PREPARED [0-9a-f]{64}$/.test(value.response)) throw Error("preparation uncertain");
-      return value.response;
-    }
-    const exact = value.exact;
-    if (!["registration", "submission"].includes(value.kind) || typeof exact?.raw !== "string" || Buffer.from(exact.raw).length > 131072 ||
-      createHash("sha256").update(exact.raw).digest("hex") !== exact.sha256) throw Error("exact preview changed");
-    if (mode === "draft" && value.state !== "draft") throw Error("draft unavailable");
-    if (mode === "preview" && (value.id !== id || !["prepared", "armed", "attempted", "completed", "cancelled"].includes(value.state))) throw Error("preview state changed");
-    return { kind: value.kind, raw: exact.raw, exact, ...(mode === "preview" ? { state: value.state } : {}) };
-  }
-
-  buildRegistration(cx) {
-    const i = this.intake, form = this.registrationForm;
-    let context = i.context;
-    if (i.working || i.state !== "idle" || i.kind !== "registration" || i.entry !== "form" || !this.intakeCurrent(context) || context.reviewTarget) return;
-    const draft = form.values(), input = JSON.stringify(draft);
-    try {
-      if (!Number.isSafeInteger(draft.expected_revision) || (context.newProject ? draft.expected_revision !== 0 : !context.project || draft.expected_revision !== context.revision || draft.expected_revision < 1)) throw new Error("revision unavailable");
-      for (const value of Object.values(draft).flat()) if (typeof value === "string" && composeDecode(Buffer.from(value)) !== value) throw new Error("unsupported Unicode");
-      if (draft.repo !== context.folder || draft.expected_opencode_directory !== context.folder) throw new Error("directory mismatch");
-    } catch (_e) { i.error = "Explicit project context, exact current revision and matching directories are required. Nothing was built."; cx.notify(); return; }
-    i.working = true; i.error = null;
-    cx.spawn(async (cx) => {
-      try {
-        const result = await this.intakeExchange("draft", "registration", null, input, context, cx);
-        if (!this.intakeCurrent(context) || i.kind !== "registration" || i.entry !== "form" || this.registrationForm !== form || JSON.stringify(form.values()) !== input || !this.intakeMatches("registration", result.raw, context)) throw new Error("draft context changed");
-        const request = JSON.parse(result.raw);
-        if (request.expected_revision !== draft.expected_revision || request.project_id !== draft.project_id) throw new Error("draft identity changed");
-        const review = this.intakeReviewPages("registration", result.raw, result.exact);
-        context = Object.freeze({ ...context, registration: Object.freeze({ digest: result.exact.sha256 }) }); i.context = context;
-        i.preview = { draft: true, kind: "registration", raw: result.raw, exact: result.exact, review, rawPages: this.intakePages(result.raw).map((text) => ({ title: "Generated exact JSON string", text })), pages: review, view: "review", openedThrough: 0 };
-        i.page = 0; i.confirm = false;
-      } catch (_e) { if (this.intakeCurrent(context)) i.error = "Draft unavailable. Check all required fields, exact identities, sizes and context. Nothing was prepared or registered."; }
-      finally { if (this.intakeCurrent(context)) { i.working = false; this.handle.focus(); cx.notify(); } }
-    });
-    cx.notify();
-  }
-
-  intakeEntry(entry, cx) {
-    const i = this.intake;
-    if (i.working || i.state !== "idle" || !this.intakeCurrent(i.context)) return;
-    i.context = Object.freeze({ ...i.context, registration: null, submission: null, generatedSubmission: null });
-    i.preview = null; i.entry = entry; i.error = null; i.confirm = false;
-    cx.notify();
-  }
-
-  buildSubmission(cx) {
-    const i = this.intake, form = this.submissionForm, snapshot = form.snapshot();
-    let context = i.context, input;
-    if (i.working || i.state !== "idle" || i.kind !== "submission" || i.entry !== "form" || !this.intakeCurrent(context) || context.newProject) return;
-    try {
-      const draft = form.values(context);
-      if (!context.project || !Number.isSafeInteger(context.revision) || context.revision < 1 || draft.repo !== context.folder || this.board?.project?.current_binding?.revision !== context.revision) throw new Error("binding changed");
-      const check = (value) => {
-        if (typeof value === "string" && composeDecode(Buffer.from(value)) !== value) throw new Error("unsupported Unicode");
-        if (typeof value === "number" && (!Number.isSafeInteger(value) || Object.is(value, -0))) throw new Error("unsafe number");
-        if (Array.isArray(value)) value.forEach(check);
-        else if (value && typeof value === "object") for (const [key, item] of Object.entries(value)) { check(key); check(item); }
-      };
-      check(draft);
-      check(JSON.parse(draft.permissions));
-      input = JSON.stringify(draft);
-    } catch (_e) { i.error = "Check required fields, JSON lists, explicit safe memory count and exact current project binding. Nothing was built."; cx.notify(); return; }
-    i.working = true; i.error = null;
-    cx.spawn(async (cx) => {
-      try {
-        const result = await this.intakeExchange("draft", form.role, null, input, context, cx);
-        if (!this.intakeCurrent(context) || i.kind !== "submission" || i.entry !== "form" || this.submissionForm !== form || form.snapshot() !== snapshot || result.kind !== "submission" || !this.intakeMatches("submission", result.raw, context, true)) throw new Error("draft context changed");
-        const scope = this.intakeSubmission(result.raw);
-        if (scope.role !== form.role || scope.revision !== context.revision) throw new Error("draft scope changed");
-        const review = this.intakeReviewPages("submission", result.raw, result.exact);
-        context = Object.freeze({ ...context, submission: scope, generatedSubmission: result.exact.sha256 }); i.context = context;
-        i.preview = { draft: true, kind: "submission", raw: result.raw, review, rawPages: this.intakePages(result.raw).map((text) => ({ title: "Generated exact JSON string", text })), pages: review, view: "review", openedThrough: 0 };
-        i.page = 0; i.confirm = false;
-      } catch (_e) { if (this.intakeCurrent(context)) i.error = "Draft unavailable. Check exact binding/target, full fields, permissions and size (review prompt ≤16 KiB). Nothing was prepared or submitted; no target content is truncated."; }
-      finally { if (this.intakeCurrent(context)) { i.working = false; this.handle.focus(); cx.notify(); } }
-    });
-    cx.notify();
-  }
-
-  prepareIntake(cx, generated = null) {
-    const i = this.intake, raw = generated ? generated.raw : this.intakeInput.value(), kind = i.kind;
-    let context = i.context;
-    if (i.working || i.state !== "idle" || !this.intakeCurrent(context)) return;
-    if (generated ? i.preview !== generated || !generated.draft || generated.view !== "review" || generated.openedThrough !== generated.review.length - 1 || i.page !== generated.review.length - 1 : i.entry === "form") return;
-    try {
-      const bytes = Buffer.from(raw, "utf8");
-      if (!bytes.length || bytes.length > (kind === "registration" ? 16384 : 131072) || composeDecode(bytes) !== raw || !this.intakeMatches(kind, raw, context, true)) throw new Error("invalid request or context");
-      if (context.newProject && (kind !== "registration" || this.projects.some((p) => p.project_id === JSON.parse(raw).project_id))) throw new Error("new project already exists");
-      this.intakeReviewPages(kind, raw);
-    } catch (_e) { i.error = "Request is invalid, belongs to another context, or uses an unsupported review representation. Nothing was prepared."; cx.notify(); return; }
-    if (kind === "submission") { context = Object.freeze({ ...context, submission: this.intakeSubmission(raw) }); i.context = context; }
-    i.working = true; i.error = null;
-    cx.spawn(async (cx) => {
-      try {
-        const result = await this.intakeExchange("receive", kind, null, raw, context, cx);
-        if (this.intakeCurrent(context)) { i.id = result.slice(9); i.state = "prepared"; i.preview = null; }
-      } catch (_e) { if (this.intakeCurrent(context)) { i.state = "blocked"; i.error = "Preparation outcome unknown. Refresh the journal; do not prepare again until it is resolved."; } }
-      finally { if (this.intakeCurrent(context)) { i.working = false; this.handle.focus(); cx.notify(); } }
-    });
-    cx.notify();
-  }
-
-  previewIntake(cx) {
-    const i = this.intake, id = i.id;
-    let context = i.context;
-    if (i.working || !id || !this.intakeCurrent(context) || !["prepared", "armed", "attempted", "completed", "cancelled"].includes(i.state)) return;
-    i.working = true; i.preview = null; i.error = null;
-    cx.spawn(async (cx) => {
-      try {
-        const result = await this.intakeExchange("preview", null, id, null, context, cx);
-        if (!this.intakeCurrent(context) || !this.intakeMatches(result.kind, result.raw, context)) throw new Error("context mismatch");
-        const rawPages = this.intakePages(result.raw).map((text) => ({ title: "Exact raw JSON string", text }));
-        let review = null;
-        try { review = this.intakeReviewPages(result.kind, result.raw, result.exact); } catch (_e) { /* Keep exact raw view, never invent a summary. */ }
-        if (result.kind === "submission") { context = Object.freeze({ ...context, submission: this.intakeSubmission(result.raw) }); i.context = context; }
-        i.state = result.state; i.preview = { id, kind: result.kind, raw: result.raw, state: result.state, review, rawPages, pages: review || rawPages, view: review ? "review" : "raw", openedThrough: 0 }; i.page = 0; i.confirm = false;
-        if (!review) i.error = "This envelope representation is not supported for structured review. Exact raw view only; dispatch remains unavailable.";
-      } catch (_e) { if (this.intakeCurrent(context)) i.error = "Preview unavailable or belongs to another project or folder. Nothing was dispatched."; }
-      finally { if (this.intakeCurrent(context)) { i.working = false; this.handle.focus(); cx.notify(); } }
-    });
-    cx.notify();
-  }
-
-  advanceIntakePage(delta, cx) {
-    const i = this.intake, preview = i.preview;
-    if (!preview || i.working || !this.intakeCurrent(i.context)) return;
-    const next = Math.max(0, Math.min(preview.pages.length - 1, i.page + delta));
-    if (preview.view === "review" && delta === 1 && i.page === preview.openedThrough && next === i.page + 1) preview.openedThrough = next;
-    i.page = next;
-    cx.notify();
-  }
-
-  canConfirmIntake() {
-    const i = this.intake, p = i.preview;
-    return Boolean(!i.working && !i.uncertainID && this.intakeCurrent(i.context) && i.state === "prepared" && p?.id === i.id && p.state === "prepared" && p.review && p.view === "review" && i.page === p.review.length - 1 && p.openedThrough === p.review.length - 1 && this.intakeMatches(p.kind, p.raw, i.context, true));
-  }
-
-  confirmIntake(cx) {
-    const i = this.intake, context = i.context, preview = i.preview, id = i.id;
-    if (!i.confirm || !this.canConfirmIntake()) return;
-    i.working = true; i.error = null;
-    cx.spawn(async (cx) => {
-      let armLaunched = false;
-      try {
-        const exact = await this.intakeExchange("preview", null, id, null, context, cx);
-        if (!this.intakeCurrent(context) || !i.confirm || i.preview !== preview || i.id !== id || exact.state !== "prepared" || exact.kind !== preview.kind || exact.raw !== preview.raw || !this.intakeMatches(exact.kind, exact.raw, context, true)) throw new Error("preview changed");
-        i.uncertainID = id; armLaunched = true;
-        const claim = await exec("ocq-herdr", ["intake-arm", id], { on: null, timeout: 30000, current: () => this.intakeCurrent(context) && i.preview === preview && i.id === id });
-        if (!claim || claim.code !== 0) throw new Error("claim outcome unknown");
-        const armed = JSON.parse(claim.stdout);
-        if (armed.id !== id || armed.state !== "armed") throw new Error("claim identity mismatch");
-        if (!this.intakeCurrent(context) || !i.confirm || i.preview !== preview || i.id !== id || !this.intakeMatches(preview.kind, preview.raw, context, true)) return;
-        i.confirm = false; i.state = "armed";
-        const result = await exec("ocq-herdr", ["intake-dispatch", id], { on: null, timeout: 30000, current: () => this.intakeCurrent(context) && i.preview === preview && i.id === id });
-        if (!result || result.code !== 0 || !this.intakeCurrent(context) || i.preview !== preview || i.id !== id) throw new Error("dispatch outcome unknown");
-        const status = JSON.parse(result.stdout);
-        if (status.id !== id || !["attempted", "completed", "blocked"].includes(status.state)) throw new Error("dispatch identity mismatch");
-        i.state = status.state; i.observation = status.observation ?? null; i.preview = null;
-        if (status.state === "completed") i.uncertainID = null;
-        else i.error = "Outcome uncertain. Check the exact stored receipt; do not retry.";
-      } catch (_e) {
-        if (this.intakeCurrent(context) && i.id === id) {
-          i.confirm = false; i.preview = null; i.state = "blocked";
-          i.error = armLaunched ? "Claim or dispatch outcome unknown. Refresh and check the retained intent; do not retry." : "Exact preview or context could not be rechecked. Nothing was claimed.";
-        }
-      } finally { if (this.intakeCurrent(context)) { i.working = false; cx.notify(); } }
-    });
-    cx.notify();
-  }
-
-  intakeAction(action, cx) {
-    const i = this.intake, id = i.id;
-    let context = i.context;
-    if (i.working || !this.intakeCurrent(context) || i.preview?.id !== id || i.preview?.state !== i.state) return;
-    if (action === "cancel" && !["prepared", "armed"].includes(i.state)) return;
-    if (action === "reconcile" && !["attempted", "completed"].includes(i.state)) return;
-    if (action === "retire" && !["cancelled", "completed"].includes(i.state)) return;
-    if (!["cancel", "reconcile", "retire"].includes(action)) return;
-    i.working = true; i.error = null;
-    cx.spawn(async (cx) => {
-      try {
-        if (!this.intakeCurrent(context) || i.id !== id || i.preview?.id !== id || i.preview?.state !== i.state) throw new Error("context changed");
-        const result = await exec("ocq-herdr", [`intake-${action}`, id], { on: null, timeout: 30000, current: () => this.intakeCurrent(context) && i.id === id });
-        if (result.code !== 0 || !this.intakeCurrent(context)) throw new Error("action unavailable");
-        const status = JSON.parse(result.stdout);
-        const expected = action === "cancel" ? ["cancelled"] : action === "retire" ? ["retired"] : ["attempted", "completed", "blocked"];
-        if (status.id !== id || !expected.includes(status.state)) throw new Error("identity mismatch");
-        if (action === "retire") {
-          // The retired envelope's scope must not constrain the next intent.
-          // Keep the selected-result authorization, but invalidate old callbacks.
-          context = Object.freeze({ ...context, submission: null, registration: null, generatedSubmission: null }); i.context = context;
-          i.state = "idle"; i.id = null; i.preview = null; i.uncertainID = null; i.observation = null;
-        }
-        else { i.state = status.state; i.preview.state = status.state; i.observation = status.observation ?? null; if (["completed", "cancelled"].includes(status.state)) i.uncertainID = null; }
-      } catch (_e) { if (this.intakeCurrent(context)) { i.state = "blocked"; i.preview = null; i.error = "Action outcome unavailable. Refresh the journal before proceeding."; } }
-      finally { if (this.intakeCurrent(context)) { i.working = false; cx.notify(); } }
-    });
-    cx.notify();
-  }
-
   targets() {
     return [...(this.headerTargets || []), ...(this.compatibilityTargets || []), ...(this.renderTargets || [])];
   }
@@ -1016,9 +327,10 @@ export default class OCQ extends View {
 
   key(e, cx) {
     if (e.modifiers.control || e.modifiers.alt || e.modifiers.platform) return;
+    const intake = this.intakeController, compose = this.composeController;
     if (this.intake.screen && !this.intake.authoritySuspended) {
-      if (e.key === "f6") { this.handle.focus(); this.intakeInputFocused = false; if (this.registrationForm) this.registrationForm.focused = false; if (this.submissionForm) this.submissionForm.focused = false; cx.stop_propagation(); cx.notify(); return; }
-      if (this.intakeInputFocused || (this.intake.entry === "form" && (this.intake.kind === "registration" ? this.registrationForm?.focused : this.submissionForm?.focused))) {
+      if (e.key === "f6") { this.handle.focus(); intake.intakeInputFocused = false; if (intake.registrationForm) intake.registrationForm.focused = false; if (intake.submissionForm) intake.submissionForm.focused = false; cx.stop_propagation(); cx.notify(); return; }
+      if (intake.intakeInputFocused || (this.intake.entry === "form" && (this.intake.kind === "registration" ? intake.registrationForm?.focused : intake.submissionForm?.focused))) {
         if (e.key === "escape") { this.handle.focus(); cx.stop_propagation(); }
         return;
       }
@@ -1028,15 +340,15 @@ export default class OCQ extends View {
         return;
       }
       if (e.key === "escape") i.screen = false;
-      else if (!e.is_held && e.key === "g" && i.entry === "form") { if (i.kind === "registration") this.buildRegistration(cx); else this.buildSubmission(cx); }
-      else if (!e.is_held && ["left", "right"].includes(e.key) && !i.preview && i.state === "idle" && i.entry === "form" && !i.working) (i.kind === "registration" ? this.registrationForm : this.submissionForm).advance(e.key === "right" ? 1 : -1, this, cx);
-      else if (!e.is_held && e.key === "r") this.refreshIntake(cx);
-      else if (!e.is_held && e.key === "p") this.prepareIntake(cx, i.preview?.draft ? i.preview : null);
-      else if (!e.is_held && e.key === "v") this.previewIntake(cx);
-      else if (!e.is_held && e.key === "c") this.intakeAction("cancel", cx);
-      else if (!e.is_held && e.key === "t") this.intakeAction("retire", cx);
-      else if (!e.is_held && e.key === "left" && i.preview) this.advanceIntakePage(-1, cx);
-      else if (!e.is_held && e.key === "right" && i.preview) this.advanceIntakePage(1, cx);
+      else if (!e.is_held && e.key === "g" && i.entry === "form") { if (i.kind === "registration") intake.buildRegistration(cx); else intake.buildSubmission(cx); }
+      else if (!e.is_held && ["left", "right"].includes(e.key) && !i.preview && i.state === "idle" && i.entry === "form" && !i.working) (i.kind === "registration" ? intake.registrationForm : intake.submissionForm).advance(e.key === "right" ? 1 : -1, intake, cx);
+      else if (!e.is_held && e.key === "r") intake.refreshIntake(cx);
+      else if (!e.is_held && e.key === "p") intake.prepareIntake(cx, i.preview?.draft ? i.preview : null);
+      else if (!e.is_held && e.key === "v") intake.previewIntake(cx);
+      else if (!e.is_held && e.key === "c") intake.intakeAction("cancel", cx);
+      else if (!e.is_held && e.key === "t") intake.intakeAction("retire", cx);
+      else if (!e.is_held && e.key === "left" && i.preview) intake.advanceIntakePage(-1, cx);
+      else if (!e.is_held && e.key === "right" && i.preview) intake.advanceIntakePage(1, cx);
       else return;
       cx.stop_propagation(); cx.notify(); return;
     }
@@ -1047,18 +359,18 @@ export default class OCQ extends View {
         if (e.key === "escape") { this.handle.focus(); cx.stop_propagation(); }
         return;
       }
-      if (e.key === "escape") { if (c.confirm) c.confirm = false; else this.closeCompose(cx); }
-      else if (!e.is_held && e.key === "r") this.refreshCompose(cx);
-      else if (!e.is_held && e.key === "p" && c.state === "idle") this.prepareCompose(cx);
-      else if (!e.is_held && e.key === "v") this.previewCompose(cx);
-      else if (!e.is_held && e.key === "c") this.composeAction("cancel", cx);
-      else if (!e.is_held && e.key === "k") this.composeAction("reconcile", cx);
-      else if (!e.is_held && e.key === "t") this.composeAction("retire", cx);
-      else if (!e.is_held && ["left", "right"].includes(e.key) && c.state === "idle" && c.form && !c.working) c.form.advance(e.key === "right" ? 1 : -1, this, cx);
-      else if (!e.is_held && e.key === "left" && c.preview && !c.confirm) this.advanceComposePage(-1, cx);
-      else if (!e.is_held && e.key === "right" && c.preview && !c.confirm) this.advanceComposePage(1, cx);
-      else if (!e.is_held && e.key === "s" && !c.confirm && this.canReviewCompose()) c.confirm = true;
-      else if (!e.is_held && e.key === "y" && c.confirm) this.composeAction("dispatch", cx);
+      if (e.key === "escape") { if (c.confirm) c.confirm = false; else compose.closeCompose(cx); }
+      else if (!e.is_held && e.key === "r") compose.refreshCompose(cx);
+      else if (!e.is_held && e.key === "p" && c.state === "idle") compose.prepareCompose(cx);
+      else if (!e.is_held && e.key === "v") compose.previewCompose(cx);
+      else if (!e.is_held && e.key === "c") compose.composeAction("cancel", cx);
+      else if (!e.is_held && e.key === "k") compose.composeAction("reconcile", cx);
+      else if (!e.is_held && e.key === "t") compose.composeAction("retire", cx);
+      else if (!e.is_held && ["left", "right"].includes(e.key) && c.state === "idle" && c.form && !c.working) c.form.advance(e.key === "right" ? 1 : -1, compose, cx);
+      else if (!e.is_held && e.key === "left" && c.preview && !c.confirm) compose.advanceComposePage(-1, cx);
+      else if (!e.is_held && e.key === "right" && c.preview && !c.confirm) compose.advanceComposePage(1, cx);
+      else if (!e.is_held && e.key === "s" && !c.confirm && compose.canReviewCompose()) c.confirm = true;
+      else if (!e.is_held && e.key === "y" && c.confirm) compose.composeAction("dispatch", cx);
       else return;
       cx.stop_propagation(); cx.notify(); return;
     }
@@ -1225,7 +537,7 @@ export default class OCQ extends View {
       cx.notify();
       // Neither a response nor a transport failure establishes the outcome.
       try {
-        await exec("ocq-herdr", ["mail-ack", context.project, context.id, context.sequence, mode], { on: context.machine, current: () => this.mailContextCurrent(context) });
+        await bridgeCommand(["mail-ack", context.project, context.id, context.sequence, mode], { on: context.machine, current: () => this.mailContextCurrent(context) });
       } catch (_e) { /* The one dispatched attempt may have committed. */ }
       await this.readBackMail(context, state, cx);
     });
@@ -1249,7 +561,7 @@ export default class OCQ extends View {
     state.status = "checking";
     cx.notify();
     try {
-      const result = await exec("ocq-herdr", ["mail", context.project, context.id, state.sequence], { on: context.machine });
+      const result = await bridgeCommand(["mail", context.project, context.id, state.sequence], { on: context.machine });
       if (!this.mailContextCurrent(context)) { state.status = "uncertain"; state.authoritySuspended = true; return; }
       if (result.code !== 0) throw new Error("read-back failed");
       const observed = JSON.parse(result.stdout), item = observed.message;
@@ -1480,7 +792,7 @@ export default class OCQ extends View {
     return v_flex().py(12).gap(8)
       .child(div().text_size(16).font_semibold().child("Start with a project"))
       .child(div().text_color(t.muted).child("Connect a server-side Main to follow its work, review and handoff here."))
-      .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Register project…", cx => this.openIntake(cx)).bg(t.accent).text_color(t.background)))
+      .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Register project…", cx => this.intakeController.openIntake(cx)).bg(t.accent).text_color(t.background)))
       .child(this.panelControl("ocq-setup-guide", this.setupGuide ? "Hide setup steps" : "Setup steps", cx => { this.setupGuide = !this.setupGuide; cx.notify(); }, t, this.renderTargets))
       .when(this.setupGuide, e => e.child(v_flex().gap(6).text_size(12).text_color(t.muted)
         .child(div().child(`On ${this.machine ?? "this computer"}, prepare Main for the canonical checkout, then review and start it. The project appears here after registration.`))
@@ -1499,6 +811,7 @@ export default class OCQ extends View {
   }
 
   renderContent(cx) {
+    const intake = this.intakeController, compose = this.composeController;
     const active = spaces().find((s) => s.active);
     const machine = active?.machine ?? null, folder = active?.folder ?? null;
     if ((active?.id ?? null) !== this.spaceID || machine !== this.machine || folder !== this.folder) {
@@ -1524,7 +837,7 @@ export default class OCQ extends View {
     if (this.worktreeCheck.screen) return this.worktreeCheck.render(this, cx, t, button);
     if (this.publication.screen) return this.publication.render(this, cx, t, button);
     if (this.intake.screen && !this.intake.authoritySuspended) {
-      const i = this.intake, local = this.intakeCurrent(i.context), preview = i.preview;
+      const i = this.intake, local = intake.intakeCurrent(i.context), preview = i.preview;
       const stateText = { loading: "Checking journal…", idle: "No retained intake.", prepared: "Prepared, not dispatched. Preview the retained request.", armed: "Already claimed. A delayed dispatch may still start; do not send again.", attempted: "Outcome uncertain. A missing receipt does not authorize retry.", completed: "Exact receipt was matched. The request remains retained.", cancelled: "Cancelled before attempt. The request remains retained.", blocked: "Journal unavailable or blocked. Do not prepare another request." };
       if (local && preview && i.confirm) {
         return v_flex().id("ocq-intake-confirmation").size_full().min_h(0).p(14).gap(8).bg(t.background).text_color(t.foreground)
@@ -1537,8 +850,8 @@ export default class OCQ extends View {
             .when(i.context.submission?.role === "review", (e) => e.child(div().child("Core checks the exact reviewer, supported OpenCode version, ordered read/glob/grep policy, deterministic prompt and target linkage at fresh intake and again before prompting. This UI does not substitute an agent, run a reviewer or authorize integration.")))
             .child(div().text_size(12).text_color(t.muted).child("Opening pages records navigation, not comprehension. The request is rechecked before a durable claim and one dispatch. Final confirmation requires a pointer press."))
             .when(i.working, (e) => e.child(div().child("Checking and claiming the retained request…")))
-            .when(!i.working && this.canConfirmIntake(), (e) => e.child(div().id("ocq-intake-confirm-once").px(8).py(8).rounded(5).text_color(t.foreground).hover((s) => s.bg(t.hover)).cursor_pointer()
-              .on_mouse_down("left", (_e, cx) => this.confirmIntake(cx)).child("Press to confirm once")))
+            .when(!i.working && intake.canConfirmIntake(), (e) => e.child(div().id("ocq-intake-confirm-once").px(8).py(8).rounded(5).text_color(t.foreground).hover((s) => s.bg(t.hover)).cursor_pointer()
+              .on_mouse_down("left", (_e, cx) => intake.confirmIntake(cx)).child("Press to confirm once")))
             .when(!i.working, (e) => e.child(button("ocq-intake-confirm-back", "Back to fields", (cx) => { i.confirm = false; cx.notify(); }))));
       }
       if (local && preview) {
@@ -1547,22 +860,22 @@ export default class OCQ extends View {
           .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
           .child(h_flex().flex_none().items_center().gap(8)
             .child(div().font_semibold().child(`${preview.draft ? "Draft" : preview.kind} · ${preview.view === "review" ? "field" : "raw"} ${i.page + 1}/${preview.pages.length}`))
-            .child(div().flex_1()).child(button("ocq-intake-review-back", preview.draft ? "Edit form" : "Back", (cx) => { if (preview.draft) this.intakeEntry("form", cx); else { i.preview = null; cx.notify(); } })))
+            .child(div().flex_1()).child(button("ocq-intake-review-back", preview.draft ? "Edit form" : "Back", (cx) => { if (preview.draft) intake.intakeEntry("form", cx); else { i.preview = null; cx.notify(); } })))
           .child(v_flex().id(`ocq-intake-page-${preview.view}-${i.page}`).flex_1().min_h(0).overflow_y_scroll().gap(8)
             .when(Boolean(preview.draft), (e) => e.child(div().text_size(12).child(`Generated by the core from this form; not retained or ${preview.kind === "submission" ? "submitted" : "registered"}. P prepares only after all fields have been opened. The retained request then needs its own review and confirmation.`)))
             .child(div().text_size(12).text_color(t.muted).child(preview.view === "raw" ? "Exact JSON string: join lines and pages to recover the retained text." : "Scroll to see the entire field. Controls and invisible characters are escaped. Opening pages is not confirmation."))
             .child(div().font_semibold().child(page.title + (page.parts > 1 ? ` · ${page.part}/${page.parts}` : "")))
             .child(div().child(page.text))
-            .when(preview.draft && !i.working && preview.view === "review" && i.page === preview.review.length - 1 && preview.openedThrough === preview.review.length - 1, (e) => e.child(button("ocq-intake-draft-prepare", preview.kind === "submission" ? "Prepare these generated bytes (no submission yet)" : "Prepare these generated bytes (no registration yet)", (cx) => this.prepareIntake(cx, preview))))
+            .when(preview.draft && !i.working && preview.view === "review" && i.page === preview.review.length - 1 && preview.openedThrough === preview.review.length - 1, (e) => e.child(button("ocq-intake-draft-prepare", preview.kind === "submission" ? "Prepare these generated bytes (no submission yet)" : "Prepare these generated bytes (no registration yet)", (cx) => intake.prepareIntake(cx, preview))))
             .when(Boolean(i.error), (e) => e.child(div().text_color(t.ansi1).child(i.error)))
             .when(Boolean(i.observation), (e) => e.child(div().text_size(12).text_color(t.muted).child(`Last observation: ${i.observation}`)))
-            .when(this.canConfirmIntake(), (e) => e.child(button("ocq-intake-review-confirm", "Review confirmation…", (cx) => { if (this.canConfirmIntake()) i.confirm = true; cx.notify(); })))
-            .when(!i.working && preview.id === i.id && preview.state === i.state && ["prepared", "armed"].includes(i.state), (e) => e.child(button("ocq-intake-cancel", "Cancel before attempt", (cx) => this.intakeAction("cancel", cx))))
-            .when(!i.working && preview.id === i.id && preview.state === i.state && ["attempted", "completed"].includes(i.state), (e) => e.child(button("ocq-intake-reconcile", "Check exact stored receipt", (cx) => this.intakeAction("reconcile", cx))))
-            .when(!i.working && preview.id === i.id && preview.state === i.state && ["cancelled", "completed"].includes(i.state), (e) => e.child(button("ocq-intake-retire", "Retire retained intent", (cx) => this.intakeAction("retire", cx)))))
+            .when(intake.canConfirmIntake(), (e) => e.child(button("ocq-intake-review-confirm", "Review confirmation…", (cx) => { if (intake.canConfirmIntake()) i.confirm = true; cx.notify(); })))
+            .when(!i.working && preview.id === i.id && preview.state === i.state && ["prepared", "armed"].includes(i.state), (e) => e.child(button("ocq-intake-cancel", "Cancel before attempt", (cx) => intake.intakeAction("cancel", cx))))
+            .when(!i.working && preview.id === i.id && preview.state === i.state && ["attempted", "completed"].includes(i.state), (e) => e.child(button("ocq-intake-reconcile", "Check exact stored receipt", (cx) => intake.intakeAction("reconcile", cx))))
+            .when(!i.working && preview.id === i.id && preview.state === i.state && ["cancelled", "completed"].includes(i.state), (e) => e.child(button("ocq-intake-retire", "Retire retained intent", (cx) => intake.intakeAction("retire", cx)))))
           .child(h_flex().flex_none().gap(8)
-            .child(button("ocq-intake-previous", "Previous", (cx) => this.advanceIntakePage(-1, cx)))
-            .child(button("ocq-intake-next", "Next", (cx) => this.advanceIntakePage(1, cx)))
+            .child(button("ocq-intake-previous", "Previous", (cx) => intake.advanceIntakePage(-1, cx)))
+            .child(button("ocq-intake-next", "Next", (cx) => intake.advanceIntakePage(1, cx)))
             .child(div().flex_1())
             .when(Boolean(preview.review), (e) => e.child(button("ocq-intake-switch-view", preview.view === "review" ? "Exact raw" : "Fields", (cx) => {
               if (preview.view === "review") { preview.view = "raw"; preview.pages = preview.rawPages; }
@@ -1577,25 +890,25 @@ export default class OCQ extends View {
           .child(div().flex_1()).child(button("ocq-intake-close", "Close", (cx) => { i.screen = false; cx.notify(); })))
         .child(div().text_color(local ? t.muted : t.blocked).child(local ? `This computer · ${i.context.folder} · ${i.context.newProject ? "new project registration only" : (i.context.project || "no selected project")}` : "Local context unavailable or changed. Remote intake is unavailable."))
         .when(local && Boolean(i.context.reviewTarget), (e) => e.child(div().text_size(12).child(`Review submission only · binding revision ${i.context.revision}\nExact association: ${i.context.reviewTarget.association}\nExact target job: ${i.context.reviewTarget.job}\nExact result SHA-256: ${i.context.reviewTarget.digest}\nTarget source/verification: ${i.context.reviewTarget.source} / ${i.context.reviewTarget.verification}\nGuided form generates the core deterministic prompt from this stored result. Advanced raw must match the same exact target. Imported claims are not execution or test proof.`)))
-        .when(local && !i.working, (e) => e.child(button("ocq-intake-context", i.context.newProject ? "Use selected project context" : "Register a new project…", (cx) => this.openIntake(cx, !i.context.newProject))))
+        .when(local && !i.working, (e) => e.child(button("ocq-intake-context", i.context.newProject ? "Use selected project context" : "Register a new project…", (cx) => intake.openIntake(cx, !i.context.newProject))))
         .when(local, (e) => e.child(div().child(stateText[i.state] || "Journal status unavailable.")))
         .when(Boolean(i.id), (e) => e.child(div().text_size(12).text_color(t.muted).child(`Intent: ${i.id}`)))
         .when(Boolean(i.error), (e) => e.child(div().text_color(t.ansi1).child(i.error)))
-        .when(local && !i.working, (e) => e.child(button("ocq-intake-refresh", "Refresh journal", (cx) => this.refreshIntake(cx))))
+        .when(local && !i.working, (e) => e.child(button("ocq-intake-refresh", "Refresh journal", (cx) => intake.refreshIntake(cx))))
         .when(local && i.state === "idle", (e) => e.child(v_flex().gap(6)
           .child(h_flex().gap(8)
             .when(!i.context.reviewTarget, (e) => e.child(button("ocq-intake-registration", i.kind === "registration" ? "Registration ✓" : "Registration", (cx) => { i.kind = "registration"; cx.notify(); })))
             .when(!i.context.newProject, (e) => e.child(button("ocq-intake-submission", i.kind === "submission" ? "Submission ✓" : "Submission", (cx) => { i.kind = "submission"; cx.notify(); }))))
           .child(h_flex().gap(8)
-            .when(!i.working, (e) => e.child(button("ocq-intake-guided", i.entry === "form" ? "Guided form ✓" : "Guided form", (cx) => this.intakeEntry("form", cx))))
-            .when(!i.working, (e) => e.child(button("ocq-intake-advanced", i.entry === "raw" ? "Advanced raw ✓" : "Advanced raw", (cx) => this.intakeEntry("raw", cx)))))
-          .when(i.kind === "registration" && i.entry === "form", (e) => e.child(this.registrationForm.render(this, cx, t, button)))
-          .when(i.kind === "submission" && i.entry === "form", (e) => e.child(this.submissionForm.render(this, cx, t, button)))
+            .when(!i.working, (e) => e.child(button("ocq-intake-guided", i.entry === "form" ? "Guided form ✓" : "Guided form", (cx) => intake.intakeEntry("form", cx))))
+            .when(!i.working, (e) => e.child(button("ocq-intake-advanced", i.entry === "raw" ? "Advanced raw ✓" : "Advanced raw", (cx) => intake.intakeEntry("raw", cx)))))
+          .when(i.kind === "registration" && i.entry === "form", (e) => e.child(intake.registrationForm.render(intake, cx, t, button)))
+          .when(i.kind === "submission" && i.entry === "form", (e) => e.child(intake.submissionForm.render(intake, cx, t, button)))
           .when(i.entry === "raw", (e) => e.child(v_flex().gap(6)
             .child(div().child("Advanced raw import: exact original JSON bytes are retained, never rebuilt by the form. Typing does not prepare or dispatch."))
-            .child(Textarea.new(this.intakeInput).id("ocq-intake-input").accessibility_label("Exact intake JSON envelope").h(150).px(8).border_1().border_color(t.border).text_color(t.foreground))
-            .when(!i.working, (e) => e.child(button("ocq-intake-prepare", "Prepare retained request", (cx) => this.prepareIntake(cx))))))))
-        .when(local && !i.working && Boolean(i.id), (e) => e.child(button("ocq-intake-preview", "Preview exact retained request", (cx) => this.previewIntake(cx))))
+            .child(Textarea.new(intake.intakeInput).id("ocq-intake-input").accessibility_label("Exact intake JSON envelope").h(150).px(8).border_1().border_color(t.border).text_color(t.foreground))
+            .when(!i.working, (e) => e.child(button("ocq-intake-prepare", "Prepare retained request", (cx) => intake.prepareIntake(cx))))))))
+        .when(local && !i.working && Boolean(i.id), (e) => e.child(button("ocq-intake-preview", "Preview exact retained request", (cx) => intake.previewIntake(cx))))
         .child(div().text_size(12).text_color(t.muted).child("R refresh · P prepare · V preview · C cancel · T retire · ←/→ pages · Esc close"));
     }
     if (this.compose.screen && !this.compose.authoritySuspended) {
@@ -1605,33 +918,33 @@ export default class OCQ extends View {
       return v_flex().id("ocq-compose").size_full().min_h(0).overflow_y_scroll().p(14).gap(8).bg(t.background).text_color(t.foreground)
         .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
         .child(h_flex().items_center().gap(8).child(div().font_semibold().child("Compose · local only")).child(div().flex_1())
-          .child(button("ocq-compose-close", "Close", (cx) => this.closeCompose(cx))))
+          .child(button("ocq-compose-close", "Close", (cx) => compose.closeCompose(cx))))
         .child(div().text_color(local ? t.muted : t.blocked).child(local ? "This computer only · journal survives panel copies" : "Remote compose unavailable. Switch to a local space; nothing will be redirected."))
         .when(local, (e) => e.child(div().text_color(["blocked", "uncertain", "armed", "dispatch_intent"].includes(c.state) ? t.blocked : t.foreground).child(stateText[c.state] || "Compose state unavailable.")))
         .when(Boolean(c.error), (e) => e.child(div().text_color(t.ansi1).child(c.error)))
         .when(Boolean(c.observation), (e) => e.child(div().text_size(12).text_color(t.muted).child(`Last observation: ${c.observation}`)))
         .when(Boolean(c.id), (e) => e.child(div().text_size(12).text_color(t.muted).child(`Intent: ${c.id}`)))
-        .when(local && !c.working, (e) => e.child(button("ocq-compose-refresh", "Refresh journal status", (cx) => this.refreshCompose(cx))))
+        .when(local && !c.working, (e) => e.child(button("ocq-compose-refresh", "Refresh journal status", (cx) => compose.refreshCompose(cx))))
         .when(local && c.working, (e) => e.child(div().child("Checking the exact local context/journal…")))
-        .when(local && !c.working && c.state === "idle" && Boolean(c.context && c.form && c.options), (e) => e.child(c.form.render(this, cx, t, button, c.options)))
+        .when(local && !c.working && c.state === "idle" && Boolean(c.context && c.form && c.options), (e) => e.child(c.form.render(compose, cx, t, button, c.options)))
         .when(local && c.state === "idle" && !c.context, (e) => e.child(div().text_color(t.muted).child("Close and choose a stored owner lane to compose lane.blocked or lane.assigned mail.")))
-        .when(local && !c.working && !request && (["prepared", "armed"].includes(c.state) || (c.state === "uncertain" && ["prepared", "armed"].includes(c.recoveryState))), (e) => e.child(button("ocq-compose-preview", "Preview exact retained message", (cx) => this.previewCompose(cx))))
+        .when(local && !c.working && !request && (["prepared", "armed"].includes(c.state) || (c.state === "uncertain" && ["prepared", "armed"].includes(c.recoveryState))), (e) => e.child(button("ocq-compose-preview", "Preview exact retained message", (cx) => compose.previewCompose(cx))))
         .when(Boolean(local && request), (e) => e.child(v_flex().flex_1().min_h(0).gap(6)
           .child(div().font_semibold().child(`Retained preview · ${c.page + 1}/${previewPages.length}`))
           .child(div().text_size(12).text_color(t.muted).child("Quoted fields escape controls and invisible characters; continuations preserve their order."))
           .child(div().flex_1().min_h(0).overflow_y_scroll().child(previewPages[c.page]))
           .when(!c.confirm, (e) => e.child(h_flex().gap(8)
-            .child(button("ocq-compose-previous", "Previous", (cx) => this.advanceComposePage(-1, cx)))
-            .child(button("ocq-compose-next", "Next", (cx) => this.advanceComposePage(1, cx)))))
+            .child(button("ocq-compose-previous", "Previous", (cx) => compose.advanceComposePage(-1, cx)))
+            .child(button("ocq-compose-next", "Next", (cx) => compose.advanceComposePage(1, cx)))))
           .when(!c.working && !c.confirm, (e) => e.child(h_flex().gap(8)
-            .child(button("ocq-compose-cancel", "Cancel before attempt", (cx) => this.composeAction("cancel", cx)))
-            .when(this.canReviewCompose(), (e) => e.child(button("ocq-compose-review", "Review send…", (cx) => { if (this.canReviewCompose()) c.confirm = true; cx.notify(); })))))
+            .child(button("ocq-compose-cancel", "Cancel before attempt", (cx) => compose.composeAction("cancel", cx)))
+            .when(compose.canReviewCompose(), (e) => e.child(button("ocq-compose-review", "Review send…", (cx) => { if (compose.canReviewCompose()) c.confirm = true; cx.notify(); })))))
           .when(!c.working && c.state === "prepared" && c.preview?.state === "prepared" && c.confirm, (e) => e.child(v_flex().gap(6)
             .child(div().text_color(t.blocked).child("Send this exact retained message once? Every field was opened sequentially; opening is not proof of comprehension. Exact fields, links and the reviewed lane default are rechecked before the claim. A lost response remains uncertain."))
             .child(h_flex().gap(8).child(button("ocq-compose-back", "Back", (cx) => { c.confirm = false; cx.notify(); }))
-              .child(button("ocq-compose-confirm", "Confirm send once", (cx) => this.composeAction("dispatch", cx))))))))
-        .when(local && !c.working && ["dispatch_intent", "uncertain", "completed"].includes(c.state), (e) => e.child(button("ocq-compose-reconcile", "Check exact stored receipt", (cx) => this.composeAction("reconcile", cx))))
-        .when(local && !c.working && ["completed", "cancelled"].includes(c.state), (e) => e.child(button("ocq-compose-retire", "Retire retained intent", (cx) => this.composeAction("retire", cx))))
+              .child(button("ocq-compose-confirm", "Confirm send once", (cx) => compose.composeAction("dispatch", cx))))))))
+        .when(local && !c.working && ["dispatch_intent", "uncertain", "completed"].includes(c.state), (e) => e.child(button("ocq-compose-reconcile", "Check exact stored receipt", (cx) => compose.composeAction("reconcile", cx))))
+        .when(local && !c.working && ["completed", "cancelled"].includes(c.state), (e) => e.child(button("ocq-compose-retire", "Retire retained intent", (cx) => compose.composeAction("retire", cx))))
         .when(local, (e) => e.child(div().text_size(12).text_color(t.muted).child("←/→ preview pages · R refresh · P prepare · V preview · C cancel · S review · Y confirm · K check · T retire")));
     }
     if (this.mailConfirmation && this.mailContextCurrent(this.mailConfirmation)) {
@@ -1718,10 +1031,10 @@ export default class OCQ extends View {
            .when(this.workspaceView === "projects" && this.projectView === "operator", e => e.child(this.workOperator.render(cx, t, button)))
            .when(this.workspaceView === "projects" && this.projectView === "binding", e => e
            .child(button("ocq-project-overview", "View project and binding", (cx) => this.openTarget("summary", undefined, cx)))
-           .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Project intake / binding…", cx => this.openIntake(cx))))
+           .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Project intake / binding…", cx => intake.openIntake(cx))))
            .when(Boolean(project?.current_binding?.handoff_manifest_digest), (e) => e.child(button("ocq-handoff", "Read handoff", (cx) => this.openTarget("manifest", project.current_binding.handoff_manifest_digest, cx)))))
             .when(Boolean(project) && this.workspaceView === "projects" && this.projectView === "work", e => e
-          .when(this.composeLocal(), (e) => e.child(button("ocq-implementation-submit", "Submit implementation job…", (cx) => this.openImplementationIntake(cx))))
+          .when(this.composeLocal(), (e) => e.child(button("ocq-implementation-submit", "Submit implementation job…", (cx) => intake.openImplementationIntake(cx))))
           .when(Boolean(project?.current_binding?.handoff_manifest_digest), (e) => e.child(button("ocq-handoff", "Read handoff", (cx) => this.openTarget("manifest", project.current_binding.handoff_manifest_digest, cx))))
           .child(div().pt(8).font_semibold().child("Work"))
           .child(div().text_size(12).text_color(t.muted).child("Request observations may be stale; their observation time is not recorded. Inspect a job for its recorded session and location."))
@@ -1758,15 +1071,15 @@ export default class OCQ extends View {
                 .when(Boolean(this.detail?.brief_digest), (e) => e.child(button(`ocq-project-job-brief-${j.job_id}`, "Read job brief", cx => this.openTarget("manifest", this.detail.brief_digest, cx))))
                 .children((this.detail?.associations ?? []).map((a) => button(`ocq-project-association-${a.id}`, `Read ${a.kind} · ${a.verification} · ${a.manifest_digest}`, cx => this.openTarget("manifest", a.manifest_digest, cx))))
                 .children((this.detail?.associations ?? []).filter((a) => a.kind === "result").map((a) => button(`ocq-worktree-associated-${a.id}`, `Verify owned worktree… · ${a.manifest_digest}`, cx => this.worktreeCheck.open(this, a, this.detail?.job?.agent?.worktree, cx))))
-                .when(this.composeLocal(), (e) => e.children((this.detail?.associations ?? []).filter((a) => a.kind === "result" && a.availability === "available").map((a) => button(`ocq-review-submit-${a.id}`, `Submit review job for this result… · ${a.manifest_digest}`, (cx) => this.openReviewIntake(a, cx))))))))))
+                .when(this.composeLocal(), (e) => e.children((this.detail?.associations ?? []).filter((a) => a.kind === "result" && a.availability === "available").map((a) => button(`ocq-review-submit-${a.id}`, `Submit review job for this result… · ${a.manifest_digest}`, (cx) => intake.openReviewIntake(a, cx))))))))))
            )
            .when(this.workspaceView === "projects" && this.projectView === "lanes", e => e
-           .child(button("ocq-compose-open", "Compose / recover retained message…", cx => this.openCompose(null, cx)))
+           .child(button("ocq-compose-open", "Compose / recover retained message…", cx => compose.openCompose(null, cx)))
            .child(div().pt(8).font_semibold().child("Lanes"))
            .children(this.lanePages.filter(page => page.error).map(page => this.readFault(page.error, `lanes page ${page.start}`, t)))
            .when(Boolean(this.lanePages[0].readAt) && !this.lanePages[0].error && !(this.lanes || []).length, (e) => e.child(div().text_color(t.dim).child("No lanes.")))
            .children((this.lanes || []).map((lane) => button(`ocq-lane-${lane.lane_id}`, `${lane.role} · ${lane.job_state} · ${lane.lane_id}`, (cx) => this.openTarget("lane", lane.lane_id, cx))))
-           .when(this.composeLocal() && this.compose.state === "idle", (e) => e.children((this.lanes || []).map((lane) => button(`ocq-compose-lane-${lane.lane_id}`, `Compose update · ${lane.lane_id}`, (cx) => this.openCompose(lane, cx)))))
+           .when(this.composeLocal() && this.compose.state === "idle", (e) => e.children((this.lanes || []).map((lane) => button(`ocq-compose-lane-${lane.lane_id}`, `Compose update · ${lane.lane_id}`, (cx) => compose.openCompose(lane, cx)))))
            .when(Boolean(this.lanePages[this.lanePages.length - 1].hasMore), e => e.child(button("ocq-project-lanes-more", "Load next 20 lanes", cx => { const last = this.lanePages[this.lanePages.length - 1]; if (!this.lanePages.some(page => page.start === last.next)) this.lanePages.push({ start: last.next }); cx.notify(); })))
            )
            .when(this.workspaceView === "projects" && this.projectView === "results", e => e
@@ -1780,7 +1093,7 @@ export default class OCQ extends View {
             .child(button(`ocq-result-${r.event.id}`, `${r.role} · historical ${r.event.outcome} · current ${r.current_job.state} · ${r.job_id}`, (cx) => this.openTarget("result", r.event.id, cx)))
             .children((r.result_summary?.associations ?? []).map((a) => button(`ocq-result-manifest-${a.id}`, `Read ${a.kind} · ${a.verification}`, (cx) => this.openTarget("manifest", a.manifest_digest, cx))))
             .children((r.result_summary?.associations ?? []).filter((a) => a.kind === "result").map((a) => button(`ocq-result-check-${a.id}`, `Verify owned worktree… · ${a.manifest_digest}`, (cx) => this.worktreeCheck.open(this, a, r.current_job.agent?.worktree, cx))))
-            .when(this.composeLocal(), (e) => e.children((r.result_summary?.associations ?? []).filter((a) => a.kind === "result" && a.availability === "available").map((a) => button(`ocq-result-review-${a.id}`, `Submit review job for this result… · ${a.manifest_digest}`, (cx) => this.openReviewIntake(a, cx)))))))
+            .when(this.composeLocal(), (e) => e.children((r.result_summary?.associations ?? []).filter((a) => a.kind === "result" && a.availability === "available").map((a) => button(`ocq-result-review-${a.id}`, `Submit review job for this result… · ${a.manifest_digest}`, (cx) => intake.openReviewIntake(a, cx)))))))
           .when(this.collections.results.hasMore, (e) => e.child(button("ocq-results-more", "Load more results", (cx) => this.loadCollection("results", false, cx))))
             )
            .when(this.workspaceView === "inbox", e => e

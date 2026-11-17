@@ -1,7 +1,7 @@
 import { div } from "gpui-kit";
 import { v_flex } from "gpui-base";
 import { spaces } from "herdr";
-import { exec } from "./compatibility.js";
+import { bridgeCommand } from "./compatibility.js";
 
 // Ephemeral point-in-time observations, never a stored dimension or an
 // authorization. Opening/refreshing a result does not inspect the filesystem.
@@ -23,7 +23,7 @@ export class WorktreeVerification {
     cx.spawn(async (cx) => {
       try {
         if (!this.current(owner, t, generation)) return;
-        const response = await exec("ocq-herdr", ["verify-worktree", t.project, t.job, t.association, t.digest, t.worktree], { on: null, timeout: 120000 });
+        const response = await bridgeCommand(["verify-worktree", t.project, t.job, t.association, t.digest, t.worktree], { on: null });
         if (!this.current(owner, t, generation)) return;
         if (response.code !== 0) throw new Error("Check unavailable; match unknown. The existing queue could not be read. No fallback or retry was performed.");
         const r = JSON.parse(response.stdout);

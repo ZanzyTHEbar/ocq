@@ -1,6 +1,6 @@
 import { div } from "gpui-kit";
 import { v_flex, Textarea } from "gpui-base";
-import { exec, compatibility } from "./compatibility.js";
+import { bridgeCommand, compatibility } from "./compatibility.js";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
 import { composeDecode } from "./private-frames.js";
@@ -29,7 +29,7 @@ export class CommandResolution {
     return out;
   }
   async call(action, t, digest) {
-    const r = await exec("ocq-herdr", [`command-resolve-${action}`, ...this.args(t), ...(digest ? [digest] : [])], { on: null, current: () => this.boundCurrent?.() && this.t === t });
+    const r = await bridgeCommand([`command-resolve-${action}`, ...this.args(t), ...(digest ? [digest] : [])], { on: null, current: () => this.boundCurrent?.() && this.t === t });
     if (r.code !== 0) throw new Error("Resolution journal unavailable");
     return this.validate(JSON.parse(r.stdout), t);
   }

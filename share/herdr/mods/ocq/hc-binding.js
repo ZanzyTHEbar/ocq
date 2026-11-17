@@ -1,7 +1,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { createHash } from "crypto";
-import { compatibility, exec } from "./compatibility.js";
+import { compatibility, bridgeCommand } from "./compatibility.js";
 
 const hex = s => typeof s === "string" && /^[0-9a-f]{64}$/.test(s);
 const fields = ["protocol", "socket", "device", "inode", "uid", "pid", "start_ticks", "boot_id", "host", "core_id", "space", "folder", "queue_identity"];
@@ -26,7 +26,7 @@ export class PrivateHCBinding {
     this.approved = null; this.review = null; this.working = true; this.error = null;
     cx.spawn(async cx => {
       try {
-        const r = await exec("ocq-herdr", ["hc-binding"], { on: null });
+        const r = await bridgeCommand(["hc-binding"], { on: null });
         if (context !== this.context()) return;
         if (r.code !== 0 || r.stdout.length > 16384) throw Error("No verified private HC binding at this endpoint.");
         const value = JSON.parse(r.stdout), b = value.binding, scope = this.host.updates.scope;

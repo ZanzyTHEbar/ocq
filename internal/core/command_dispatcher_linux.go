@@ -719,25 +719,7 @@ func RecordCommandDispatcherNativeReturn(ctx context.Context, dir string, t Comm
 func dispatcherAcquireOnEvents(ctx context.Context, j *composeJournal, events *ObservationEvents, timeout time.Duration) error {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
-	for {
-		err := j.acquire()
-		if err == nil {
-			return nil
-		}
-		dispatcherUnlock(j)
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return errors.New("dispatcher journal lock unavailable; no operation attempted")
-		case err := <-events.Errors:
-			return err
-		case <-events.Changes:
-		}
-	}
+	return acquireJournalOnEvents(ctx, j, events, deadline.C, false, "dispatcher journal lock unavailable; no operation attempted")
 }
 
 // Dedicated visible foreground program, never an exec child or daemon. It does

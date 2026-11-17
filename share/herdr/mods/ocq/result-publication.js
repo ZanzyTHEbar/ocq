@@ -1,7 +1,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { spaces } from "herdr";
-import { exec, compatibility } from "./compatibility.js";
+import { bridgeCommand, compatibility } from "./compatibility.js";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
 import { composeDecode } from "./private-frames.js";
@@ -80,7 +80,7 @@ export class ResultPublication {
   async call(action, t, digest, payload) {
     const capture = this.context?.capture, captureID = this.captureID, pointer = capture ? captureID : digest;
     const context = this.context, status = this.status;
-    const r = await exec("ocq-herdr", [`${capture ? "capture" : "result-publish"}-${action}`, ...this.args(t), ...(action !== "list" && pointer ? [pointer] : []), ...(payload ? [payload] : [])], { on: null, timeout: 30000, current: () => this.boundCurrent?.() && this.context === context && this.status === status });
+    const r = await bridgeCommand([`${capture ? "capture" : "result-publish"}-${action}`, ...this.args(t), ...(action !== "list" && pointer ? [pointer] : []), ...(payload ? [payload] : [])], { on: null, current: () => this.boundCurrent?.() && this.context === context && this.status === status });
     if (r.code !== 0) throw new Error("Publication command unavailable");
     const out = JSON.parse(r.stdout);
     if (payload && out.payload_sha256 !== payload) throw new Error("Claim payload mismatch");
@@ -93,7 +93,7 @@ export class ResultPublication {
     cx.spawn(async (cx) => {
       try {
         if (!this.current(owner, c)) return;
-        const r = await exec("ocq-herdr", [c.capture ? "capture-context" : "result-publish-context", c.space, c.project, c.job], { on: null });
+        const r = await bridgeCommand([c.capture ? "capture-context" : "result-publish-context", c.space, c.project, c.job], { on: null });
         if (!this.current(owner, c)) return;
         if (r.code !== 0) throw new Error("Context unavailable");
         const scope = JSON.parse(r.stdout), t = scope.target;

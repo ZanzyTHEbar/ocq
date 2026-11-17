@@ -1,7 +1,7 @@
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, TextareaState } from "gpui-base";
 import { spaces } from "herdr";
-import { exec, enabledButton } from "./compatibility.js";
+import { bridgeCommand, enabledButton } from "./compatibility.js";
 import { Buffer } from "buffer";
 import { QueuedCancellation } from "./queued-cancel.js";
 import { CommandResolution } from "./command-resolution.js";
@@ -297,7 +297,7 @@ export class QueueInspection {
   ackArgs(a) { const s = a.scope; return [s.space_id, s.queue_identity, s.event_id, s.job_id, s.sequence]; }
 
   async ackCall(a, action, id) {
-    const result = await exec("ocq-herdr", [`notification-ack-${action}`, ...this.ackArgs(a), ...(id ? [id] : [])], { on: null, current: () => a.current?.() });
+    const result = await bridgeCommand([`notification-ack-${action}`, ...this.ackArgs(a), ...(id ? [id] : [])], { on: null, current: () => a.current?.() });
     if (result.code !== 0) throw new Error("Acknowledgement journal or exact event unavailable");
     const status = JSON.parse(result.stdout), observation = status.observation, s = a.scope;
     if (!this.ackSameScope(status.scope, s) || !["none", "prepared", "armed", "uncertain", "observed", "blocked"].includes(status.state)) throw new Error("Acknowledgement context mismatch");

@@ -124,6 +124,15 @@ func proxy(root string) {
 func install(root, source string) {
 	dir := filepath.Join(root, "apphome", "mods", "ocq")
 	must(os.MkdirAll(dir, 0700))
+	// Installed-copy scheduling hooks at the current selected-socket boundary,
+	// not the retired JS byte-stream authentication/framing implementation.
+	transferHooks := map[string][2]string{
+		"compose-controller.js": {"current = compatibility.transfer(current);", "    const value = await compatibility.exchange("},
+		"intake-controller.js": {"const current = compatibility.transfer(() => this.intakeCurrent(context));", "    const value = await compatibility.exchange("},
+		"command-submission.js": {"const current = compatibility.transfer(() => this.current(owner));", "    const out = await compatibility.exchange("},
+		"result-publication.js": {"const current = compatibility.transfer(() => this.current(owner, c));", "    const out = await compatibility.exchange("},
+		"command-resolution.js": {"const current = compatibility.transfer(() => this.current(owner, t));", "    const out = await compatibility.exchange("},
+	}
 	files, e := os.ReadDir(source)
 	must(e)
 	for _, f := range files {
@@ -133,9 +142,10 @@ func install(root, source string) {
 		b, e := os.ReadFile(filepath.Join(source, f.Name()))
 		must(e)
 		s := string(b)
-		if (exists(filepath.Join(root, "corrections-only")) || exists(filepath.Join(root, "peer-transfer"))) && strings.Contains(s, `if (!current()) throw new Error("Transfer authorization changed");`) {
-			s = strings.ReplaceAll(s, "let socket = null;", "let socket = null; let transferStep = 0;")
-			s = strings.ReplaceAll(s, `if (!current()) throw new Error("Transfer authorization changed");`, `await transferCheckpoint("`+f.Name()+`", ++transferStep); if (!current()) throw new Error("Transfer authorization changed");`)
+		if hooks, ok := transferHooks[f.Name()]; ok && (exists(filepath.Join(root, "corrections-only")) || exists(filepath.Join(root, "peer-transfer"))) {
+			check(strings.Count(s, hooks[0]) == 1 && strings.Count(s, hooks[1]) == 1, "selected-socket transfer boundary changed: "+f.Name())
+			s = strings.Replace(s, hooks[0], hooks[0]+` await transferCheckpoint("`+f.Name()+`", 1);`, 1)
+			s = strings.Replace(s, hooks[1], `    await transferCheckpoint("`+f.Name()+`", 2);`+"\n"+hooks[1], 1)
 			s = `import { transferCheckpoint } from "./native-driver.js";` + "\n" + s
 		}
 		if f.Name() == "command-dispatcher.js" && exists(filepath.Join(root, "peer-transfer")) {

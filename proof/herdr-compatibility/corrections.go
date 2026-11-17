@@ -32,7 +32,7 @@ func nativeCorrections(root, app string, origin map[string]string, command func(
 	zero := 0
 	registration, e := core.BuildProjectRegistrationDraft(core.ProjectRegistrationDraft{Mode: "new", Key: "private-transfer-registration", ProjectID: "proj-correction", Label: "Fixture", ExpectedRevision: &zero, Repo: root, CommitAnchor: strings.Repeat("a", 40), ElephantSessionID: "ses_fixture", ExpectedOpenCodeProjectID: "fixture", ExpectedOpenCodeDirectory: root, AuthRef: "fixture-not-used", Intent: "PRIVATE_TRANSFER_MUST_NOT_BE_WRITTEN", Decisions: []string{}, Risks: []string{}})
 	must(e)
-	for _, test := range []struct{ family, file, step string }{{"compose", "main.js", "2"}, {"intake", "main.js", "2"}, {"command", "command-submission.js", "2"}, {"command", "command-submission.js", "4"}} {
+	for _, test := range []struct{ family, file, step string }{{"compose", "compose-controller.js", "1"}, {"intake", "intake-controller.js", "1"}, {"command", "command-submission.js", "1"}, {"command", "command-submission.js", "2"}} {
 		for _, name := range []string{"transfer.waiting", "transfer.release", "transfer-done.json"} {
 			mustRemove(filepath.Join(root, name))
 		}
@@ -109,7 +109,7 @@ func nativeCorrections(root, app string, origin map[string]string, command func(
 	must(e)
 	check(len(jobs) == 1, "correction flow admitted/duplicated a job")
 	remainingTransfers(root, origin, command, recheck, q)
-	save(filepath.Join(root, "corrections-result.json"), map[string]any{"agent_mode": "guided_import_guided_import_prepared_armed_cancelled", "jobs": len(jobs), "private_transfers": "invalidated_before_auth_and_between_framing_writes", "selected_machine": "NOT_RUN_separate_gap"})
+	save(filepath.Join(root, "corrections-result.json"), map[string]any{"agent_mode": "guided_import_guided_import_prepared_armed_cancelled", "jobs": len(jobs), "private_transfers": "invalidated_after_scope_capture_and_before_selected_socket_command", "selected_machine": "NOT_RUN_separate_gap"})
 	run(app, "do", "space.close", "--id", origin["space"], "--confirmed", "true")
 	fmt.Println("PASS focused native corrections: real receiver transfers refused after invalidation/new handshake; replaced agent form prepare/arm/cancel, zero admissions; selected-machine gap remains")
 }

@@ -76,7 +76,7 @@ func remainingTransfers(root string, origin map[string]string, command func(stri
 	}
 	baseline := string(encoded(counts()))
 	for _, family := range []string{"publication", "capture", "resolution"} {
-		for _, step := range []string{"2", "4"} {
+		for _, step := range []string{"1", "2"} {
 			for _, name := range []string{"transfer.waiting", "transfer.release", "transfer-done.json"} {
 				mustRemove(filepath.Join(root, name))
 			}

@@ -2,7 +2,7 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
 import { Buffer } from "buffer";
 import { createHash } from "crypto";
-import { exec, compatibility } from "./compatibility.js";
+import { bridgeCommand, compatibility } from "./compatibility.js";
 import { decimal } from "./stored-updates.js";
 
 const protocol = "ocq-work-v1";
@@ -113,7 +113,7 @@ export class WorkOperator {
   async call(action, scope, extra = []) {
     const args = [action, ...(action === "work-preview" ? ["--work-observation-context", scope.bridge] : []),
       "--", scope.space, scope.queue, scope.project, ...(action === "work-list" ? [] : [this.selectedID]), ...extra];
-    const r = await exec("ocq-herdr", args, { on: scope.machine, timeout: 20000 });
+    const r = await bridgeCommand(args, { on: scope.machine });
     if (r.code !== 0 || Buffer.from(r.stdout || "").length > 1048576) throw Error("Work read unavailable");
     return JSON.parse(r.stdout);
   }
@@ -220,9 +220,9 @@ export class WorkOperator {
         await localStorage.flush();
         if (!this.pinned() || this.preview !== preview) throw Error("Context changed");
         invoked = true;
-        const r = await exec("ocq-herdr", ["work-confirm", scope.space, scope.queue, scope.project, preview.status.request_id,
+        const r = await bridgeCommand(["work-confirm", scope.space, scope.queue, scope.project, preview.status.request_id,
           ...this.contextArgs(scope, compatibility.status), preview.preview_sha256],
-          { on: scope.machine, timeout: 30000, current: () => this.pinned() && this.preview === preview });
+          { on: scope.machine, current: () => this.pinned() && this.preview === preview });
         if (r.code !== 0 || Buffer.from(r.stdout || "").length > 1048576) throw Error("Confirmation response unavailable");
         const value = status(JSON.parse(r.stdout), scope.project, preview.status.request_id);
         if (value.intent_sha256 !== preview.status.intent_sha256) throw Error("Different work receipt");

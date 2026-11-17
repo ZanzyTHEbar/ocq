@@ -1,6 +1,6 @@
 import { div } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { exec } from "./compatibility.js";
+import { bridgeCommand } from "./compatibility.js";
 
 // Cancellation has its own outcomes: a dispatcher win is not cancellation.
 // Reload only inspects the retained job and journal, never resumes a claim.
@@ -21,7 +21,7 @@ export class QueuedCancellation {
     if (this.s) this.action(owner, "status", cx);
   }
   async call(action, id, s) {
-    const r = await exec("ocq-herdr", [`queued-cancel-${action}`, s.space_id, s.queue_identity, s.job_id, s.sequence, s.displayed_state, ...(id ? [id] : [])], { on: null, current: () => this.boundCurrent?.() && this.s === s });
+    const r = await bridgeCommand([`queued-cancel-${action}`, s.space_id, s.queue_identity, s.job_id, s.sequence, s.displayed_state, ...(id ? [id] : [])], { on: null, current: () => this.boundCurrent?.() && this.s === s });
     if (r.code !== 0) throw new Error("Exact cancellation read-back unavailable");
     const out = JSON.parse(r.stdout), o = out.observation;
     if (!this.same(out.scope, s) || !["none", "prepared", "armed", "uncertain", "blocked", "not_queued", "cancelled_observed"].includes(out.state)) throw new Error("Cancellation scope mismatch");

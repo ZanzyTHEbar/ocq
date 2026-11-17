@@ -426,21 +426,7 @@ func ReceiveResultPublication(dir string, t ResultPublicationTarget, launch stri
 		if status.State != "none" {
 			return errors.New("publication already retained; inspect only")
 		}
-		r, err := OpenReader(dir)
-		if err != nil {
-			return err
-		}
-		_, err = validatePublication(r, p)
-		err = errors.Join(err, r.Close())
-		if err != nil {
-			return err
-		}
-		rec := publicationRecord{1, sha256Hex(raw), raw}
-		b, err := json.Marshal(rec)
-		if err != nil || len(b) > publicationRecordLimit {
-			return errors.New("publication journal exceeds bound")
-		}
-		if err = j.create(digest+".intent.json", rec); err != nil {
+		if err = prepareResultPublicationLocked(dir, j, p, raw, "publication journal exceeds bound"); err != nil {
 			return err
 		}
 		retainedDigest = digest
@@ -453,6 +439,26 @@ func ReceiveResultPublication(dir string, t ResultPublicationTarget, launch stri
 	// The receive acknowledgement and stdout both omit the private bytes.
 	return InspectResultPublication(dir, t, retainedDigest)
 }
+
+// The caller holds the journal lock and has refused retained publications.
+func prepareResultPublicationLocked(dir string, j *composeJournal, p ResultPublicationPayload, raw []byte, boundMessage string) error {
+	r, err := OpenReader(dir)
+	if err != nil {
+		return err
+	}
+	_, err = validatePublication(r, p)
+	err = errors.Join(err, r.Close())
+	if err != nil {
+		return err
+	}
+	rec := publicationRecord{1, sha256Hex(raw), raw}
+	b, err := json.Marshal(rec)
+	if err != nil || len(b) > publicationRecordLimit {
+		return errors.New(boundMessage)
+	}
+	return j.create(sha256Hex([]byte(p.Manifest))+".intent.json", rec)
+}
+
 func ResultPublicationRendezvous(dir string, t ResultPublicationTarget, launch string) (ComposeRendezvous, error) {
 	if !t.valid() || !isValidHexLen(launch, 64) {
 		return ComposeRendezvous{}, errors.New("invalid publication rendezvous")

@@ -28,21 +28,7 @@ func PrepareResultPublicationBytes(dir string, t ResultPublicationTarget, raw []
 	if status.State != "none" {
 		return status, errors.New("publication already retained; inspect only")
 	}
-	r, err := OpenReader(dir)
-	if err != nil {
-		return status, err
-	}
-	_, err = validatePublication(r, p)
-	err = errors.Join(err, r.Close())
-	if err != nil {
-		return status, err
-	}
-	rec := publicationRecord{1, sha256Hex(raw), raw}
-	b, err := json.Marshal(rec)
-	if err != nil || len(b) > publicationRecordLimit {
-		return status, errors.New("publication exceeds bound")
-	}
-	if err = j.create(digest+".intent.json", rec); err != nil {
+	if err = prepareResultPublicationLocked(dir, j, p, raw, "publication exceeds bound"); err != nil {
 		return status, err
 	}
 	// Do not reacquire this journal while holding its exclusive lock.
@@ -111,29 +97,7 @@ func PrepareCapturePublicationBytes(dir string, t ResultPublicationTarget, id st
 		return status, err
 	}
 	defer r.Close()
-	if err = r.store.readSchema5(captureFence(r.store, request)); err != nil {
-		return status, err
-	}
-	if err = j.create(id+".started.json", request); err != nil {
-		return status, err
-	}
-	prepared, err := r.store.prepareCapture(CaptureRequest{ProjectID: t.Project, JobID: t.Job, Worktree: request.Context.Worktree, Supersedes: request.Supersedes, IgnoredExclusions: request.IgnoredExclusions})
-	if err != nil {
-		return status, err
-	}
-	var association ProjectResultAssociation
-	if err = r.store.publishCapture(prepared, &association, captureFence(r.store, request), true, false); err != nil {
-		return status, err
-	}
-	manifest, err := marshalCanonicalManifestJSON(prepared.manifest)
-	if err != nil {
-		return status, err
-	}
-	payload, err := json.Marshal(ResultPublicationPayload{t, request.Context.OwnershipDigest, string(manifest), request.Supersedes})
-	if err != nil {
-		return status, err
-	}
-	if err = j.create(id+".intent.json", publicationRecord{1, sha256Hex(payload), payload}); err != nil {
+	if err = prepareCapturePublicationLocked(r, j, t, id, request); err != nil {
 		return status, err
 	}
 	return captureInspect(r, j.dir, t, id), nil

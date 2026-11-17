@@ -1,6 +1,6 @@
 import { div } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { exec } from "./compatibility.js";
+import { bridgeCommand } from "./compatibility.js";
 
 const hex = (s) => /^[0-9a-f]{64}$/.test(s || "");
 const admitted = (s) => ["launching", "running", "unknown", "finished"].includes(s);
@@ -31,7 +31,7 @@ export class AgentReconciliation {
     return out;
   }
   async call(action, t, extra = []) {
-    const r = await exec("ocq-herdr", [`agent-reconcile-${action}`, ...this.args(t), ...extra], { on: null, timeout: 120000, current: () => this.boundCurrent?.() && this.t === t });
+    const r = await bridgeCommand([`agent-reconcile-${action}`, ...this.args(t), ...extra], { on: null, current: () => this.boundCurrent?.() && this.t === t });
     if (r.code !== 0) throw new Error("Reconciliation operation or journal unavailable");
     return this.validate(JSON.parse(r.stdout), t);
   }

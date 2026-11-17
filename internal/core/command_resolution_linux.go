@@ -336,24 +336,7 @@ func ReceiveCommandResolution(dir string, t CommandResolutionTarget, launch stri
 		if _, e = decodeStrictJSONObject(raw, composeLimit, &p); e != nil || !p.valid() || p.Scope.CommandResolutionTarget != t {
 			return errors.New("invalid private resolution payload")
 		}
-		r, e := OpenReader(dir)
-		if e != nil {
-			return e
-		}
-		o, e := resolutionObservation(r, t)
-		e = errors.Join(e, r.Close())
-		if e != nil {
-			return e
-		}
-		if !resolutionEligible(o, p.Scope) {
-			return errors.New("exact unknown command observation changed")
-		}
-		record := commandResolutionRecord{1, t, sha256Hex(raw), raw}
-		encoded, e := json.Marshal(record)
-		if e != nil || len(encoded) > commandResolutionRecordLimit {
-			return errors.New("resolution journal record exceeds encoded limit")
-		}
-		if e = j.create("intent.json", record); e != nil {
+		if e = prepareCommandResolutionLocked(dir, j, t, p, raw, "resolution journal record exceeds encoded limit"); e != nil {
 			return e
 		}
 		_, _ = fmt.Fprintln(conn, "PREPARED "+t.id())
@@ -364,6 +347,29 @@ func ReceiveCommandResolution(dir string, t CommandResolutionTarget, launch stri
 	}
 	return InspectCommandResolution(dir, t)
 }
+
+// The caller holds the journal lock and has refused retained resolutions.
+func prepareCommandResolutionLocked(dir string, j *composeJournal, t CommandResolutionTarget, p CommandResolutionPayload, raw []byte, boundMessage string) error {
+	r, err := OpenReader(dir)
+	if err != nil {
+		return err
+	}
+	observation, err := resolutionObservation(r, t)
+	err = errors.Join(err, r.Close())
+	if err != nil {
+		return err
+	}
+	if !resolutionEligible(observation, p.Scope) {
+		return errors.New("exact unknown command observation changed")
+	}
+	record := commandResolutionRecord{1, t, sha256Hex(raw), raw}
+	b, err := json.Marshal(record)
+	if err != nil || len(b) > commandResolutionRecordLimit {
+		return errors.New(boundMessage)
+	}
+	return j.create("intent.json", record)
+}
+
 func CommandResolutionRendezvous(dir string, t CommandResolutionTarget, launch string) (ComposeRendezvous, error) {
 	if !t.valid() || !isValidHexLen(launch, 64) {
 		return ComposeRendezvous{}, errors.New("invalid resolution rendezvous")

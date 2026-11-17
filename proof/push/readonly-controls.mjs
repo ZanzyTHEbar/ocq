@@ -57,7 +57,7 @@ await module.link(name => {
   return modules.get(name);
 });
 await module.evaluate();
-const { compatibility, enabledButton, exec } = module.namespace;
+const { compatibility, enabledButton, bridgeCommand } = module.namespace;
 compatibility.observe();
 compatibility.status = compatibility.validate(welcome.descriptor, selected);
 compatibility.allowActions = welcome.mutations;
@@ -68,23 +68,23 @@ check(readControls.every(enabledButton), "read controls require no mutation opt-
 check(!enabledButton("ocq-work-preview") && !enabledButton("ocq-agent-reconcile-once"), "preview/live attempt remains gated");
 const d = welcome.descriptor;
 const base = [config.space, d.queue_identity, config.project, "socket-task"];
-const status = await exec("ocq-herdr", ["work-status", "--", ...base], { on: null });
+const status = await bridgeCommand(["work-status", "--", ...base], { on: null });
 check(status.code === 0 && JSON.parse(status.stdout).state === "prepared", "actual stored work status");
 // Retained uncertainty does not acquire mutation authority on reconnect.
 compatibility.invalidateObservation("Retained uncertain operation; explicit read-only reconnect");
 check(enabledButton("ocq-work-recover"), "uncertain recovery control remains available");
-const recovery = await exec("ocq-herdr", ["work-recover", "--", ...base], { on: null });
+const recovery = await bridgeCommand(["work-recover", "--", ...base], { on: null });
 check(recovery.code === 0 && JSON.parse(recovery.stdout).state === "prepared", "actual exact read-only recovery");
 let mainRecoveryState = null;
 if (config.prepared_main) {
   check(enabledButton("ocq-main-recover"), "Main recovery independent of mutation readiness");
-  const main = await exec("ocq-herdr", ["main-recover", "--", config.space, d.queue_identity, "proj-socket-main-journal", "socket-main-prepared-only"], { on: null });
+  const main = await bridgeCommand(["main-recover", "--", config.space, d.queue_identity, "proj-socket-main-journal", "socket-main-prepared-only"], { on: null });
   check(main.code === 0, "explicit GET-only Main recovery available on default read-only endpoint");
   mainRecoveryState = JSON.parse(main.stdout).state;
 }
 const beforeMutation = serial;
 let refused = false;
-try { await exec("ocq-herdr", ["agent-reconcile-prepare", config.space, d.queue_identity], { on: null, current: () => true }); }
+try { await bridgeCommand(["agent-reconcile-prepare", config.space, d.queue_identity], { on: null, current: () => true }); }
 catch (_) { refused = true; }
 check(refused && serial === beforeMutation, "mutating preparation refused before transport");
 const preview = await command(["work-preview", "--work-observation-context", d.observation_context, "--", ...base, "local", config.folder, d.observation_store_context, d.image_sha256]);

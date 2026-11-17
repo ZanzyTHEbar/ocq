@@ -23,33 +23,41 @@ func openClientAdmissionJournal(ctx context.Context, dir, project string) (*comp
 	defer events.Close()
 	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
+	if err = acquireJournalOnEvents(ctx, j, events, deadline.C, true, "native client journal lock unavailable; no admission or receipt write attempted"); err != nil {
+		j.close()
+		return nil, err
+	}
+	return j, nil
+}
+
+// Callers install the watcher before acquiring and own its lifetime and timer.
+// Client admission checks cancellation before every acquire; dispatcher admission
+// intentionally checks it only in the wait after contention.
+func acquireJournalOnEvents(ctx context.Context, j *composeJournal, events *ObservationEvents, deadline <-chan time.Time, checkBeforeAcquire bool, timeoutMessage string) error {
 	for {
-		if err = ctx.Err(); err != nil {
-			j.close()
-			return nil, err
+		if checkBeforeAcquire {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
-		err = j.acquire()
+		err := j.acquire()
 		if err == nil {
-			return j, nil
+			return nil
 		}
 		// acquire can own the outer lock while failing on the inner lock.
 		// Release only this descriptor's locks; never steal/replace a lock.
 		_ = syscall.Flock(int(j.lock.Fd()), syscall.LOCK_UN)
 		_ = syscall.Flock(int(j.queueLock.Fd()), syscall.LOCK_UN)
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			j.close()
-			return nil, err
+			return err
 		}
 		select {
 		case <-ctx.Done():
-			j.close()
-			return nil, ctx.Err()
-		case <-deadline.C:
-			j.close()
-			return nil, errors.New("native client journal lock unavailable; no admission or receipt write attempted")
-		case err = <-events.Errors:
-			j.close()
-			return nil, err
+			return ctx.Err()
+		case <-deadline:
+			return errors.New(timeoutMessage)
+		case err := <-events.Errors:
+			return err
 		case <-events.Changes:
 		}
 	}

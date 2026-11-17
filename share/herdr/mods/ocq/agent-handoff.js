@@ -1,5 +1,5 @@
 import { div } from "gpui-kit";
-import { exec } from "./compatibility.js";
+import { bridgeCommand } from "./compatibility.js";
 
 // A human inspect destination, not a reconciliation or permission control.
 // In particular this module has no terminal, URL, prompt or client launch API.
@@ -22,7 +22,7 @@ export class AgentHandoff {
     cx.spawn(async (cx) => {
       try {
         if (!this.current(owner, t)) return;
-        const r = await exec("ocq-herdr", [`agent-handoff-${verify ? "verify" : "status"}`, t.space_id, t.queue_identity, t.job_id, t.sequence, t.recorded_session_id, t.recorded_worktree, ...(verify ? [service] : [])], { on: null, timeout: 20000 });
+        const r = await bridgeCommand([`agent-handoff-${verify ? "verify" : "status"}`, t.space_id, t.queue_identity, t.job_id, t.sequence, t.recorded_session_id, t.recorded_worktree, ...(verify ? [service] : [])], { on: null });
         if (!this.current(owner, t)) return;
         if (r.code !== 0) throw new Error("Handoff unavailable");
         const s = JSON.parse(r.stdout);
