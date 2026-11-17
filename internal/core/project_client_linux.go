@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -80,12 +82,58 @@ func clientTarget(r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer
 	if err = nativeIdentity(s, p.SessionID, p.Cwd, p.OpenCodeProjectID, p.OwnershipSHA256); err != nil {
 		return p, err
 	}
+	if err = nativeClientIdle(p.Cwd, service, p.SessionID, s); err != nil {
+		return p, err
+	}
 	p.ProfileSHA256 = nativeProfile(s)
 	if expectedProfile != "" && p.ProfileSHA256 != expectedProfile {
 		return p, errors.New("worker immutable execution profile changed; navigation refused")
 	}
 	p.Options = ClientOptions{Protocol: "ocq-handoff-v1", TargetKind: p.TargetKind, ProjectID: p.ProjectID, MainID: p.SetupID, OwnershipMode: p.OwnershipMode, QueueIdentity: p.QueueIdentity, JobID: p.JobID, SessionID: p.SessionID, Worktree: p.Cwd, OpenCodeProjectID: p.OpenCodeProjectID, OwnershipSHA256: p.OwnershipSHA256, ProfileSHA256: p.ProfileSHA256}
 	return p, nil
+}
+
+// Inspection launch authority is limited to an explicitly idle saved session.
+// These are bounded GET fences, not a readiness poll or completion transition.
+// Nothing here sends input, answers permissions or changes queue capacity.
+func nativeClientIdle(directory string, service nativeService, id string, before map[string]any) error {
+	body, err := nativeCall(directory, service, "get", "/api/session/active", nil)
+	if err != nil {
+		return err
+	}
+	var active map[string]json.RawMessage
+	if decodeData(body, &active) != nil {
+		return errors.New("native client idle state unavailable")
+	}
+	if _, running := active[id]; running {
+		return errors.New("native client requires exact idle session; active loop refused")
+	}
+	for _, suffix := range []string{"/inbox", "/permission", "/form"} {
+		body, err = nativeCall(directory, service, "get", "/api/session/"+id+suffix, nil)
+		if err != nil {
+			return err
+		}
+		var pending []json.RawMessage
+		if decodeData(body, &pending) != nil || len(pending) != 0 {
+			return errors.New("native client requires no pending input/permission/form")
+		}
+	}
+	body, err = nativeCall(directory, service, "get", "/api/session/"+id+"/message?limit=1&order=desc", nil)
+	if err != nil {
+		return err
+	}
+	var latest []message
+	if decodeData(body, &latest) != nil || len(latest) != 1 || latest[0].Type != "idle" || (latest[0].Outcome != "succeeded" && latest[0].Outcome != "failed" && latest[0].Outcome != "interrupted") {
+		return errors.New("native client requires explicit terminal idle outcome")
+	}
+	after, err := nativeSession(directory, service, id)
+	if err != nil {
+		return err
+	}
+	if !jsonEqual(before, after) {
+		return errors.New("native client session changed during idle inspection")
+	}
+	return nil
 }
 
 func PrepareProjectClient(dir string, raw []byte) (ClientPointer, error) {
@@ -225,15 +273,16 @@ func verifyClientPointer(r *Reader, j *os.File, p ClientPointer) (nativeImages, 
 }
 
 func RunProjectClient(dir, project, digest string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
+	defer stop()
+	if err := restoreNativeClientContext(); err != nil {
+		return err
+	}
 	if !isValidProjectID(project) || !isValidHexLen(digest, 64) {
 		return errors.New("invalid native client pointer")
 	}
-	owned, err := openLocalJournal(dir, workJournal(project))
+	owned, err := openClientAdmissionJournal(ctx, dir, project)
 	if err != nil {
-		return err
-	}
-	if err = owned.acquire(); err != nil {
-		owned.close()
 		return err
 	}
 	defer func() {
@@ -283,16 +332,16 @@ func RunProjectClient(dir, project, digest string) error {
 	if service.Origin != p.ServerOrigin || service.Identity != p.ServiceIdentity {
 		return errors.New("native service changed before scoped authentication handoff")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	password, err := nativePassword(ctx, p.Cwd, service)
+	authCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	password, err := nativePassword(authCtx, p.Cwd, service)
 	cancel()
 	if err != nil {
 		return err
 	}
-	if err = nativeJournalRoom(owned.dir, 1); err != nil {
+	if err = ctx.Err(); err != nil {
 		return err
 	}
-	if err = owned.create(clientFile(digest, "launch.attempt"), publicationMarker{Version: 1, Digest: digest}); err != nil {
+	if err = recordClientLaunchAdmission(owned, digest); err != nil {
 		return err
 	}
 	env := []string{}
@@ -302,12 +351,42 @@ func RunProjectClient(dir, project, digest string) error {
 		}
 	}
 	env = append(env, "OPENCODE_CLI_CONFIG_CONTENT="+overlay)
+	// Only the ordinary client is redirected. All preceding service/profile/
+	// image/config checks used the original source context, and --server below
+	// prevents service discovery/autostart or terminal ENV capture by the TUI.
+	if storage := os.Getenv("OCQ_CLIENT_STORAGE_ROOT"); storage != "" {
+		info, e := os.Lstat(storage)
+		if e != nil || !filepath.IsAbs(storage) || !info.IsDir() || info.Mode().Perm() != 0700 {
+			return errors.New("private inspection client storage unavailable")
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		canonical, e := filepath.EvalSymlinks(storage)
+		if !ok || st.Uid != uint32(os.Getuid()) || e != nil || canonical != storage {
+			return errors.New("private inspection client storage ownership changed")
+		}
+		for _, name := range []string{"data", "state", "cache"} {
+			if e = os.Mkdir(filepath.Join(storage, name), 0700); e != nil {
+				return e
+			}
+		}
+		var scoped []string
+		for _, entry := range env {
+			if !strings.HasPrefix(entry, "XDG_DATA_HOME=") && !strings.HasPrefix(entry, "XDG_STATE_HOME=") && !strings.HasPrefix(entry, "XDG_CACHE_HOME=") && !strings.HasPrefix(entry, "OCQ_CLIENT_STORAGE_ROOT=") {
+				scoped = append(scoped, entry)
+			}
+		}
+		env = append(scoped, "XDG_DATA_HOME="+filepath.Join(storage, "data"), "XDG_STATE_HOME="+filepath.Join(storage, "state"), "XDG_CACHE_HOME="+filepath.Join(storage, "cache"))
+	}
 	if err = os.Chdir(p.Cwd); err != nil {
 		return err
 	}
 	owned.close()
 	// Do not hold intake locks for the lifetime of the ordinary native client.
 	owned = nil
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	stop() // Restore ordinary signal handling before the one permitted exec.
 	// --server suppresses 2.3.0's terminal ENV capture. No target/session flags:
 	// verified-existing navigation is solely the trusted TUI router extension.
 	return syscall.Exec(images.OpenCode, []string{images.OpenCode, "--server", p.ServerOrigin}, env)

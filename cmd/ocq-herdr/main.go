@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,6 +24,14 @@ func main() {
 }
 
 func run(args []string) error {
+	root := bridgeRoot()
+	root.SetArgs(args)
+	return root.Execute()
+}
+
+// Each socket control gets a fresh parser and the identical command guards.
+// This is in-process dispatch, not an execution fallback or a shell.
+func bridgeRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use: "ocq-herdr", Short: "OCQ views and explicit inbox actions for Herdr", SilenceErrors: true, SilenceUsage: true,
 		RunE: func(*cobra.Command, []string) error {
@@ -36,11 +45,13 @@ func run(args []string) error {
 	root.AddCommand(intakeCommands()...)
 	root.AddCommand(resultPublicationCommands()...)
 	root.AddCommand(capturePublicationCommands()...)
+	root.AddCommand(captureReceiptCommands()...)
 	root.AddCommand(workCommands()...)
 	root.AddCommand(mainClientCommands()...)
+	root.AddCommand(pushCommands()...)
 	installCompatibility(root)
-	root.SetArgs(args)
-	return root.Execute()
+	root.SetContext(context.Background())
+	return root
 }
 
 type readView func(*core.Reader, []string) (any, error)

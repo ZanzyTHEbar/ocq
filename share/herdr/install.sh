@@ -5,7 +5,7 @@ umask 077
 
 if [ "$#" -ne 3 ] || [ "$3" != "--activate" ]; then
   echo "usage: sh share/herdr/install.sh HERDR_APP_HOME HERDR_APP --activate" >&2
-  echo "Requires a running Herdr app 0.1.14 or 0.1.15; switches it to a new personal ocq-workspace layout." >&2
+  echo "Requires a running Herdr app 0.1.14, 0.1.15 or 0.1.16; switches it to a new personal ocq-workspace layout." >&2
   exit 2
 fi
 
@@ -19,8 +19,8 @@ if [ ! -d "$home/mods" ] || [ ! -d "$home/layouts" ] || [ -L "$home/mods" ] || [
   exit 1
 fi
 case "$("$app" --version)" in
-  'herdr-app 0.1.14'|'herdr-app 0.1.15') ;;
-  *) echo "This personal layout is validated only with herdr-app 0.1.14 or 0.1.15." >&2; exit 1 ;;
+  'herdr-app 0.1.14'|'herdr-app 0.1.15'|'herdr-app 0.1.16') ;;
+  *) echo "This personal layout is validated only with herdr-app 0.1.14, 0.1.15 or 0.1.16." >&2; exit 1 ;;
 esac
 if ! HERDR_APP_HOME="$home" "$app" status >/dev/null; then
   echo "No running Herdr app found for the specified home; no files changed." >&2
@@ -34,18 +34,20 @@ if [ -e "$mod" ] || [ -L "$mod" ] || [ -e "$chrome" ] || [ -L "$chrome" ] || [ -
   exit 1
 fi
 
-echo "Installing a trusted mod that runs ocq-herdr on the active Herdr machine."
-echo "The bridge must already be available on that machine's Herdr core PATH."
+echo "Installing a trusted mod that connects to an explicitly configured OCQ push endpoint."
+echo "The execution host needs a matched CLI/bridge/assets release; this installer does not start or configure its endpoint."
 echo "Matched mod contract: ocq-herdr-local-v1; runtime compatibility is checked read-only before mutations."
 echo "This installer does not upgrade/overwrite a live panel or quiesce old work. See docs/herdr.md before any upgrade."
 mkdir "$mod"
 cp "$here/mods/ocq/main.js" "$mod/main.js"
 cp "$here/mods/ocq/compatibility.js" "$mod/compatibility.js"
+cp "$here/mods/ocq/hc-binding.js" "$mod/hc-binding.js"
 cp "$here/mods/ocq/panel-state.js" "$mod/panel-state.js"
 cp "$here/mods/ocq/work-operator.js" "$mod/work-operator.js"
 cp "$here/mods/ocq/main-client.js" "$mod/main-client.js"
 cp "$here/mods/ocq/queue.js" "$mod/queue.js"
 cp "$here/mods/ocq/stored-updates.js" "$mod/stored-updates.js"
+cp "$here/mods/ocq/push-connection.js" "$mod/push-connection.js"
 cp "$here/mods/ocq/queued-cancel.js" "$mod/queued-cancel.js"
 cp "$here/mods/ocq/command-resolution.js" "$mod/command-resolution.js"
 cp "$here/mods/ocq/agent-reconcile.js" "$mod/agent-reconcile.js"

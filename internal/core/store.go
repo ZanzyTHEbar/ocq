@@ -491,6 +491,9 @@ func (s *store) write(fn func(*sql.Conn) error) error {
 		return err
 	}
 	_, err = c.ExecContext(context.Background(), "COMMIT")
+	if err == nil {
+		signalObservationCommit(s.dir)
+	}
 	return classifyDiagnostic(faults.CodeDatabaseWrite, err)
 }
 

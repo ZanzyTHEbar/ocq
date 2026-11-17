@@ -4,6 +4,7 @@ go 1.26.5
 
 require (
 	github.com/ZanzyTHEbar/dbbootstrap v0.1.1
+	github.com/coder/websocket v1.8.15
 	github.com/pressly/goose/v3 v3.28.0
 	modernc.org/sqlite v1.61.0
 )

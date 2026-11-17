@@ -72,7 +72,7 @@ func WorkCLIContext(dir, project string) (WorkActionContext, error) {
 	if err != nil {
 		return WorkActionContext{}, err
 	}
-	return WorkActionContext{WorkProtocol, "local", "cli", b.RepoRoot, identity, store, hash, "cli", "confirm"}, nil
+	return WorkActionContext{Protocol: WorkProtocol, Peer: "local", Space: "cli", Folder: b.RepoRoot, QueueIdentity: identity, StoreContext: store, ImageSHA256: hash, ImageRole: "cli", Action: "confirm"}, nil
 }
 
 func PreviewProjectWork(dir, project, id string, c WorkActionContext) (WorkPreview, error) {

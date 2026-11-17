@@ -1,12 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -23,7 +22,18 @@ var nativeTerminalID = regexp.MustCompile(`^t[1-9][0-9bcdfghjkmnpqrstvwxyz]*$`)
 
 // No Main authoring/upload endpoint. Setup/profile/prompt files stay server-side.
 func mainClientCommands() []*cobra.Command {
-	var commands []*cobra.Command
+	commands := []*cobra.Command{{Use: "hc-binding", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		b, _ := cmd.Context().Value(hcBindingKey{}).(*hcBinding)
+		if b == nil {
+			return errors.New("no explicit private HC binding")
+		}
+		conn, err := b.connect(cmd.Context())
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		return writeWork(cmd, map[string]any{"binding": b, "binding_sha256": b.digest(), "validation": "existing_socket_peer_and_core_verified", "launch": false})
+	}}}
 	for _, action := range []string{"main-list", "main-status", "main-recover", "main-preview", "main-start", "client-list", "client-status", "client-prepare", "client-open", "client-verify"} {
 		action := action
 		n, use := 3, action+" SPACE QUEUE PROJECT"
@@ -114,6 +124,18 @@ func mainClientCommands() []*cobra.Command {
 				if !clientDigest.MatchString(a[3]) {
 					return errors.New("exact native pointer digest required")
 				}
+				pin, e := cmd.Flags().GetString("hc-binding-sha256")
+				if e != nil {
+					return e
+				}
+				if _, e = boundHC(cmd.Context(), pin); e != nil {
+					return e
+				}
+				binding, _ := boundHC(cmd.Context(), pin)
+				if binding.Space != c.Space || binding.Folder != c.Folder || binding.Queue != c.QueueIdentity {
+					return errors.New("native client HC scope changed")
+				}
+				c.NativeBindingSHA256 = pin
 				if action == "client-open" {
 					out, err = openNativeClient(cmd.Context(), dir, a[2], a[3], core.ClientActionContext(c))
 				} else {
@@ -125,6 +147,9 @@ func mainClientCommands() []*cobra.Command {
 			}
 			return writeWork(cmd, out)
 		}})
+		if action == "client-open" || action == "client-verify" {
+			commands[len(commands)-1].Flags().String("hc-binding-sha256", "", "Exact reviewed endpoint HC binding digest")
+		}
 	}
 	return commands
 }
@@ -144,38 +169,15 @@ type hcTerminal struct {
 	State   string            `json:"state"`
 }
 
-type hcOutput struct{ data bytes.Buffer }
-
-func (b *hcOutput) Write(p []byte) (int, error) {
-	if b.data.Len()+len(p) > 256<<10 {
-		return 0, errors.New("HC response exceeds bound")
-	}
-	return b.data.Write(p)
-}
-
-// Official HC 0.1.21 JSON responses flatten Terminal fields at the root.
-// No shell, guessed ID, label scan, auth retry, service start or CLI fallback.
-func hcCall(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "hc", args...)
-	cmd.WaitDelay = 250 * time.Millisecond
-	var out hcOutput
-	cmd.Stdout, cmd.Stderr = &out, io.Discard
-	if err := cmd.Run(); err != nil {
-		return nil, errors.New("exact HC command unavailable; outcome may be unknown")
-	}
-	return out.data.Bytes(), nil
-}
-
-func hcRead(ctx context.Context, id string, p core.ClientPointer) (hcTerminal, error) {
+func hcRead(conn *hcConnection, id string, p core.ClientPointer, space, binding string) (hcTerminal, error) {
 	var t hcTerminal
 	if !nativeTerminalID.MatchString(id) {
 		return t, errors.New("unsupported exact returned HC terminal ID")
 	}
-	b, err := hcCall(ctx, "get", "--json", "--", id)
-	if err != nil {
+	if err := conn.call("terminal.get", map[string]any{"terminal": id}, &t); err != nil {
 		return t, err
 	}
-	if json.Unmarshal(b, &t) != nil || t.Address != id || t.Cwd != p.Cwd || !reflect.DeepEqual(t.Argv, p.LauncherArgv) || t.Labels["ocq.handoff"] != p.PointerSHA256 || (t.State != "live" && t.State != "finished") {
+	if t.Address != id || t.Cwd != p.Cwd || !reflect.DeepEqual(t.Argv, p.LauncherArgv) || t.Labels["ocq.handoff"] != p.PointerSHA256 || t.Labels["ocq.hc_binding"] != binding || t.Labels["herdr.space"] != space || (t.State != "live" && t.State != "finished") {
 		return t, errors.New("exact HC terminal identity/launch metadata mismatch")
 	}
 	return t, nil
@@ -185,11 +187,15 @@ func openNativeClient(parent context.Context, dir, project, digest string, c cor
 	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
 	defer cancel()
 	view := nativeClientView{Protocol: core.ClientProtocol, TerminalState: "unobserved", CurrentRoute: "unverified"}
-	// Gate version before arm/attempt. A refused/missing HC is not a spawn.
-	version, err := hcCall(ctx, "--version")
-	if err != nil || (strings.TrimSpace(string(version)) != "hc 0.1.21" && strings.TrimSpace(string(version)) != "herdr-core 0.1.21") {
-		return view, errors.New("native client requires supported HC 0.1.21")
+	binding, err := boundHC(ctx, c.NativeBindingSHA256)
+	if err != nil {
+		return view, err
 	}
+	conn, err := binding.connect(ctx)
+	if err != nil {
+		return view, err
+	}
+	defer conn.Close()
 	s, err := core.ArmProjectClient(dir, project, digest, c)
 	if err != nil {
 		return view, err
@@ -202,25 +208,39 @@ func openNativeClient(parent context.Context, dir, project, digest string, c cor
 		// Same pointer only returns the original receipt, never another run.
 		return view, nil
 	}
-	args := []string{"run", "--bg", "--json", "--no-parent", "--no-notify", "--label", "ocq.handoff=" + digest, "--cwd", s.Pointer.Cwd, "--"}
-	args = append(args, s.Pointer.LauncherArgv...)
-	raw, err := hcCall(ctx, args...)
+	// The private HC core need not share the bridge's HOME/config/PATH.
+	// Propagate only the original same-user validation context, never caller
+	// supplied environment, and keep the ordinary TUI's generated state private.
+	storageRoot, err := os.MkdirTemp(os.Getenv("TMPDIR"), "ocq-inspection-client-")
+	if err != nil {
+		return view, err
+	}
+	storageRoot, err = filepath.Abs(storageRoot)
+	if err != nil {
+		return view, err
+	}
+	launchEnv := map[string]string{"OCQ_CLIENT_STORAGE_ROOT": storageRoot}
+	launchEnv["OCQ_CLIENT_CONTEXT"], err = core.NativeClientLaunchContext()
+	if err != nil {
+		return view, err
+	}
+	var returned hcTerminal
+	err = conn.call("terminal.run", map[string]any{"argv": s.Pointer.LauncherArgv, "cwd": s.Pointer.Cwd, "env": launchEnv, "no_parent": true, "no_notify": true, "wait": false, "keep": false, "labels": map[string]string{"ocq.handoff": digest, "ocq.hc_binding": binding.digest(), "herdr.space": binding.Space}}, &returned)
 	if err != nil {
 		view.Status, _ = core.InspectProjectClient(dir, project, digest)
 		return view, nil // durable attempted_unknown; NEVER respawn or adopt
 	}
-	var returned hcTerminal
-	if json.Unmarshal(raw, &returned) != nil || !nativeTerminalID.MatchString(returned.Address) {
+	if !nativeTerminalID.MatchString(returned.Address) {
 		view.Status, _ = core.InspectProjectClient(dir, project, digest)
 		return view, nil
 	}
-	observed, err := hcRead(ctx, returned.Address, s.Pointer)
+	observed, err := hcRead(conn, returned.Address, s.Pointer, binding.Space, binding.digest())
 	if err != nil {
 		view.Status, _ = core.InspectProjectClient(dir, project, digest)
 		return view, nil
 	}
 	receipt := core.ClientTerminalReceipt{ReturnedTerminalID: returned.Address, ObservedTerminalID: observed.Address, Peer: c.Peer, Cwd: observed.Cwd, Argv: observed.Argv, Labels: observed.Labels}
-	view.Status, err = core.RecordProjectClient(dir, project, digest, c, receipt)
+	view.Status, err = core.RecordProjectClientContext(ctx, dir, project, digest, c, receipt)
 	view.TerminalState = observed.State
 	return view, err
 }
@@ -228,6 +248,10 @@ func openNativeClient(parent context.Context, dir, project, digest string, c cor
 func inspectNativeClient(parent context.Context, dir, project, digest string, c core.ClientActionContext) (nativeClientView, error) {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
+	binding, err := boundHC(ctx, c.NativeBindingSHA256)
+	if err != nil {
+		return nativeClientView{}, err
+	}
 	s, err := core.VerifyProjectClient(dir, project, digest, c)
 	view := nativeClientView{Protocol: core.ClientProtocol, Status: s, TerminalState: "unobserved", CurrentRoute: "unverified"}
 	if err != nil {
@@ -236,7 +260,12 @@ func inspectNativeClient(parent context.Context, dir, project, digest string, c 
 	if s.Terminal == nil {
 		return view, nil
 	}
-	observed, err := hcRead(ctx, s.Terminal.ReturnedTerminalID, s.Pointer)
+	conn, err := binding.connect(ctx)
+	if err != nil {
+		return view, err
+	}
+	defer conn.Close()
+	observed, err := hcRead(conn, s.Terminal.ReturnedTerminalID, s.Pointer, binding.Space, binding.digest())
 	if err != nil {
 		return view, err
 	}

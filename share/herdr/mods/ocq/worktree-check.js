@@ -1,6 +1,7 @@
 import { div } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { exec, spaces } from "herdr";
+import { spaces } from "herdr";
+import { exec } from "./compatibility.js";
 
 // Ephemeral point-in-time observations, never a stored dimension or an
 // authorization. Opening/refreshing a result does not inspect the filesystem.

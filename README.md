@@ -18,7 +18,7 @@ state. SQLite is embedded; no separate database server is needed.
 
 ```sh
 mkdir -p "$HOME/.local/bin"
-GOMAXPROCS=2 go build -p 1 -o "$HOME/.local/bin/ocq" .
+GOMAXPROCS=2 go build -trimpath -p 1 -o "$HOME/.local/bin/ocq" .
 export PATH="$HOME/.local/bin:$PATH"
 ```
 

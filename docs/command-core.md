@@ -218,9 +218,9 @@ transaction boundaries remain explicit core operations.
 Build and validate serially:
 
 ```sh
-GOMAXPROCS=2 go build -p 1 -o runtime/ocq .
+GOMAXPROCS=2 go build -trimpath -p 1 -o runtime/ocq .
 GOMAXPROCS=2 go vet -p 1 ./...
-GOMAXPROCS=2 go build -p 1 -o runtime/ocq-acceptance ./proof/command-core
+GOMAXPROCS=2 go build -trimpath -p 1 -o runtime/ocq-acceptance ./proof/command-core
 GOMAXPROCS=2 runtime/ocq-acceptance "$PWD/runtime/ocq"
 ```
 

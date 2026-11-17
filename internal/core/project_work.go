@@ -34,15 +34,16 @@ type WorkProfile struct {
 // Image is the actual caller (CLI or bridge), not a substitute binary's hash.
 // The bridge must independently validate peer/space and its own executable.
 type WorkActionContext struct {
-	Protocol      string `json:"protocol"`
-	Peer          string `json:"peer"`
-	Space         string `json:"space"`
-	Folder        string `json:"folder"`
-	QueueIdentity string `json:"queue_identity"`
-	StoreContext  string `json:"store_context"`
-	ImageSHA256   string `json:"image_sha256"`
-	ImageRole     string `json:"image_role"`
-	Action        string `json:"action"`
+	Protocol            string `json:"protocol"`
+	Peer                string `json:"peer"`
+	Space               string `json:"space"`
+	Folder              string `json:"folder"`
+	QueueIdentity       string `json:"queue_identity"`
+	StoreContext        string `json:"store_context"`
+	ImageSHA256         string `json:"image_sha256"`
+	ImageRole           string `json:"image_role"`
+	Action              string `json:"action"`
+	NativeBindingSHA256 string `json:"native_binding_sha256,omitempty"`
 }
 
 type WorkJob struct {

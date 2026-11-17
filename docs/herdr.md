@@ -1,5 +1,23 @@
 # Herdr workspace
 
+**Current source transport:** the panel now requires an explicitly configured
+[native push endpoint](push-transport.md), verified with Herdr 0.1.15 and 0.1.16. It does not
+start a listener or inherit an HC socket route. Stored subscriptions and explicit
+reviewed commands use this one socket. Mutations require endpoint-owner
+`--allow-actions` plus their original exact preview/attempt/receipt contracts.
+Read-only status/recovery/output/handoff controls do not require mutation opt-in.
+Local agent reconciliation retains a separate explicit human review and durable
+claim/attempt; viewing a job never invokes it. Native inspection-client and
+commands-only dispatcher controls additionally require an explicitly reviewed,
+owner-pinned existing private HC binding. The backend performs the one launch;
+presentation/verification remain separate explicit controls. See the binding
+contract and remaining host limitations in [push transport](push-transport.md).
+There is no exec/long-poll fallback.
+The older helper/action and bounded-observer sections below document retained
+CLI/core contracts, not currently enabled panel capabilities. Do not infer
+deployment readiness or install this experimental source into a shared runtime
+from the previous acceptance descriptions.
+
 The OCQ Herdr panel shows stored projects, jobs, results and inbox mail. It can
 explicitly acknowledge mail, compose local lane updates and submit local commands/agents
 or project intake after preview and confirmation. It is not a scheduler or a live OpenCode
@@ -27,7 +45,7 @@ Build the bridge on the machine whose queue it will open:
 
 ```sh
 mkdir -p "$HOME/.local/bin"
-GOMAXPROCS=2 go build -p 1 -o "$HOME/.local/bin/ocq-herdr" ./cmd/ocq-herdr
+GOMAXPROCS=2 go build -trimpath -p 1 -o "$HOME/.local/bin/ocq-herdr" ./cmd/ocq-herdr
 ```
 
 Put `ocq-herdr` on that **Herdr core's noninteractive PATH**. Starting an
@@ -37,6 +55,11 @@ the app once, then install the mod/layout on the display machine:
 ```sh
 sh share/herdr/install.sh "$HOME/.config/herdr-app" "$(command -v herdr-app)" --activate
 ```
+
+For native inspection clients, keep the matched `bin/ocq`, `bin/ocq-herdr` and
+release-relative `share/opencode/ocq-handoff/tui.js` together; copying only the
+binaries does not install their trusted TUI asset. The panel uses its configured
+socket, not the legacy HC PATH route described below.
 
 Supply the actual absolute app home if customized. If installation or the layout
 switch fails, inspect retained files and the window before retrying; the

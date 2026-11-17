@@ -340,8 +340,12 @@ func (s *scenario) run() {
 	check(err != nil && strings.Contains(err.Error(), "still exists"), "live-process resolution was not refused")
 	save(filepath.Join(s.root, "release-crash"), []byte("release\n"))
 	s.wait("orphan probe exit", func() bool { return !live(probe.identity) })
-	_, err = s.cli("resolve", "--evidence", "marked foreground probe exited; exact PID/start absent; marker and output inspected", crash.ID)
-	must(err)
+	if bridge := os.Getenv("OCQ_ACCEPTANCE_BRIDGE"); bridge != "" {
+		s.resolveThroughSocket(bridge, crash.ID)
+	} else {
+		_, err = s.cli("resolve", "--evidence", "marked foreground probe exited; exact PID/start absent; marker and output inspected", crash.ID)
+		must(err)
+	}
 	check(s.get(crash.ID).State == "resolved" && s.get(crash.ID).Validation == "not_run", "resolution misrepresented validation")
 	b, err = s.cli("logs", crash.ID)
 	must(err)

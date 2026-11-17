@@ -26,15 +26,16 @@ const commandDispatcherFloor int64 = 6 << 30
 // Pane selection is an explicit native observation, never inferred from names or
 // a last-used terminal. The trusted native mod validates it again before open.
 type CommandDispatcherTarget struct {
-	Scope    CommandSubmissionScope `json:"scope"`
-	Pane     string                 `json:"pane"`
-	Terminal string                 `json:"terminal"`
-	Tab      string                 `json:"tab"`
-	Folder   string                 `json:"space_folder"`
+	HCBindingSHA256 string                 `json:"hc_binding_sha256,omitempty"`
+	Scope           CommandSubmissionScope `json:"scope"`
+	Pane            string                 `json:"pane"`
+	Terminal        string                 `json:"terminal"`
+	Tab             string                 `json:"tab"`
+	Folder          string                 `json:"space_folder"`
 }
 
 func (t CommandDispatcherTarget) valid() bool {
-	return t.Scope.valid() && filepath.IsAbs(t.Folder) && !strings.ContainsAny(t.Folder, "\x00\r\n") && strings.HasPrefix(t.Pane, "p") && isValidHexLen(strings.TrimPrefix(t.Pane, "p"), 32) && strings.HasPrefix(t.Tab, "tb") && isValidHexLen(strings.TrimPrefix(t.Tab, "tb"), 32) && dispatcherTerminal(t.Terminal)
+	return (t.HCBindingSHA256 == "" || isValidHexLen(t.HCBindingSHA256, 64)) && t.Scope.valid() && filepath.IsAbs(t.Folder) && !strings.ContainsAny(t.Folder, "\x00\r\n") && strings.HasPrefix(t.Pane, "p") && isValidHexLen(strings.TrimPrefix(t.Pane, "p"), 32) && strings.HasPrefix(t.Tab, "tb") && isValidHexLen(strings.TrimPrefix(t.Tab, "tb"), 32) && dispatcherTerminal(t.Terminal)
 }
 func dispatcherTerminal(s string) bool {
 	if len(s) < 2 || len(s) > 128 || s[0] != 't' {
@@ -86,22 +87,23 @@ type dispatcherRecord struct {
 // Safe stored/process observations only. Capabilities and signed private records
 // never leave Go. Process exit is NOT a job outcome or release of capacity.
 type CommandDispatcherStatus struct {
-	Target       CommandDispatcherTarget `json:"target"`
-	State        string                  `json:"state"`
-	ID           string                  `json:"id,omitempty"`
-	Digest       string                  `json:"intent_sha256,omitempty"`
-	QueueDir     string                  `json:"queue_dir"`
-	Executable   string                  `json:"executable,omitempty"`
-	Slots        int                     `json:"slots"`
-	Floor        string                  `json:"memory_floor_bytes"`
-	CommandsOnly bool                    `json:"commands_only"`
-	Owner        *CommandDispatcherOwner `json:"owner,omitempty"`
-	HelperPane   string                  `json:"helper_pane,omitempty"`
-	HelperTab    string                  `json:"helper_tab,omitempty"`
-	Process      string                  `json:"process"`
-	Busy         bool                    `json:"busy"`
-	CanRetire    bool                    `json:"can_retire"`
-	Outcome      string                  `json:"dispatcher_outcome,omitempty"`
+	AttemptPermitted bool                    `json:"attempt_permitted,omitempty"`
+	Target           CommandDispatcherTarget `json:"target"`
+	State            string                  `json:"state"`
+	ID               string                  `json:"id,omitempty"`
+	Digest           string                  `json:"intent_sha256,omitempty"`
+	QueueDir         string                  `json:"queue_dir"`
+	Executable       string                  `json:"executable,omitempty"`
+	Slots            int                     `json:"slots"`
+	Floor            string                  `json:"memory_floor_bytes"`
+	CommandsOnly     bool                    `json:"commands_only"`
+	Owner            *CommandDispatcherOwner `json:"owner,omitempty"`
+	HelperPane       string                  `json:"helper_pane,omitempty"`
+	HelperTab        string                  `json:"helper_tab,omitempty"`
+	Process          string                  `json:"process"`
+	Busy             bool                    `json:"busy"`
+	CanRetire        bool                    `json:"can_retire"`
+	Outcome          string                  `json:"dispatcher_outcome,omitempty"`
 }
 
 func dispatcherFileIdentity(f *os.File) (string, string, error) {
@@ -269,6 +271,16 @@ func dispatcherProcess(i dispatcherIntent, o CommandDispatcherOwner) (int, bool,
 	if e != nil || strconv.FormatUint(start, 10) != o.Start {
 		return fail(errors.New("dispatcher process identity changed"))
 	}
+	stat, e := os.ReadFile(fmt.Sprintf("/proc/%d/stat", o.PID))
+	at := strings.LastIndex(string(stat), ") ")
+	if e != nil || at < 0 {
+		return fail(errors.New("dispatcher foreground identity unavailable"))
+	}
+	fields := strings.Fields(string(stat)[at+2:])
+	pid := strconv.Itoa(o.PID)
+	if len(fields) < 20 || fields[2] != pid || fields[3] != pid || fields[4] == "0" || fields[5] != pid {
+		return fail(errors.New("dispatcher is not its direct native foreground session"))
+	}
 	f, e := os.Open(fmt.Sprintf("/proc/%d/exe", o.PID))
 	if e != nil {
 		return fail(e)
@@ -317,7 +329,7 @@ func dispatcherStatus(state, dir *os.File, queueDir string, t CommandDispatcherT
 	}
 	i, digest, e := dispatcherLoad(dir)
 	if errors.Is(e, syscall.ENOENT) {
-		for _, name := range []string{"claim.json", "attempt.json", "cancelled.json", "born.json", "bound.json", "ready.json", "exit.json", "drain-prepared.json", "drain-claim.json", "drain-attempt.json"} {
+		for _, name := range []string{"claim.json", "attempt.json", "native-returned.json", "cancelled.json", "born.json", "bound.json", "ready.json", "exit.json", "drain-prepared.json", "drain-claim.json", "drain-attempt.json"} {
 			var marker map[string]any
 			if err := dispatcherRead(dir, name, &marker); !errors.Is(err, syscall.ENOENT) {
 				return out, errors.New("dispatcher evidence without intent; ownership unknown")
@@ -616,7 +628,11 @@ func MarkCommandDispatcher(dir string, t CommandDispatcherTarget, id, action str
 	if e != nil {
 		return out, e
 	}
-	return dispatcherStatus(j.state, j.dir, i.QueueDir, t)
+	result, e := dispatcherStatus(j.state, j.dir, i.QueueDir, t)
+	if e == nil && action == "attempt" {
+		result.AttemptPermitted = true
+	}
+	return result, e
 }
 
 // The trusted native mod calls this once as part of the confirmed launch, only
@@ -642,10 +658,86 @@ func BindCommandDispatcher(dir string, t CommandDispatcherTarget, id, terminal, 
 	if i.ID != id || i.Target != t || out.State != "born" || out.Owner == nil || out.Owner.Terminal != terminal || strconv.Itoa(out.Owner.PID) != pid || out.Owner.Start != start || tab != t.Tab || pane == t.Pane || !strings.HasPrefix(pane, "p") || !isValidHexLen(strings.TrimPrefix(pane, "p"), 32) {
 		return out, errors.New("exact direct native born/pane binding required")
 	}
+	if t.HCBindingSHA256 != "" {
+		var returned dispatcherNativeReturn
+		if e = dispatcherRead(j.dir, "native-returned.json", &returned); e != nil || returned.ID != id || returned.Digest != digest || returned.Terminal != terminal || returned.Binding != t.HCBindingSHA256 {
+			return out, errors.New("exact original pinned-HC launch response required; never adopt after ambiguous launch")
+		}
+	}
 	if e = dispatcherWrite(j, i, digest, "bound", *out.Owner, pane, tab, "", "", ""); e != nil {
 		return out, e
 	}
 	return dispatcherStatus(j.state, j.dir, i.QueueDir, t)
+}
+
+type dispatcherNativeReturn struct {
+	ID       string `json:"id"`
+	Digest   string `json:"intent_sha256"`
+	Terminal string `json:"terminal"`
+	Binding  string `json:"hc_binding_sha256"`
+}
+
+// Record the exact response to this one native run, not a scan/adopted ID.
+// Missing/ambiguous response leaves the helper unbound and incapable of dispatch.
+func RecordCommandDispatcherNativeReturn(ctx context.Context, dir string, t CommandDispatcherTarget, id, terminal string) error {
+	if t.HCBindingSHA256 == "" || !dispatcherTerminal(terminal) {
+		return errors.New("pinned native response required")
+	}
+	j, e := dispatcherOpen(dir, t)
+	if e != nil {
+		return e
+	}
+	defer j.close()
+	events, e := watchObservationEvents(ctx, dir, commandDispatcherJournal)
+	if e != nil {
+		return e
+	}
+	defer events.Close()
+	if e = dispatcherAcquireOnEvents(ctx, j, events, 10*time.Second); e != nil {
+		return e
+	}
+	i, digest, e := dispatcherLoad(j.dir)
+	if e != nil {
+		return e
+	}
+	if i.ID != id || i.Target != t {
+		return errors.New("dispatcher response target changed")
+	}
+	attempted, e := dispatcherMarker(j.dir, "attempt.json", id, digest)
+	if e != nil || !attempted {
+		return errors.New("original durable attempt required")
+	}
+	if e = j.syncFile("attempt.json"); e != nil {
+		return e
+	}
+	return j.create("native-returned.json", dispatcherNativeReturn{id, digest, terminal, t.HCBindingSHA256})
+}
+
+// Waiting for an unacquired journal lock has no side effect to replay. Once
+// acquired, the caller performs its original single validated write. A close
+// event from the writer wakes us; no timer refresh or mutation retry exists.
+func dispatcherAcquireOnEvents(ctx context.Context, j *composeJournal, events *ObservationEvents, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		err := j.acquire()
+		if err == nil {
+			return nil
+		}
+		dispatcherUnlock(j)
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errors.New("dispatcher journal lock unavailable; no operation attempted")
+		case err := <-events.Errors:
+			return err
+		case <-events.Changes:
+		}
+	}
 }
 
 // Dedicated visible foreground program, never an exec child or daemon. It does
@@ -667,7 +759,12 @@ func RunCommandDispatcher(dir, id string) (resultErr error) {
 		return e
 	}
 	defer j.close()
-	if e = j.acquire(); e != nil {
+	events, e := watchObservationEvents(ctx, dir, commandDispatcherJournal)
+	if e != nil {
+		return e
+	}
+	defer events.Close()
+	if e = dispatcherAcquireOnEvents(ctx, j, events, 10*time.Second); e != nil {
 		return e
 	}
 	i, digest, e := dispatcherLoad(j.dir)
@@ -735,6 +832,7 @@ func RunCommandDispatcher(dir, id string) (resultErr error) {
 		return e
 	}
 	dispatcherUnlock(j)
+	signalObservationCommit(dir) // after lock release, not just record publication
 	defer func() {
 		if e := dispatcherWrite(j, i, digest, "exit", owner, "", "", "", "", func() string {
 			if resultErr != nil {
@@ -748,18 +846,23 @@ func RunCommandDispatcher(dir, id string) (resultErr error) {
 	fmt.Printf("Owned COMMANDS-ONLY dispatcher %s; terminal %s PID %d start %s. Fixed 2 slots / 6 GiB. Closure can force-kill; use explicit Drain. Waiting for exact native binding.\n", id, owner.Terminal, owner.PID, owner.Start)
 	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
-	tick := time.NewTicker(50 * time.Millisecond)
-	defer tick.Stop()
 	for {
-		var binding dispatcherRecord
-		if e = j.acquire(); e == nil {
-			binding, e = dispatcherReceipt(j.dir, i, digest, "bound")
-			dispatcherUnlock(j)
-		} else {
-			// Bounded read-side waiting for the in-flight native binder, not a
-			// mutation retry. No dispatch occurs while ownership is unavailable.
-			dispatcherUnlock(j)
-			e = syscall.ENOENT
+		// An unlocked immutable-file read is only a hint. Do not contend with
+		// the explicit binder before it has published anything to validate.
+		binding, readErr := dispatcherReceipt(j.dir, i, digest, "bound")
+		e = readErr
+		if e == nil {
+			e = j.acquire()
+			if e == nil {
+				binding, e = dispatcherReceipt(j.dir, i, digest, "bound")
+				dispatcherUnlock(j)
+				signalObservationCommit(dir)
+			} else {
+				// Bounded read-side waiting for the in-flight native binder, not a
+				// mutation retry. No dispatch occurs while ownership is unavailable.
+				dispatcherUnlock(j)
+				e = syscall.ENOENT
+			}
 		}
 		if e == nil {
 			if binding.Owner != owner || binding.Tab != i.Target.Tab || binding.Pane == i.Target.Pane {
@@ -775,7 +878,9 @@ func RunCommandDispatcher(dir, id string) (resultErr error) {
 			return ctx.Err()
 		case <-deadline.C:
 			return errors.New("native binding unavailable; no dispatch, never retry launch")
-		case <-tick.C:
+		case err := <-events.Errors:
+			return err
+		case <-events.Changes:
 		}
 	}
 	if ctx.Err() != nil {
@@ -785,7 +890,7 @@ func RunCommandDispatcher(dir, id string) (resultErr error) {
 	q := &Queue{store: s}
 	e = q.Dispatch(ctx, 2, commandDispatcherFloor, true, func() {
 		if readyErr = j.acquire(); readyErr == nil {
-			defer dispatcherUnlock(j)
+			defer func() { dispatcherUnlock(j); signalObservationCommit(dir) }()
 			identity, err := notificationQueueIdentity(s)
 			if err != nil || identity != i.Target.Scope.Queue || !commandSubmissionStoreMatches(j, s) {
 				readyErr = errors.New("queue changed before readiness")

@@ -1,9 +1,9 @@
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { nextCommand, spaces, theme } from "herdr";
+import { PrivateHCBinding } from "./hc-binding.js";
 import { panelEpoch, panelVisible } from "./panel-state.js";
 import { exec, compatibility, enabledButton } from "./compatibility.js";
-import { connect } from "net";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
 import { QueueInspection } from "./queue.js";
@@ -12,7 +12,7 @@ import { ResultPublication } from "./result-publication.js";
 import { RegistrationForm } from "./registration.js";
 import { SubmissionForm } from "./submission.js";
 import { ComposeForm } from "./compose-form.js";
-import { composeProof, composeEqual, composeDecode, socketFrames } from "./private-frames.js";
+import { composeDecode } from "./private-frames.js";
 import { StoredUpdates, acceptObservationVersion } from "./stored-updates.js";
 import { WorkOperator } from "./work-operator.js";
 import { MainClientControls } from "./main-client.js";
@@ -170,6 +170,7 @@ export default class OCQ extends View {
     this.updates = new StoredUpdates(this, cx);
     this.workOperator = new WorkOperator(this);
     this.mainClient = new MainClientControls(this);
+    this.nativeHC = new PrivateHCBinding(this);
     this.projectPages = [{ start: "0" }];
     this.lanePages = [{ start: "0" }];
     this.boardToken = {};
@@ -177,8 +178,8 @@ export default class OCQ extends View {
     this.worktreeCheck.reset();
     this.publication = new ResultPublication();
     this.queueMode = false;
-    this.workspaceView = "overview";
-    this.projectView = "work";
+    this.workspaceView = "projects";
+    this.projectView = "operator";
     this.contextDetails = false;
     this.diagnostics = false;
     this.updateHealth = { state: "stored", reason: null };
@@ -229,6 +230,8 @@ export default class OCQ extends View {
 
   async close() {
     this.closed = true; this.generation++; this.queue.generation++; this.publication.generation++; this.worktreeCheck.generation++;
+    this.queue.dispatcher.dispose();
+    this.workOperator.scroll.release();
     // Herdr retains an async View.close until settlement or its own deadline.
     // Returning early cancels this view's host calls without settling their JS
     // promises, leaving the shared one-flight observer permanently draining.
@@ -567,43 +570,13 @@ export default class OCQ extends View {
     current = compatibility.transfer(current);
     if (!current()) throw new Error("context changed");
     const launch = randomBytes(32).toString("hex");
-    const args = command === "compose-preview" ? [command, id, launch] : [command, launch];
-    const worker = exec("ocq-herdr", args, { on: null, timeout: 25000, current }).then((value) => value, () => null);
-    let socket = null;
-    try {
-      let rendezvous = null;
-      for (let i = 0; i < 100; i++) {
-        if (!current()) throw new Error("context changed");
-        const result = await exec("ocq-herdr", ["compose-rendezvous", launch], { on: null });
-        if (result.code === 0) { rendezvous = JSON.parse(result.stdout); break; }
-        await cx.sleep(50);
-      }
-      if (!rendezvous || rendezvous.launch !== launch || !/^[0-9a-f]{64}$/.test(rendezvous.capability) || !Number.isInteger(rendezvous.port) || rendezvous.port < 1 || rendezvous.port > 65535) throw new Error("rendezvous unavailable");
-      socket = await connect("127.0.0.1", rendezvous.port);
-      const frames = socketFrames(socket), line = () => frames.line(), nonce = randomBytes(32).toString("hex");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(nonce + "\n");
-      if (!composeEqual(await line(), composeProof(rendezvous.capability, nonce, "server"))) throw new Error("server authentication failed");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(composeProof(rendezvous.capability, nonce, "client") + "\n");
-      if (await line() !== "READY" || !current()) throw new Error("context or client authentication failed");
-      let response;
-      if (command === "compose-receive") {
-        if (!current()) throw new Error("Transfer authorization changed");
-        await socket.write(payload + "\n");
-        response = await line();
-        if (!/^PREPARED [0-9a-f]{64}$/.test(response)) throw new Error("preparation uncertain");
-      } else response = await line();
-      socket.close(); socket = null;
-      const done = await worker;
-      if (!done || done.code !== 0 || !current()) throw new Error("compose exchange uncertain");
-      if (command === "compose-preview") {
-        const status = JSON.parse(done.stdout);
-        if (status.id !== id || !["prepared", "armed"].includes(status.state)) throw new Error("preview status mismatch");
-        return { response, status };
-      }
-      return response;
-    } finally { if (socket) socket.close(); await worker; }
+    const value = await compatibility.exchange(command, command === "compose-preview" ? [id, launch] : [launch], payload, current);
+    if (command === "compose-preview") {
+      if (value.status?.id !== id || !["prepared", "armed"].includes(value.status.state) || typeof value.response !== "string") throw Error("preview status mismatch");
+      return value;
+    }
+    if (!/^PREPARED [0-9a-f]{64}$/.test(value.response)) throw Error("preparation uncertain");
+    return value.response;
   }
 
   prepareCompose(cx) {
@@ -819,57 +792,21 @@ export default class OCQ extends View {
     const current = compatibility.transfer(() => this.intakeCurrent(context));
     const launch = randomBytes(32).toString("hex");
     const command = mode === "receive" ? ["intake-receive-text", kind, launch] : mode === "draft" ? [`intake-${kind}-draft`, launch] : ["intake-review-preview", id, launch];
-    const worker = exec("ocq-herdr", command, { on: null, timeout: 25000, current: () => this.intakeCurrent(context) }).then((value) => value, () => null);
-    let socket = null;
-    try {
-      let rendezvous = null;
-      for (let n = 0; n < 100; n++) {
-        if (!this.intakeCurrent(context)) throw new Error("context changed");
-        const result = await exec("ocq-herdr", ["intake-rendezvous", launch], { on: null });
-        if (result.code === 0) { rendezvous = JSON.parse(result.stdout); break; }
-        await cx.sleep(50);
-      }
-      if (!rendezvous || rendezvous.launch !== launch || !/^[0-9a-f]{64}$/.test(rendezvous.capability) || !Number.isInteger(rendezvous.port) || rendezvous.port < 1 || rendezvous.port > 65535) throw new Error("rendezvous unavailable");
-      socket = await connect("127.0.0.1", rendezvous.port);
-      const frames = socketFrames(socket, mode === "receive" ? 131072 : 1048576), nonce = randomBytes(32).toString("hex");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(nonce + "\n");
-      if (!composeEqual(await frames.line(64), composeProof(rendezvous.capability, nonce, "server"))) throw new Error("server authentication failed");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(composeProof(rendezvous.capability, nonce, "client") + "\n");
-      if (await frames.line(64) !== "READY" || !current()) throw new Error("context or authentication changed");
-      let response;
-      if (mode === "receive" || mode === "draft") {
-        const bytes = Buffer.from(raw, "utf8");
-        if (!bytes.length || bytes.length > (mode === "draft" && kind === "registration" ? 16384 : 131072) || composeDecode(bytes) !== raw) throw new Error("invalid request");
-        if (!current()) throw new Error("Transfer authorization changed");
-        await socket.write(`${bytes.length}\n`);
-        if (!current()) throw new Error("Transfer authorization changed");
-        await socket.write(raw);
-        if (mode === "receive") {
-          response = await frames.line(80);
-          if (!/^PREPARED [0-9a-f]{64}$/.test(response)) throw new Error("preparation uncertain");
-        }
-      }
-      if (mode !== "receive") {
-        const header = await frames.bytes(5);
-        const length = header[1] * 16777216 + header[2] * 65536 + header[3] * 256 + header[4];
-        if ((header[0] !== 82 && header[0] !== 83) || !length || length > 1048576) throw new Error("invalid preview frame");
-        const exact = JSON.parse(composeDecode(await frames.bytes(length)));
-        if (typeof exact.raw !== "string" || Buffer.from(exact.raw).length > 131072 || createHash("sha256").update(exact.raw).digest("hex") !== exact.sha256) throw new Error("exact preview changed");
-        response = { kind: header[0] === 82 ? "registration" : "submission", raw: exact.raw, exact };
-      }
-      socket.close(); socket = null;
-      const done = await worker;
-      if (!done || done.code !== 0 || !current()) throw new Error("exchange uncertain");
-      if (mode === "draft" && JSON.parse(done.stdout).state !== "draft") throw new Error("draft unavailable");
-      if (mode === "preview") {
-        const status = JSON.parse(done.stdout);
-        if (status.id !== id || !["prepared", "armed", "attempted", "completed", "cancelled"].includes(status.state)) throw new Error("preview state changed");
-        response.state = status.state;
-      }
-      return response;
-    } finally { if (socket) socket.close(); await worker; }
+    if (mode !== "preview") {
+      const bytes = Buffer.from(raw, "utf8");
+      if (!bytes.length || bytes.length > (mode === "draft" && kind === "registration" ? 16384 : 131072) || composeDecode(bytes) !== raw) throw Error("invalid request");
+    }
+    const value = await compatibility.exchange(command[0], command.slice(1), raw, current);
+    if (mode === "receive") {
+      if (!/^PREPARED [0-9a-f]{64}$/.test(value.response)) throw Error("preparation uncertain");
+      return value.response;
+    }
+    const exact = value.exact;
+    if (!["registration", "submission"].includes(value.kind) || typeof exact?.raw !== "string" || Buffer.from(exact.raw).length > 131072 ||
+      createHash("sha256").update(exact.raw).digest("hex") !== exact.sha256) throw Error("exact preview changed");
+    if (mode === "draft" && value.state !== "draft") throw Error("draft unavailable");
+    if (mode === "preview" && (value.id !== id || !["prepared", "armed", "attempted", "completed", "cancelled"].includes(value.state))) throw Error("preview state changed");
+    return { kind: value.kind, raw: exact.raw, exact, ...(mode === "preview" ? { state: value.state } : {}) };
   }
 
   buildRegistration(cx) {
@@ -1070,8 +1007,9 @@ export default class OCQ extends View {
   // guard. Hidden sections never contribute keyboard actions. Inspection identity
   // is separate from navigation identity so data updates cannot redirect it.
   registerAction(id, label, action, list = this.renderTargets) {
-    const run = cx => { this.handle.focus(); this.navigationTarget = id; this.navigationLabel = label; action(cx); };
-    list.push({ id, label, run });
+    const reveal = this.actionReveal;
+    const run = cx => { this.handle.focus(); this.navigationTarget = id; this.navigationLabel = label; action(cx); reveal?.(); };
+    list.push({ id, label, run, reveal });
     if (this.navigationTarget === id) this.navigationLabel = label;
     return (_e, cx) => { cx.stop_propagation(); run(cx); };
   }
@@ -1138,6 +1076,7 @@ export default class OCQ extends View {
       index = (index + (e.key === "down" ? 1 : targets.length - 1)) % targets.length;
       this.navigationTarget = targets[index].id;
       this.navigationLabel = targets[index].label;
+      targets[index].reveal?.();
     } else if (e.key === "escape") this.keyboardMode = false;
     else if (e.key === "left") this.keyboardPage = Math.max(0, this.keyboardPage - 1);
     else if (e.key === "right") this.keyboardPage = Math.min(this.keyboardPages(this.keyboardTarget).length - 1, this.keyboardPage + 1);
@@ -1438,10 +1377,15 @@ export default class OCQ extends View {
       ![this.queue.dispatcher, this.queue.submission, this.queue.agentSubmission].some(helper => helper.screen && helper.current(this)) &&
       !(this.queue.ack.confirm && this.queue.ackCurrent(this, this.queue.ack)) &&
       ![this.queue.cancel, this.queue.resolution, this.queue.reconciliation].some(helper => helper.confirm && helper.current(this));
+    // Keep compatibility discovery running; register its controls only while
+    // visible so keyboard navigation never lands on a hidden diagnostic action.
+    const compatibilityView = compatibility.notice(cx, t, (id, label, action) =>
+      this.contextDetails ? this.registerAction(id, label, action, this.compatibilityTargets) : (_e, cx) => action(cx));
     return v_flex().size_full().min_h(0).bg(t.background).text_color(t.foreground)
       .when(workspace, e => e.child(this.workspaceHeader(cx, t)))
+      .child(this.updates.connection.render(cx, t))
       .when(Boolean(this.observationReset) || compatibility.observationBlocked || compatibility.legacyObservationBlocked, e => e.child(this.recoveryNotice(cx, t)))
-      .child(compatibility.notice(cx, t, (id, label, action) => this.registerAction(id, label, action, this.compatibilityTargets)))
+      .when(this.contextDetails, e => e.child(div().max_h(120).overflow_y_scroll().child(compatibilityView)))
       .child(div().flex_1().min_h(0).child(content));
   }
 
@@ -1478,11 +1422,13 @@ export default class OCQ extends View {
 
   recoveryNotice(cx, t) {
     const running = Boolean(this.updates.recovery?.running);
-    return v_flex().p(10).gap(4).text_size(12)
-      .child(div().text_color(t.blocked).child(this.observationReset || compatibility.reason))
-      .when(Boolean(this.updates.recovery) && !running && Boolean(this.updateHealth.reason) && this.updateHealth.reason !== this.observationReset,
-        e => e.child(div().text_color(t.blocked).child(this.updateHealth.reason)))
-      .child(div().text_color(t.muted).child("Recovery reads this selected context afresh. Old confirmations stay invalid; attempted or uncertain operations are never resent."))
+    return v_flex().px(12).py(8).gap(4).text_size(12).border_b(1).border_color(t.border)
+      .child(h_flex().items_center().gap(8)
+        .child(div().flex_1().font_semibold().text_color(t.blocked).child(running ? "Checking this context…" : "Review paused"))
+        .child(this.panelControl("ocq-recovery-details", "Why?", cx => { this.contextDetails = !this.contextDetails; cx.notify(); }, t, this.compatibilityTargets)))
+      .child(div().text_color(t.muted).child("Old confirmations are invalid. Previous attempts are not resent."))
+      .when(this.contextDetails, e => e.child(div().text_color(t.muted).child(this.observationReset || compatibility.reason))
+        .when(Boolean(this.updateHealth.reason) && this.updateHealth.reason !== this.observationReset, e => e.child(div().child(this.updateHealth.reason))))
       .child(div().id("ocq-context-recover").role("button").accessibility_label("Recover selected context")
         .px(8).py(5).rounded(5).cursor_pointer()
         .when(running, e => e.opacity(0.4))
@@ -1491,26 +1437,55 @@ export default class OCQ extends View {
         .on_click(this.registerAction("ocq-context-recover", "Recover selected context", cx => {
           if (!this.updates.recovery?.running) this.updates.recover(cx);
         }, this.compatibilityTargets))
-        .child(running ? "Recovering selected context…" : "Recover selected context"));
+        .child(running ? "Checking…" : "Reconnect"));
+  }
+
+  panelControl(id, label, action, t, targets = this.headerTargets, selected = false) {
+    // Presentation-only controls. Mutation controls continue through the
+    // existing enabledButton/confirmation paths in their original controllers.
+    return div().id(id).role("button").accessibility_label(label).px(8).py(5).rounded(5).cursor_pointer()
+      .when(selected, e => e.bg(t.hover).font_semibold())
+      .when(this.navigationTarget === id, e => e.bg(t.hover))
+      .hover(e => e.bg(t.hover)).on_click(this.registerAction(id, label, action, targets)).child(label);
   }
 
   workspaceHeader(cx, t) {
-    const control = (id, label, action, selected = false) => div().id(id).role("button").accessibility_label(label)
-      .px(8).py(5).rounded(5).cursor_pointer().when(selected, e => e.bg(t.hover).font_semibold())
-      .when(this.navigationTarget === id, e => e.bg(t.hover))
-      .hover(e => e.bg(t.hover)).on_click(this.registerAction(id, label, action, this.headerTargets)).child(label);
-    const queueID = this.queue.jobs.data?.queue_identity || compatibility.status?.queue_identity;
+    const control = (id, label, action, selected = false) => this.panelControl(id, label, action, t, this.headerTargets, selected);
+    const queueID = this.updates.binding?.queue_identity || this.queue.jobs.data?.queue_identity || compatibility.status?.queue_identity;
     const view = this.queueMode ? "queue" : this.workspaceView;
-    return v_flex().id("ocq-workspace-header").flex_none().p(10).gap(5).border_b(1).border_color(t.border)
-      .child(div().font_semibold().child(`OCQ · ${this.machine ?? "This computer"}${this.machine !== null ? " · Only explicit prepared-work confirmation enabled remotely" : ""}`))
-      .child(h_flex().gap(2).children(["overview", "projects", "queue", "inbox"].map(name => control(`ocq-workspace-${name}`, name[0].toUpperCase() + name.slice(1), cx => this.navigateWorkspace(name, cx), view === name))))
-      .child(div().text_size(12).text_color(["waiting", "reading"].includes(this.updateHealth.state) ? t.muted : t.blocked).child(this.updateHealth.state === "waiting" ? "Automatic change waiting · stored observations" : this.updateHealth.state === "missing" ? "No existing queue · automatic creation waiting" : `${this.updateHealth.state.replace(/_/g, " ")} · stored observations may be stale`))
-      .child(control("ocq-context-details", this.contextDetails ? "Hide context details" : "Context details", cx => { this.contextDetails = !this.contextDetails; cx.notify(); }))
-      .when(this.contextDetails, e => e.child(v_flex().gap(4)
-        .child(div().text_size(12).text_color(t.muted).child(`Space: ${this.spaceID || "not selected"}\nFolder: ${this.folder || "not selected"}\nQueue: ${queueID || "identity not observed"}\nSnapshot revision: ${this.updates.revision || "not observed"}\nLatest snapshot read: ${this.updateHealth.readAt || "not yet read"}\nLatest project page read: ${this.projectsReadAt || "not yet read"}\n${this.updateHealth.reason || "No current read diagnostic."}`))
-        .child(control("ocq-copy-update-diagnostics", "Copy update diagnostics", cx => cx.write_to_clipboard(JSON.stringify({ machine: this.machine, health: this.updateHealth, revision: this.updates.revision }))))
-        .child(control("ocq-workspace-read-again", "Recover selected context", cx => this.updates.recover(cx)))))
-      .when(["stale", "unavailable"].includes(this.updateHealth.state), e => e.child(div().text_size(12).text_color(t.blocked).child("Updates unavailable; displayed observations may be stale.")));
+    const state = this.updateHealth.state;
+    const health = { waiting: "Observed", reading: "Reading…", starting: "Loading…", stored: "Stored",
+      missing: "No queue", draining: "Settling…", reconnecting: "Reconnecting…",
+      stale: "Stale", unavailable: "Unavailable", upgrade_required: "Update required", limit_exceeded: "View too large" }[state] || "Not current";
+    return v_flex().id("ocq-workspace-header").flex_none().px(12).pt(10).pb(6).gap(6).border_b(1).border_color(t.border)
+      .child(h_flex().items_center().gap(6)
+        .child(div().font_semibold().child("OCQ"))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(this.machine ?? "This computer"))
+        .child(control("ocq-context-details", this.contextDetails ? "Close details" : "Details", cx => { this.contextDetails = !this.contextDetails; cx.notify(); })))
+      .child(h_flex().items_center().gap(2)
+        .children([["projects", "Work"], ["queue", "Queue"], ["inbox", "Inbox"]].map(([name, label]) => control(`ocq-workspace-${name}`, label, cx => this.navigateWorkspace(name, cx), view === name)))
+        .child(div().flex_1())
+        .child(div().text_size(12).text_color(["waiting", "reading", "stored", "starting"].includes(state) ? t.muted : t.blocked).child(health)))
+      .when(this.contextDetails, e => e.child(v_flex().max_h(260).overflow_y_scroll().gap(4)
+        .child(div().text_size(12).text_color(t.muted).child(`Folder: ${this.folder || "not selected"}\nSpace: ${this.spaceID || "not selected"}\nQueue: ${queueID || "not observed"}\nRevision: ${this.updates.revision ?? "not observed"}\nSnapshot: ${this.updateHealth.readAt || "not yet read"}\nProjects: ${this.projectsReadAt || "not yet read"}`))
+        .child(div().text_size(12).text_color(t.muted).child(this.updateHealth.reason || "Observations are not execution or permission proof."))
+        .when(this.machine !== null, e => e.child(div().text_size(12).text_color(t.muted).child("Remote: only explicitly prepared work can be confirmed. Other mutations stay disabled.")))
+        .child(h_flex().gap(2)
+          .child(control("ocq-copy-update-diagnostics", "Copy diagnostics", cx => cx.write_to_clipboard(JSON.stringify({ machine: this.machine, health: this.updateHealth, revision: this.updates.revision }))))
+          .child(control("ocq-workspace-read-again", "Reconnect", cx => this.updates.recover(cx))))
+        .child(control("ocq-workspace-overview", "Project summary", cx => this.navigateWorkspace("overview", cx)))));
+  }
+
+  emptyProjects(cx, t, button) {
+    return v_flex().py(12).gap(8)
+      .child(div().text_size(16).font_semibold().child("Start with a project"))
+      .child(div().text_color(t.muted).child("Connect a server-side Main to follow its work, review and handoff here."))
+      .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Register project…", cx => this.openIntake(cx)).bg(t.accent).text_color(t.background)))
+      .child(this.panelControl("ocq-setup-guide", this.setupGuide ? "Hide setup steps" : "Setup steps", cx => { this.setupGuide = !this.setupGuide; cx.notify(); }, t, this.renderTargets))
+      .when(this.setupGuide, e => e.child(v_flex().gap(6).text_size(12).text_color(t.muted)
+        .child(div().child(`On ${this.machine ?? "this computer"}, prepare Main for the canonical checkout, then review and start it. The project appears here after registration.`))
+        .child(this.panelControl("ocq-setup-help-copy", "Copy setup help command", cx => cx.write_to_clipboard("ocq project main prepare --help"), t, this.renderTargets))
+        .child(div().child("This panel does not start Main from your terminal or upload a prompt/profile."))));
   }
 
   readFault(error, label, t) {
@@ -1538,12 +1513,12 @@ export default class OCQ extends View {
     }
     const t = theme();
     this.updates.sync(cx);
-    const button = (id, text, action) => div().id(id).role("button").accessibility_label(text).px(8).py(4).rounded(5)
+    const button = (id, text, action, label = text) => div().id(id).role("button").accessibility_label(label).px(8).py(4).rounded(5)
       .text_color(t.foreground).hover((s) => s.bg(t.hover)).cursor_pointer()
       .when(!enabledButton(id) || (this.queueMode && !this.queue.detailControlAllowed(id)), e => e.opacity(0.4))
       .when(this.navigationTarget === id, e => e.bg(t.hover))
       .on_click(!this.queueMode && enabledButton(id)
-        ? this.registerAction(id, text, cx => { if (enabledButton(id)) action(cx); })
+        ? this.registerAction(id, label, cx => { if (enabledButton(id)) action(cx); })
         : (_e, cx) => { cx.stop_propagation(); if (enabledButton(id) && (!this.queueMode || this.queue.detailControlAllowed(id))) { this.handle.focus(); action(cx); } }).child(text);
     if (this.queueMode && active) return this.queue.render(this, cx, t, button);
     if (this.worktreeCheck.screen) return this.worktreeCheck.render(this, cx, t, button);
@@ -1671,6 +1646,21 @@ export default class OCQ extends View {
           .child(button("ocq-archive-confirm", "Confirm archive", (cx) => this.confirmArchive(cx))));
     }
     const project = this.board?.project;
+    // Tasks own one native scroll viewport. Do not put their whole list inside
+    // a second scroll child: native reveal indices must address individual rows.
+    if (active && this.selected && this.projects.length && !this.projectPicker &&
+        !this.error && !this.boardError && !this.keyboardMode &&
+        this.workspaceView === "projects" && this.projectView === "operator") {
+      return v_flex().id("ocq-tasks-panel").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+        .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+        .when(Boolean(this.navigationTarget), e => e.child(div().px(12).py(4).text_size(12).text_color(t.muted)
+          .child(`↑↓ · Enter · ${this.navigationLabel || "Navigate"}`)))
+        .child(h_flex().px(12).pt(8).items_center().gap(6)
+          .child(div().flex_1().min_w(0).truncate().font_semibold().child(project?.label || this.selected))
+          .child(this.panelControl("ocq-project-picker", "Change", cx => { this.projectPicker = true; cx.notify(); }, t, this.renderTargets)))
+        .child(this.projectTabs(t, button).px(12))
+        .child(this.workOperator.render(cx, t, button));
+    }
     const keyboardTarget = this.keyboardTarget;
     const pages = this.keyboardPages(keyboardTarget);
     const page = Math.min(this.keyboardPage, pages.length - 1);
@@ -1683,10 +1673,8 @@ export default class OCQ extends View {
     return v_flex().id("ocq-panel").size_full().min_h(0).bg(t.background)
       .text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => this.key(e, cx))
-      .child(div().px(14).py(5).text_size(12).text_color(t.muted)
-        .child(`↑/↓ select · Enter activate · ${this.navigationLabel || "Workspace navigation"}`))
-      .child(div().px(14).text_size(12).text_color(t.muted)
-        .child(this.projectsReadAt ? `Latest project page read · ${this.projectsReadAt}` : "No project snapshot available yet"))
+      .when(Boolean(this.navigationTarget), e => e.child(div().px(12).py(4).text_size(12).text_color(t.muted)
+        .child(`↑↓ · Enter · ${this.navigationLabel || "Navigate"}`)))
       .when(this.keyboardMode, (e) => e.child(v_flex().id("ocq-keyboard-inspection").flex_1().min_h(0).p(12).gap(8)
         .child(div().text_size(12).text_color(t.muted).child(`Inspection · ←/→ field ${page + 1}/${pages.length} · Esc board`))
         .child(h_flex().gap(8)
@@ -1710,22 +1698,23 @@ export default class OCQ extends View {
            .child(div().text_color(t.ansi1).child(`Cannot read stored projects on ${this.machine ?? "this computer"}. Check the selected machine and bridge. Displayed data may be stale.`))
            .child(button("ocq-project-diagnostics", this.diagnostics ? "Hide diagnostics" : "Diagnostics", cx => { this.diagnostics = !this.diagnostics; cx.notify(); }))
            .when(this.diagnostics, e => e.child(div().child(this.error)).child(button("ocq-project-diagnostics-copy", "Copy diagnostics", cx => cx.write_to_clipboard(this.error)))))
-          .when(Boolean(active) && Boolean(this.projectPages[0].readAt) && !this.error && !this.projectsHasMore && this.projects.length === 0, (e) => e.child(div().text_color(t.muted).child("No projects registered in this queue. Initial Main setup is server-local: prepare, preview and start with an explicit canonical checkout, Main profile, role mapping and optional private prompt file. The project appears automatically after registration. This panel does not upload prompts/profiles or turn its workspace shell into Main. Queue contains standalone jobs separately.")))
+           .when(Boolean(active) && Boolean(this.projectPages[0].readAt) && !this.error && !this.projectsHasMore && this.projects.length === 0, e => e.child(this.emptyProjects(cx, t, button)))
           .when(Boolean(this.boardError), e => e.child(this.readFault(this.boardError, "selected project", t)))
-         .when(this.workspaceView === "overview", e => e
-           .child(div().font_semibold().child("Overview"))
-           .child(div().child(this.selected ? `Selected project: ${project?.label || this.selected}` : "Choose a project in Projects to inspect work and inbox mail."))
+          .when(this.workspaceView === "overview" && this.projects.length > 0, e => e
+            .child(div().font_semibold().child("Project summary"))
+            .child(div().child(this.selected ? project?.label || this.selected : "Choose a project in Work."))
+            .child(this.panelControl("ocq-summary-work", "Open work", cx => { this.projectView = "operator"; this.navigateWorkspace("projects", cx); }, t, this.renderTargets))
            .when(Boolean(project), e => e.child(div().child(`Selected project · ${(project.jobs || []).length} loaded jobs · ${(project.jobs || []).filter(j => attention(j)).length} need inspection\nLoaded inbox items: ${this.collections.inbox.items.length} · loaded completion items: ${this.collections.results.items.length}`))))
-         .when(this.workspaceView === "projects", e => e
-           .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Project intake…", cx => this.openIntake(cx)))))
+          .when(this.workspaceView === "projects" && this.projects.length > 0, e => e
+            .child(h_flex().items_center().gap(6)
+              .child(div().flex_1().min_w(0).truncate().font_semibold().child(project?.label || this.selected || "Choose a project"))
+              .child(this.panelControl("ocq-project-picker", this.projectPicker ? "Done" : "Change", cx => { this.projectPicker = !this.projectPicker; cx.notify(); }, t, this.renderTargets))))
         .when(!project && this.projects.length > 1, (e) => e.child(div().child("Choose a project")))
-         .when(this.workspaceView !== "overview" && this.projects.length > 0, (e) => e.child(v_flex().gap(3).child(div().font_semibold().child("Project")).children(this.projects.map((p) =>
-          button(`ocq-project-${p.project_id}`, `${p.label} · ${p.project_id} · ${p.integrator_unread_mail_count} unread`, (cx) => this.select(p.project_id, cx))))))
+          .when(this.workspaceView !== "overview" && this.projects.length > 0 && (this.projectPicker || !this.selected), (e) => e.child(v_flex().gap(3).children(this.projects.map((p) =>
+           button(`ocq-project-${p.project_id}`, `${p.label || p.project_id}${p.integrator_unread_mail_count ? ` · ${p.integrator_unread_mail_count} unread` : ""}`, cx => { this.select(p.project_id, cx); this.projectPicker = false; })))))
           .when(this.workspaceView !== "overview" && this.projectsHasMore, e => e.child(button("ocq-project-pages-more", "Load next 20 projects", cx => { const last = this.projectPages[this.projectPages.length - 1]; if (last.next && !this.projectPages.some(page => page.start === last.next)) this.projectPages.push({ start: last.next }); cx.notify(); })))
           .when(Boolean(this.selected) && this.workspaceView !== "overview", (e) => e
-           .child(div().font_semibold().child(project?.label ?? this.selected))
-           .child(div().text_size(12).text_color(t.muted).child(`Project snapshot read · ${project?.read_at ?? "not available"}`))
-           .when(this.workspaceView === "projects", e => e.child(h_flex().gap(2).children(["operator", "work", "results", "lanes", "binding"].map(view => button(`ocq-project-tab-${view}`, view[0].toUpperCase() + view.slice(1), cx => { if (view !== this.projectView) this.workOperator.suspend(); this.projectView = view; cx.notify(); }).when(this.projectView === view, e => e.bg(t.hover).font_semibold())))))
+            .when(this.workspaceView === "projects", e => e.child(this.projectTabs(t, button)))
            .when(this.workspaceView === "projects" && this.projectView === "operator", e => e.child(this.workOperator.render(cx, t, button)))
            .when(this.workspaceView === "projects" && this.projectView === "binding", e => e
            .child(button("ocq-project-overview", "View project and binding", (cx) => this.openTarget("summary", undefined, cx)))
@@ -1812,5 +1801,12 @@ export default class OCQ extends View {
           .when(this.collections.inbox.hasMore, (e) => e.child(button("ocq-inbox-more", "Load more mail", (cx) => this.loadCollection("inbox", false, cx))))
             )
           .child(div().pt(8).text_size(12).text_color(t.muted).child("Stored observations only. Imported claims are unverified; worktree drift is checked only by explicit Verify filesystem now. Opening mail does not mark it read.")))));
+  }
+  projectTabs(t, button) {
+    return h_flex().gap(2).children([["operator", "Tasks"], ["work", "Jobs"], ["results", "Results"], ["lanes", "Lanes"], ["binding", "Setup"]].map(([view, label]) =>
+      button(`ocq-project-tab-${view}`, label, cx => {
+        if (view !== this.projectView) this.workOperator.suspend();
+        this.projectView = view; cx.notify();
+      }).when(this.projectView === view, e => e.bg(t.hover).font_semibold())));
   }
 }

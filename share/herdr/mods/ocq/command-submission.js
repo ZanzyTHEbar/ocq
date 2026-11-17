@@ -1,10 +1,9 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { exec, compatibility } from "./compatibility.js";
-import { connect } from "net";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
-import { composeProof, composeEqual, composeDecode, socketFrames } from "./private-frames.js";
+import { composeDecode } from "./private-frames.js";
 
 const hash = (s) => createHash("sha256").update(s).digest("hex");
 const hex = (s) => /^[0-9a-f]{64}$/.test(s || "");
@@ -60,51 +59,19 @@ export class CommandSubmission {
     if (!this.current(owner)) throw new Error("Context changed");
     const current = compatibility.transfer(() => this.current(owner));
     const launch = randomBytes(32).toString("hex");
-    const worker = exec("ocq-herdr", [`${this.route}-${mode}`, ...this.args(), ...(mode === "preview" ? [id] : []), launch], { on: null, timeout: 25000, current: () => this.current(owner) }).then((r) => r, () => null);
-    let socket = null;
-    try {
-      let entry = null;
-      for (let n = 0; n < 100; n++) {
-        if (!this.current(owner)) throw new Error("Context changed");
-        const r = await exec("ocq-herdr", [`${this.route}-rendezvous`, ...this.args(), launch], { on: null });
-        if (!this.current(owner)) throw new Error("Context changed");
-        if (r.code === 0) { entry = JSON.parse(r.stdout); break; }
-        await cx.sleep(50);
-      }
-      if (!entry || entry.launch !== launch || !hex(entry.capability) || !Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535 || !this.current(owner)) throw new Error("Rendezvous unavailable");
-      socket = await connect("127.0.0.1", entry.port);
-      const frames = socketFrames(socket, 1048576), nonce = randomBytes(32).toString("hex");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(nonce + "\n");
-      if (!composeEqual(await frames.line(64), composeProof(entry.capability, nonce, "server"))) throw new Error("Server authentication failed");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(composeProof(entry.capability, nonce, "client") + "\n");
-      if (await frames.line(64) !== "READY" || !current()) throw new Error("Authentication/context changed");
-      if (mode !== "preview") {
-        const b = Buffer.from(raw, "utf8");
-        if (!b.length || b.length > 131072 || composeDecode(b) !== raw) throw new Error("Invalid command frame");
-        if (!current()) throw new Error("Transfer authorization changed");
-        await socket.write(`${b.length}\n`);
-        if (!current()) throw new Error("Transfer authorization changed");
-        await socket.write(raw);
-      }
-      let review = null;
-      if (mode === "receive") {
-        if (!/^PREPARED [0-9a-f]{64}$/.test(await frames.line(80))) throw new Error("Preparation uncertain");
-      } else {
-        const h = await frames.bytes(4), size = h[0] * 16777216 + h[1] * 65536 + h[2] * 256 + h[3];
-        if (!size || size > 1048576) throw new Error("Private review exceeds bound");
-        review = JSON.parse(composeDecode(await frames.bytes(size)));
-        const p = JSON.parse(review.raw);
-        if (hash(review.raw) !== review.sha256 || !this.same(p.scope, this.t) || typeof p.canonical !== "string" || hash(p.canonical) !== review.canonical_sha256 || !Array.isArray(review.fields) || !review.fields.length || review.fields.some((f) => typeof f.label !== "string" || typeof f.value !== "string")) throw new Error("Exact private request mismatch");
-      }
-      socket.close(); socket = null;
-      const done = await worker;
-      if (!done || done.code !== 0 || !current()) throw new Error("Exchange outcome unavailable");
-      const status = this.validate(JSON.parse(done.stdout));
-      if (mode === "receive" && status.payload_sha256 !== hash(raw) || mode === "preview" && (status.id !== id || status.payload_sha256 !== review.sha256)) throw new Error("Exact retained digest mismatch");
-      return { status, review };
-    } finally { if (socket) socket.close(); await worker; }
+    if (mode !== "preview") {
+      const b = Buffer.from(raw, "utf8");
+      if (!b.length || b.length > 131072 || composeDecode(b) !== raw) throw Error("Invalid command frame");
+    }
+    const out = await compatibility.exchange(`${this.route}-${mode}`, [...this.args(), ...(mode === "preview" ? [id] : []), launch], raw, current);
+    const status = this.validate(out.status), review = out.review;
+    if (mode !== "receive") {
+      const p = JSON.parse(review.raw);
+      if (hash(review.raw) !== review.sha256 || !this.same(p.scope, this.t) || typeof p.canonical !== "string" || hash(p.canonical) !== review.canonical_sha256 ||
+        !Array.isArray(review.fields) || !review.fields.length || review.fields.some(f => typeof f.label !== "string" || typeof f.value !== "string")) throw Error("Exact private request mismatch");
+    }
+    if (mode === "receive" && status.payload_sha256 !== hash(raw) || mode === "preview" && (status.id !== id || status.payload_sha256 !== review.sha256)) throw Error("Exact retained digest mismatch");
+    return { status, review };
   }
   setReview(review, retained) {
     const pages = [];
@@ -219,10 +186,14 @@ export class CommandSubmission {
     const s = this.status, r = this.review, f = this.activeFields[this.page];
     return v_flex().id("ocq-command-submit").size_full().min_h(0).overflow_y_scroll().p(14).gap(8).bg(t.background).text_color(t.foreground)
       .track_focus(owner.handle).on_key_down((e, cx) => this.key(e, owner, cx))
-      .child(h_flex().gap(8).child(div().font_semibold().child(`Submit general ${this.kind} · local only`)).child(button("ocq-command-close", "Close", (cx) => this.close(owner, cx))))
-      .child(div().text_color(t.blocked).child(this.warning))
-      .child(div().text_size(12).child(`Machine: this computer\nSpace: ${this.space}\nQueue: ${this.t?.queue_identity || "checking…"}\nThis action adds no project association. A matching global key recovers its original job unchanged. Key and resolved v${this.version} request are immutable once prepared.`))
-      .child(div().child(this.working ? "Checking exact local context/journal…" : `Retained state: ${s?.state || "unavailable — refresh only"}${s?.observation ? " · " + s.observation : ""}\nIntent: ${s?.id || "none"}`))
+      .child(h_flex().gap(8).items_start().child(div().flex_1().min_w(0).font_semibold().child(`Submit general ${this.kind} · local only`)).child(button("ocq-command-close", "Close", (cx) => this.close(owner, cx)).flex_none()))
+      .child(div().text_color(t.blocked).child(r ? this.warning : "An existing dispatcher may execute immediately after admission. No automatic retry."))
+      .child(div().child(this.working ? "Checking exact local context/journal…" : `Retained state: ${s?.state || "unavailable — refresh only"}${s?.observation ? " · " + s.observation : ""}`))
+      .child(button("ocq-command-details", this.details ? "Hide details" : "Details", cx => { this.details = !this.details; cx.notify(); }))
+      .when(Boolean(this.details), e => e
+        .child(div().text_size(12).child(this.warning))
+        .child(div().text_size(12).child(`Machine: this computer\nSpace: ${this.space}\nQueue: ${this.t?.queue_identity || "checking…"}\nIntent: ${s?.id || "none"}\nThis action adds no project association. A matching global key recovers its original job unchanged. Key and resolved v${this.version} request are immutable once prepared.`))
+        .child(div().text_size(12).text_color(t.muted).child(this.formHint)))
       .when(Boolean(this.error), (e) => e.child(div().text_color(t.ansi1).child(this.error)))
       .when(Boolean(s?.state === "other_context"), (e) => e.child(div().text_color(t.blocked).child(`Retained request belongs to another exact space: ${s.scope.space_id}. Return there; no adoption or resend here.`)))
       .when(Boolean(s?.receipt), (e) => e.child(div().child(`Exact receipt matched: ${s.receipt?.job.id}\nSequence: ${s.receipt?.job.sequence}\nCurrent state: ${s.receipt?.job.state} · validation: ${s.receipt?.job.validation}\nReceipt match proves admission, NOT successful execution.`)))
@@ -232,7 +203,7 @@ export class CommandSubmission {
         .child(div().font_semibold().child(`Field ${this.page + 1}/${this.activeFields.length} · ${f?.label}`))
         .child((f?.multiline ? Textarea.new(f.state).h(120) : Input.new(f.state).h(38)).id(`ocq-command-${f?.key}`).accessibility_label(f?.label).px(8).border_1().border_color(t.border).text_color(t.foreground))
         .child(h_flex().gap(8).child(button("ocq-command-field-prev", "Previous field", (cx) => this.advance(-1, owner, cx))).child(button("ocq-command-field-next", "Next field", (cx) => this.advance(1, owner, cx))))
-        .child(div().text_size(12).text_color(t.muted).child(this.formHint))
+        .child(div().text_size(12).text_color(t.muted).child("Enter to edit · F6 to leave input · ←/→ fields"))
         .when(this.page === this.activeFields.length - 1, (e) => e.child(button("ocq-command-build", "Build exact private draft (no admission)", (cx) => this.action(owner, "draft", cx))))))
       .when(Boolean(r), (e) => e.child(v_flex().gap(8)
         .child(div().font_semibold().child(`${r?.retained ? "RETAINED" : "DRAFT"} exact review · ${this.page + 1}/${r?.pages.length}`))
@@ -247,6 +218,6 @@ export class CommandSubmission {
       .when(!this.working && ["prepared", "armed"].includes(s?.state) && Boolean(r?.retained), (e) => e.child(button("ocq-command-cancel", "Cancel unattempted admission", (cx) => this.action(owner, "cancel", cx))))
       .when(!this.working && ["attempted", "completed"].includes(s?.state), (e) => e.child(button("ocq-command-reconcile", "Check exact receipt (no retry)", (cx) => this.action(owner, "reconcile", cx))))
       .when(!this.working && ["completed", "cancelled"].includes(s?.state), (e) => e.child(button("ocq-command-retire", "Retire resolved admission intent", (cx) => this.action(owner, "retire", cx))))
-      .child(div().text_size(12).text_color(t.muted).child("Enter edit field · F6 leave input · ←/→ fields/pages · G draft · P prepare · V retained review · S review admission · Y confirm · R refresh · K receipt · C cancel · T retire · Esc close"));
+      .when(Boolean(this.details) || Boolean(r), e => e.child(div().text_size(12).text_color(t.muted).child("Enter edit field · F6 leave input · ←/→ fields/pages · G draft · P prepare · V retained review · S review admission · Y confirm · R refresh · K receipt · C cancel · T retire · Esc close")));
   }
 }

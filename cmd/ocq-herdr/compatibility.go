@@ -42,6 +42,7 @@ func modActions() map[string]string {
 	out["main-start"] = core.MainProtocol
 	out["client-prepare"] = core.ClientProtocol + "/prepare"
 	out["client-open"] = core.ClientProtocol + "/open"
+	out["capture-receipt-preview"] = "capture/recorded-receipt-preview/v1"
 	for family, ops := range families {
 		for _, op := range ops {
 			out[family+"-"+op] = family + "/" + op + "/journal-v1"
@@ -54,6 +55,9 @@ func modActions() map[string]string {
 // handshake. Journal status/rendezvous may open their existing private locks;
 // none authorizes a claim, dispatch, acknowledgement or native launch.
 func modRead(action string) bool {
+	if action == "capture-receipt" {
+		return true
+	}
 	switch action {
 	case "work-list", "work-status", "work-recover", "work-output", "work-handoff", "work-preview",
 		"main-list", "main-status", "main-recover", "main-preview", "client-list", "client-status", "client-verify":
@@ -199,7 +203,10 @@ func installCompatibility(root *cobra.Command) {
 	}})
 	root.PersistentPreRunE = func(cmd *cobra.Command, a []string) error {
 		name := cmd.Name()
-		if modRead(name) {
+		if name == "push-serve" || name == "push-token" {
+			return nil
+		} // Explicit standalone transport setup; no queue mutation.
+		if modRead(name) || name == "hc-binding" {
 			return nil
 		}
 		// Runtime entry already checks exact immutable intent v1, binary image,

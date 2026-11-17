@@ -1,10 +1,9 @@
 import { div } from "gpui-kit";
 import { v_flex, Textarea } from "gpui-base";
 import { exec, compatibility } from "./compatibility.js";
-import { connect } from "net";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
-import { composeProof, composeEqual, composeDecode, socketFrames } from "./private-frames.js";
+import { composeDecode } from "./private-frames.js";
 
 const hash = (s) => createHash("sha256").update(s).digest("hex");
 const hex = (s) => /^[0-9a-f]{64}$/.test(s || "");
@@ -43,52 +42,21 @@ export class CommandResolution {
     if (!this.current(owner, t)) throw new Error("Context changed");
     const current = compatibility.transfer(() => this.current(owner, t));
     const launch = randomBytes(32).toString("hex");
-    const args = mode === "receive" ? ["command-resolve-receive", ...this.args(t), launch] : ["command-resolve-preview", ...this.args(t), digest, launch];
-    // Only IDs enter argv. Evidence bytes are never sent to exec or stdout.
-    if (!this.current(owner, t)) throw new Error("Context changed");
-    const worker = exec("ocq-herdr", args, { on: null, timeout: 25000, current: () => this.current(owner, t) }).then((r) => r, () => null);
-    let socket = null;
-    try {
-      let entry = null;
-      for (let n = 0; n < 100; n++) {
-        if (!this.current(owner, t)) throw new Error("Context changed");
-        const r = await exec("ocq-herdr", ["command-resolve-rendezvous", ...this.args(t), launch], { on: null });
-        if (r.code === 0) { entry = JSON.parse(r.stdout); break; }
-        await cx.sleep(50);
-      }
-      if (!entry || entry.launch !== launch || !hex(entry.capability) || !Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535 || !this.current(owner, t)) throw new Error("Rendezvous unavailable");
-      socket = await connect("127.0.0.1", entry.port);
-      const frames = socketFrames(socket), nonce = randomBytes(32).toString("hex");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(nonce + "\n");
-      if (!composeEqual(await frames.line(64), composeProof(entry.capability, nonce, "server"))) throw new Error("Server authentication failed");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(composeProof(entry.capability, nonce, "client") + "\n");
-      if (await frames.line(64) !== "READY" || !current()) throw new Error("Authentication/context changed");
-      let payload = null;
-      if (mode === "receive") {
-        const b = Buffer.from(raw, "utf8");
-        if (!b.length || b.length > 131072 || composeDecode(b) !== raw) throw new Error("Invalid evidence encoding");
-        if (!current()) throw new Error("Transfer authorization changed");
-        await socket.write(`${b.length}\n`);
-        if (!current()) throw new Error("Transfer authorization changed");
-        await socket.write(raw);
-        if (!/^PREPARED [0-9a-f]{64}$/.test(await frames.line(80))) throw new Error("Preparation uncertain");
-      } else {
-        const h = await frames.bytes(4), size = h[0] * 16777216 + h[1] * 65536 + h[2] * 256 + h[3];
-        if (!size || size > 131072) throw new Error("Invalid private preview");
-        const exact = composeDecode(await frames.bytes(size));
-        if (hash(exact) !== digest) throw new Error("Retained bytes changed");
-        payload = JSON.parse(exact);
-        if (!this.same(payload.scope, t) || payload.scope.displayed_kind !== "command" || payload.scope.displayed_state !== "unknown" || hash(payload.displayed_reason) !== payload.scope.reason_sha256 || !payload.evidence?.trim()) throw new Error("Private review mismatch");
-      }
-      socket.close(); socket = null;
-      const done = await worker;
-      if (!done || done.code !== 0 || !current()) throw new Error("Exchange uncertain");
-      const status = this.validate(JSON.parse(done.stdout), t);
-      if (mode === "receive" && status.payload_sha256 !== hash(raw) || mode === "preview" && (status.payload_sha256 !== digest || hash(payload.evidence) !== status.evidence_sha256)) throw new Error("Exact receipt mismatch");
-      return { status, payload };
-    } finally { if (socket) socket.close(); await worker; }
+    if (mode === "receive") {
+      const b = Buffer.from(raw, "utf8");
+      if (!b.length || b.length > 131072 || composeDecode(b) !== raw) throw Error("Invalid evidence encoding");
+    }
+    const out = await compatibility.exchange(`command-resolve-${mode}`, [...this.args(t), ...(mode === "preview" ? [digest] : []), launch], raw, current);
+    const status = this.validate(out.status, t);
+    let payload = null;
+    if (mode === "preview") {
+      if (typeof out.exact !== "string" || hash(out.exact) !== digest) throw Error("Retained bytes changed");
+      payload = JSON.parse(out.exact);
+      if (!this.same(payload.scope, t) || payload.scope.displayed_kind !== "command" || payload.scope.displayed_state !== "unknown" ||
+        hash(payload.displayed_reason) !== payload.scope.reason_sha256 || !payload.evidence?.trim()) throw Error("Private review mismatch");
+    }
+    if (mode === "receive" && status.payload_sha256 !== hash(raw) || mode === "preview" && (status.payload_sha256 !== digest || hash(payload.evidence) !== status.evidence_sha256)) throw Error("Exact receipt mismatch");
+    return { status, payload };
   }
 
   action(owner, action, cx) {

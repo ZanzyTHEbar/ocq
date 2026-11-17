@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -274,17 +275,20 @@ func validClientReceipt(p ClientPointer, c ClientActionContext, receipt ClientTe
 }
 
 func RecordProjectClient(dir, project, digest string, c ClientActionContext, receipt ClientTerminalReceipt) (ClientStatus, error) {
+	return RecordProjectClientContext(context.Background(), dir, project, digest, c, receipt)
+}
+
+// The exact returned receipt is held unchanged while awaiting the original
+// project's lock. This never retries terminal.run, arm or attempt.
+func RecordProjectClientContext(ctx context.Context, dir, project, digest string, c ClientActionContext, receipt ClientTerminalReceipt) (ClientStatus, error) {
 	if !isValidProjectID(project) || !isValidHexLen(digest, 64) {
 		return ClientStatus{}, errors.New("invalid client pointer")
 	}
-	j, err := openLocalJournal(dir, workJournal(project))
+	j, err := openClientAdmissionJournal(ctx, dir, project)
 	if err != nil {
 		return ClientStatus{}, err
 	}
 	defer j.close()
-	if err = j.acquire(); err != nil {
-		return ClientStatus{}, err
-	}
 	r, err := OpenReader(dir)
 	if err != nil {
 		return ClientStatus{}, err
@@ -330,10 +334,10 @@ func RecordProjectClient(dir, project, digest string, c ClientActionContext, rec
 	if status.State != "attempted_unknown" {
 		return status, errors.New("native client was not attempted")
 	}
-	if err = nativeJournalRoom(j.dir, 1); err != nil {
+	if err = ctx.Err(); err != nil {
 		return status, err
 	}
-	if err = j.create(clientFile(digest, "terminal"), receipt); err != nil {
+	if err = retainClientTerminalReceipt(j, digest, receipt); err != nil {
 		return status, err
 	}
 	recorded, err := inspectClient(r, j.dir, project, digest)

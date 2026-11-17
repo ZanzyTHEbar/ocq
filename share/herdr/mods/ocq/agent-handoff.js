@@ -1,5 +1,5 @@
 import { div } from "gpui-kit";
-import { exec } from "herdr";
+import { exec } from "./compatibility.js";
 
 // A human inspect destination, not a reconciliation or permission control.
 // In particular this module has no terminal, URL, prompt or client launch API.

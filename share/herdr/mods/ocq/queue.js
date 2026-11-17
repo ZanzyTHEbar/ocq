@@ -53,12 +53,23 @@ export class QueueInspection {
     this.handoff = new AgentHandoff(this);
     this.submission = new CommandSubmission(this, this.commandInputs);
     this.agentSubmission = new AgentSubmission(this, this.agentInputs);
-    this.dispatcher = new CommandDispatcher(this);
+    this.replaceDispatcher();
     this.resolveInput.set_value("");
     this.inspecting = false; this.inputFocused = false;
     this.bytePage = 0; this.targets = [];
     this.detailTab = "summary"; this.listTab = "jobs"; this.diagnostics = false;
     this.executionDetails = false; this.jobActions = false;
+  }
+
+  replaceDispatcher() {
+    if (this.dispatcher) {
+      this.dispatcher.dispose();
+      this.retainedPrivate = this.retainedPrivate || [];
+      if (!this.retainedPrivate.some(item => item.dispatcher === this.dispatcher))
+        this.retainedPrivate.push({ dispatcher: this.dispatcher });
+    }
+    this.dispatcher = new CommandDispatcher(this);
+    return this.dispatcher;
   }
 
   current(owner, generation) {
@@ -138,6 +149,7 @@ export class QueueInspection {
     const previous = this.retainedPrivate[this.retainedPrivate.length - 1];
     if (!previous || previous.ack !== this.ack || previous.cancel !== this.cancel || previous.submission !== this.submission || previous.agentSubmission !== this.agentSubmission || previous.dispatcher !== this.dispatcher) this.retainedPrivate.push({ ack: this.ack, cancel: this.cancel, resolution: this.resolution, reconciliation: this.reconciliation, handoff: this.handoff, submission: this.submission, agentSubmission: this.agentSubmission, dispatcher: this.dispatcher });
     this.generation++;
+    this.replaceDispatcher();
     for (const slot of ["jobs", "events", "detail"]) {
       // Replace targets: a late callback cannot repopulate a new incarnation.
       this[slot] = slot === "detail" ? { actionsBlocked: true, actionBlockReason: "Context changed; inspect afresh. Private journals retained separately." } : {};

@@ -2,10 +2,9 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { spaces } from "herdr";
 import { exec, compatibility } from "./compatibility.js";
-import { connect } from "net";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
-import { composeProof, composeEqual, composeDecode, socketFrames } from "./private-frames.js";
+import { composeDecode } from "./private-frames.js";
 
 const hash = (s) => createHash("sha256").update(s).digest("hex");
 const hex = (s) => /^[0-9a-f]{64}$/.test(s || "");
@@ -111,43 +110,16 @@ export class ResultPublication {
     if (!this.current(owner, c)) throw new Error("Context changed");
     const current = compatibility.transfer(() => this.current(owner, c));
     const t = Object.freeze({ ...this.scope.target }), launch = randomBytes(32).toString("hex"), captureID = this.captureID, prefix = c.capture ? "capture" : "result-publish";
-    const worker = exec("ocq-herdr", [`${prefix}-${c.capture && mode === "receive" ? "prepare" : mode}`, ...this.args(t), ...(mode === "preview" ? [c.capture ? captureID : digest, payloadDigest] : c.capture ? [captureID] : []), launch], { on: null, timeout: 25000, current: () => this.current(owner, c) }).then((r) => r, () => null);
-    let socket = null;
-    try {
-      let entry = null;
-      for (let n = 0; n < 100; n++) {
-        if (!this.current(owner, c)) throw new Error("Context changed");
-        const r = await exec("ocq-herdr", [`${prefix}-rendezvous`, ...this.args(t), launch], { on: null });
-        if (r.code === 0) { entry = JSON.parse(r.stdout); break; }
-        await cx.sleep(50);
-      }
-      if (!entry || entry.launch !== launch || !hex(entry.capability) || !Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535 || !this.current(owner, c)) throw new Error("Rendezvous unavailable");
-      socket = await connect("127.0.0.1", entry.port); const frames = socketFrames(socket), nonce = randomBytes(32).toString("hex");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(nonce + "\n");
-      if (!composeEqual(await frames.line(64), composeProof(entry.capability, nonce, "server"))) throw new Error("Authentication failed");
-      if (!current()) throw new Error("Transfer authorization changed");
-      await socket.write(composeProof(entry.capability, nonce, "client") + "\n");
-      if (await frames.line(64) !== "READY" || !current()) throw new Error("Authentication/context changed");
-      let exact = null;
-      if (mode === "receive") {
-        const b = Buffer.from(raw); if (!b.length || b.length > 131072 || composeDecode(b) !== raw) throw new Error("Unsupported encoding");
-        if (!current()) throw new Error("Transfer authorization changed");
-        await socket.write(`${b.length}\n`);
-        if (!current()) throw new Error("Transfer authorization changed");
-        await socket.write(raw);
-        if (await frames.line(80) !== `PREPARED ${c.capture ? captureID : digest}`) throw new Error("Preparation uncertain");
-      } else {
-        const h = await frames.bytes(4), n = h[0] * 16777216 + h[1] * 65536 + h[2] * 256 + h[3];
-        exact = composeDecode(await frames.bytes(n));
-        if (hash(exact) !== payloadDigest) throw new Error("Retained payload changed");
-      }
-      socket.close(); socket = null; const done = await worker;
-      if (!done || done.code !== 0 || !current()) throw new Error("Exchange uncertain");
-      const status = this.validate(JSON.parse(done.stdout), t, digest, c.capture, captureID);
-      if (!(c.capture && mode === "receive") && status.payload_sha256 !== (mode === "receive" ? hash(raw) : payloadDigest)) throw new Error("Payload receipt mismatch");
-      return { status, exact };
-    } finally { if (socket) socket.close(); await worker; }
+    if (mode === "receive") {
+      const b = Buffer.from(raw);
+      if (!b.length || b.length > 131072 || composeDecode(b) !== raw) throw Error("Unsupported encoding");
+    }
+    const out = await compatibility.exchange(`${prefix}-${c.capture && mode === "receive" ? "prepare" : mode}`,
+      [...this.args(t), ...(mode === "preview" ? [c.capture ? captureID : digest, payloadDigest] : c.capture ? [captureID] : []), launch], raw, current);
+    const status = this.validate(out.status, t, digest, c.capture, captureID), exact = mode === "preview" ? out.exact : null;
+    if (mode === "preview" && (typeof exact !== "string" || hash(exact) !== payloadDigest)) throw Error("Retained payload changed");
+    if (!(c.capture && mode === "receive") && status.payload_sha256 !== (mode === "receive" ? hash(raw) : payloadDigest)) throw Error("Payload receipt mismatch");
+    return { status, exact };
   }
   prepare(owner, cx) {
     const c = this.context;
