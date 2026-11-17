@@ -28,6 +28,10 @@ components:
 Native, task-first operation beside Herdr Files/Changes. The task and available
 action lead; protocol evidence unfolds in place. This record describes the
 current source and isolated native render, not independent design approval.
+Automatic association and simultaneous queue regions have real native evidence;
+peer-loss recovery is held because native close rejected after the read ended.
+The source retains the physical slot rather than inventing settlement. This is
+not a passed reconnect/dispose acceptance or permission to deploy.
 
 ## Colors
 
@@ -43,10 +47,18 @@ heading 16 semibold. No display face, decorative mono or microtext.
 
 ## Layout
 
-Default 360px panel; isolated renders also inspect 320px. Header: identity and
-Details, then Work/Queue/Inbox and observation status. Recovery is one inline
-strip. Task body owns the remaining scroll area. Header diagnostic content is
-bounded to 260px and compatibility detail to 120px, with native scrolling.
+Default 360px panel; acceptance must also inspect 320px. At most two ordinary
+header rows: project/context and Details, then Work/Queue/Inbox/Advanced. No
+transport status bar, connection form or recovery strip. A setup fault changes
+the existing Details affordance to Check setup; ordinary reconnecting is silent.
+Expanded Details is bounded and scrollable.
+
+Queue has stacked Jobs and Notifications regions, each owning half the remaining
+height and its own native scroll, cursor and snapshot. Neither list is a tab.
+Project Inbox is separate; Advanced owns Find receipt and execution controls.
+Normal task rows are at most two lines. Empty states have one sentence and at
+most one relevant action. Exact review and consequential confirmations are not
+subject to ordinary row/copy truncation.
 
 ## Elevation & Depth
 
@@ -61,7 +73,8 @@ Use rows and native text controls, not nested cards or invented diagrams.
 
 - **Navigation:** Work first; Queue and Inbox remain one action away. Project
   summary is under Details; project switching is an explicit Change disclosure.
-- **Recovery:** concise paused state, reconnect action, exact reason on demand.
+- **Connection:** automatic exact-context private association and single-owner
+  background recovery. No user connection controls. Fault reason in Details.
   Observed data and action authorization are separate facts.
 - **Empty project:** explanation, guarded local registration, setup help on demand.
   Copying help never starts Main.
@@ -79,3 +92,5 @@ Use rows and native text controls, not nested cards or invented diagrams.
 - Don't interpret transport status as agent liveness or mutation permission.
 - Don't populate empty screens with invented projects or replace user workspace
   state to manufacture a prettier demonstration.
+- Don't call earlier isolated renders user-approved; this direction follows the
+  explicit corrective brief and still requires independent native visual review.

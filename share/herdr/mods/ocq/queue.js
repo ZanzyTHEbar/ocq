@@ -1,5 +1,5 @@
 import { div } from "gpui-kit";
-import { h_flex, v_flex, InputState, Input, TextareaState } from "gpui-base";
+import { h_flex, v_flex, InputState, Input, TextareaState, ScrollHandle } from "gpui-base";
 import { spaces } from "herdr";
 import { bridgeCommand, enabledButton } from "./compatibility.js";
 import { Buffer } from "buffer";
@@ -24,6 +24,20 @@ function frozenList(data) {
   return Object.freeze({ ...data, items: Object.freeze(data.items.map(item => Object.freeze({ ...item }))) });
 }
 
+function human(value) {
+  const labels = { cancelled: "Canceled", cancelled_before_launch: "Canceled before launch", operator_reconciled: "Operator reconciled", command_succeeded: "Succeeded", agent_succeeded: "Succeeded", command_failed: "Failed", agent_failed: "Failed", not_run: "Tests not run", unknown: "Unknown" };
+  if (!value) return "";
+  return labels[value] || (value[0].toUpperCase() + value.slice(1).replace(/_/g, " "));
+}
+function rowText(item, kind) {
+  const title = human(kind || "job");
+  const state = human(item.state), outcome = human(item.outcome);
+  const outcomeOnly = outcome && (item.state === "finished" || outcome.startsWith(state));
+  const facts = outcomeOnly ? [outcome] : [...new Set([state, outcome].filter(Boolean))];
+  if (item.validation === "not_run") facts.push("Tests not run");
+  return { title, state: facts.join(" · ") };
+}
+
 // Stored views plus explicit, journaled local global acknowledgements. Never
 // query live execution or retry a mutation. Responses are context/identity guarded.
 export class QueueInspection {
@@ -40,6 +54,7 @@ export class QueueInspection {
     this.resolveInput.on("blur", (_e, cx) => { this.inputFocused = false; cx.notify(); });
     this.commandInputs = CommandSubmission.inputs(this);
     this.agentInputs = AgentSubmission.inputs(this);
+    this.scroll = { jobs: ScrollHandle.new(), events: ScrollHandle.new() };
     this.reset();
   }
 
@@ -57,7 +72,8 @@ export class QueueInspection {
     this.resolveInput.set_value("");
     this.inspecting = false; this.inputFocused = false;
     this.bytePage = 0; this.targets = [];
-    this.detailTab = "summary"; this.listTab = "jobs"; this.diagnostics = false;
+    this.logTechnical = false; this.rawOutput = false;
+    this.detailTab = "summary"; this.advanced = false; this.diagnostics = false;
     this.executionDetails = false; this.jobActions = false;
   }
 
@@ -132,11 +148,13 @@ export class QueueInspection {
         return true;
       } });
     };
-    if (!this.inspecting) {
-      const slot = this.listTab === "events" ? "events" : "jobs", state = this[slot];
-      const args = state.pending?.args || state.snapshot?.args || [slot === "jobs" ? "queue-jobs" : "notifications", "0"];
-      add(slot, state, { slot: `queue-${slot}`, kind: slot === "jobs" ? "queue-jobs" : "notifications", cursor: args[1] || "0" }, args);
-    } else {
+    if (!this.inspecting && !this.advanced) {
+      for (const slot of ["jobs", "events"]) {
+        const state = this[slot];
+        const args = state.pending?.args || state.snapshot?.args || [slot === "jobs" ? "queue-jobs" : "notifications", "0"];
+        add(slot, state, { slot: `queue-${slot}`, kind: slot === "jobs" ? "queue-jobs" : "notifications", cursor: args[1] || "0" }, args);
+      }
+    } else if (this.inspecting) {
       const state = this.detail, args = state.pending?.args || state.snapshot?.args;
       if (args) add("detail", state, { slot: "queue-selected", kind: args[0] === "queue-job" ? "queue-job" : "notification", ...(args[0] === "queue-job" ? { job_id: args[1] } : { event_id: args[1] }) }, args);
     }
@@ -425,6 +443,7 @@ export class QueueInspection {
     if ((key === "down" || key === "up") && targets.length) {
       index = (index + (key === "down" ? 1 : targets.length - 1)) % targets.length;
       owner.navigationTarget = targets[index].id; owner.navigationLabel = targets[index].label;
+      targets[index].reveal?.();
       cx.notify();
     }
     if (key === "enter" && !event.is_held) targets[index]?.run(cx);
@@ -443,10 +462,10 @@ export class QueueInspection {
       .child(div().flex_1().min_h(0).child(retainedReview.confirmation(owner, cx, t, button)));
     if (this.ack.confirm && this.ackCurrent(owner, this.ack)) return this.renderAckConfirmation(owner, cx, t, button);
     this.targets = [];
-    const action = (id, label, fn) => {
+    const action = (id, label, fn, content = label) => {
       const run = cx => { if (enabledButton(id) && this.detailControlAllowed(id)) fn(cx); };
       if (enabledButton(id) && this.detailControlAllowed(id)) owner.registerAction(id, label, run, this.targets);
-      return button(id, label, cx => { owner.navigationTarget = id; owner.navigationLabel = label; run(cx); })
+      return button(id, content, cx => { owner.navigationTarget = id; owner.navigationLabel = label; run(cx); }, label)
         .when(id === owner.navigationTarget, (e) => e.bg(t.hover));
     };
     const status = (state, slot) => v_flex().gap(4)
@@ -456,64 +475,80 @@ export class QueueInspection {
         .child(action(`ocq-queue-job-diagnostics-${slot}`, `${this.diagnostics ? "Hide diagnostics" : "Diagnostics"} · ${slot}`, cx => { this.diagnostics = !this.diagnostics; cx.notify(); }))
         .when(this.diagnostics, e => e.child(div().child(state.error)).child(action(`ocq-queue-job-diagnostics-copy-${slot}`, `Copy diagnostics · ${slot}`, cx => cx.write_to_clipboard(state.error)))))
       .when(Boolean(state.data?.read_at), (e) => e.child(div().text_size(12).text_color(t.muted).child(`${slot === "detail" ? "Detail read started" : "Read started"}: ${state.observedReadAt || state.data.read_at}`)));
-    const jobs = this.jobs.data, events = this.events.data, detail = this.detail.data, log = this.log.data;
+    const jobs = this.jobs.data, events = this.events.data, detail = this.inspecting ? this.detail.data : null, log = this.log.data;
     // Keep natural content height in the root scroll viewport, like the native
     // forms; nested flex scrolling can strand command output below the pane.
     const content = v_flex().id(this.inspecting ? "ocq-queue-inspection" : "ocq-queue-content").flex_none().gap(8);
     if (!this.inspecting) {
-      content.child(div().text_size(12).text_color(t.muted).child("Stored reads only. Opening never acknowledges events or changes jobs."))
-      .when(owner.machine === null, e => e.child(action("ocq-queue-job-actions", this.executionDetails ? "Hide local execution actions" : "Local execution actions…", cx => { this.executionDetails = !this.executionDetails; cx.notify(); })))
+      if (!this.advanced) {
+        const region = (slot, title, data) => {
+          const jobs = slot === "jobs";
+          const list = v_flex().id(`ocq-queue-${slot}-scroll`).flex_1().min_h(0).overflow_y_scroll().gap(2)
+            .track_scroll(this.scroll[slot])
+            .when(Boolean(this[slot].error), e => e.child(div().text_color(t.blocked).child("Page unavailable.")));
+          if (!data) list.child(div().text_color(t.muted).child("Waiting for queue."));
+          else {
+            if (!data.items.length) list.child(div().text_color(t.muted).child(jobs ? "No jobs on this page." : "No pending notifications."));
+             const labels = data.items.map(item => rowText(item, jobs ? item.kind : this.jobs.data?.items.find(job => job.id === item.job_id)?.kind));
+             for (const [index, item] of data.items.entries()) {
+               const label = labels[index], summary = `${label.title} · ${label.state}`;
+               const duplicate = labels.some((other, i) => i !== index && other.title === label.title && other.state === label.state);
+               let suffix = 8;
+               while (duplicate && suffix < item.id.length && data.items.some(other => other.id !== item.id && other.id.slice(-suffix) === item.id.slice(-suffix))) suffix += 2;
+              // Native reveal addresses direct row children; focus never needs
+              // an extra visible "Selected" narration strip.
+              const offset = this[slot].error ? 1 : 0;
+              owner.actionReveal = () => this.scroll[slot].scroll_to_item(index + offset);
+              list.child(action(`ocq-queue-${jobs ? "job" : "event"}-${item.id}`, `${summary}\n${item.id}`,
+                cx => this.read(owner, "detail", [jobs ? "queue-job" : "notification", item.id], cx),
+                v_flex().min_w(0)
+                   .child(div().truncate().child(`${label.title}${duplicate ? ` · …${item.id.slice(-suffix)}` : ""}`))
+                   .child(div().truncate().text_color(t.muted).child(label.state))).min_w(0).w_full());
+              owner.actionReveal = null;
+            }
+            if (data.has_more) list.child(action(jobs ? "ocq-queue-next" : "ocq-queue-event-next", "Next page",
+              cx => this.read(owner, slot, [jobs ? "queue-jobs" : "notifications", data.cursor], cx)));
+            if (this[slot].snapshot?.args[1] !== "0") list.child(action(jobs ? "ocq-queue-first" : "ocq-queue-event-first", "First page",
+              cx => this.read(owner, slot, [jobs ? "queue-jobs" : "notifications", "0"], cx)));
+          }
+          return v_flex().id(`ocq-queue-${slot}-region`).flex_1().min_h(0).gap(4)
+            .child(div().flex_none().font_semibold().child(title)).child(list);
+        };
+        return v_flex().id("ocq-queue").size_full().min_h(0).p(12).gap(12).text_size(13).bg(t.background).text_color(t.foreground)
+          .track_focus(owner.handle).on_key_down((e, cx) => this.key(e, owner, cx))
+          .child(region("jobs", "Jobs", jobs))
+          .child(region("events", "Notifications", events));
+      }
+      content.child(div().font_semibold().child("Find receipt"))
+       .child(Input.new(this.input).id("ocq-queue-exact-id").accessibility_label("Exact retained job or event ID").h(34).px(8).border_1().border_color(t.border).text_color(t.foreground))
+       .child(action("ocq-queue-lookup-job", "Read job", cx => this.read(owner, "detail", ["queue-job", this.input.value()], cx)))
+       .child(action("ocq-queue-lookup-event", "Read notification", cx => this.read(owner, "detail", ["notification", this.input.value()], cx)))
+       .when(owner.machine === null, e => e.child(action("ocq-queue-job-actions", this.executionDetails ? "Hide execution actions" : "Execution actions…", cx => { this.executionDetails = !this.executionDetails; cx.notify(); })))
       .when(owner.machine === null && this.executionDetails, e => e
         .child(action("ocq-queue-submit-command", "Submit general command / recover admission…", (cx) => this.submission.open(owner, cx)))
         .child(action("ocq-queue-submit-agent", "Submit standalone agent / recover admission…", (cx) => this.agentSubmission.open(owner, cx)))
-        .child(action("ocq-queue-command-dispatcher", "COMMANDS-ONLY dispatcher · start / status / drain…", (cx) => this.dispatcher.open(owner, cx))))
-      .when(owner.machine !== null, e => e.child(div().text_size(12).text_color(t.muted).child("Execution and acknowledgement actions require this machine’s local UI.")))
-      .child(h_flex().gap(4)
-        .child(action("ocq-queue-job-tab-jobs", this.listTab === "jobs" ? "Selected: Jobs" : "Jobs", cx => { this.listTab = "jobs"; cx.notify(); }))
-        .child(action("ocq-queue-job-tab-notifications", this.listTab === "events" ? "Selected: Notifications" : "Notifications", cx => { this.listTab = "events"; cx.notify(); })));
-    if (this.listTab === "jobs") {
-      content.child(div().font_semibold().child("Queue jobs · receipt order"))
-      .child(status(this.jobs, "jobs"));
-    if (jobs) {
-      if (!jobs.items.length) content.child(div().text_color(t.muted).child(this.jobs.snapshot?.args[1] === "0" ? "No jobs in this queue at this read." : "No jobs on this page."));
-      for (const job of jobs.items) content.child(action(`ocq-queue-job-${job.id}`, `${job.sequence} · ${job.kind} · ${job.state}\n${job.id}`, (cx) => this.read(owner, "detail", ["queue-job", job.id], cx)));
-      if (jobs.has_more) content.child(action("ocq-queue-next", "Next 20 jobs", (cx) => this.read(owner, "jobs", ["queue-jobs", jobs.cursor], cx)));
-      content.child(action("ocq-queue-first", "First page", (cx) => this.read(owner, "jobs", ["queue-jobs", "0"], cx)));
-    }
-    }
-    if (this.listTab === "events") {
-    content.child(div().mt(8).font_semibold().child(`Global notifications · pending page after ${this.events.snapshot?.args[1] || "0"} (not project mail)` )).child(status(this.events, "notifications"));
-    if (events) {
-      if (!events.items.length) content.child(div().text_color(t.muted).child("No pending events at this read."));
-      for (const event of events.items) content.child(action(`ocq-queue-event-${event.id}`, `${event.sequence} · ${event.state} · ${event.outcome}\n${event.id}`, (cx) => this.read(owner, "detail", ["notification", event.id], cx)));
-      if (events.has_more) content.child(action("ocq-queue-event-next", "Next 20 pending notifications", cx => this.read(owner, "events", ["notifications", events.cursor], cx)));
-      content.child(action("ocq-queue-event-first", "First pending notification page", cx => this.read(owner, "events", ["notifications", "0"], cx)));
-    }
-    }
-    content.child(div().mt(8).font_semibold().child("Exact retained lookup"))
-      .child(Input.new(this.input).id("ocq-queue-exact-id").accessibility_label("Exact retained job or event ID").h(34).px(8).border_1().border_color(t.border).text_color(t.foreground))
-      .child(action("ocq-queue-lookup-job", "Read job ID", (cx) => this.read(owner, "detail", ["queue-job", this.input.value()], cx)))
-      .child(action("ocq-queue-lookup-event", "Read event ID (including acknowledged)", (cx) => this.read(owner, "detail", ["notification", this.input.value()], cx)));
+         .child(action("ocq-queue-command-dispatcher", "COMMANDS-ONLY dispatcher · start / status / drain…", (cx) => this.dispatcher.open(owner, cx))));
     } else {
       content.child(action("ocq-queue-back", "Back to queue", (cx) => { this.inspecting = false; this.detail = {}; this.log = {}; cx.notify(); }))
-        .child(status(this.detail, "detail"));
+         .when(this.detailTab !== "logs", e => e.child(status(this.detail, "detail")));
     }
     if (detail) {
-      content.child(div().font_semibold().child(detail.job ? "Stored job detail" : "Frozen terminal event"));
-      if (detail.job && this.detailTab !== "summary") content.child(div().text_size(12).text_color(t.muted).child(`${detail.job.kind} · ${detail.job.state}\n${detail.job.id}`));
+      if (this.detailTab !== "logs") content.child(div().font_semibold().child(detail.job ? human(detail.job.kind) : "Notification"));
       if (this.detail.actionsBlocked) content.child(div().text_size(12).text_color(t.blocked).child(this.detailTab === "logs" ? "Action scope paused · log observation remains read-only." : `${this.detail.actionBlockReason || "Action scope paused."} Retained intents unchanged.`));
       if (this.detail.dirty) content.child(div().text_color(t.muted).child("Selected detail needs a newer stored read; the displayed summary is from its own timestamp above."));
-      content.child(h_flex().gap(4).children(["summary", ...(detail.job ? ["logs"] : []), "fields"].map(tab => action(`ocq-queue-job-tab-${tab}`, `${this.detailTab === tab ? "Selected: " : ""}${tab === "fields" ? "All fields" : tab[0].toUpperCase() + tab.slice(1)}`, cx => { this.detailTab = tab; cx.notify(); }))));
+        content.child(h_flex().gap(4).children(["summary", ...(detail.job ? ["logs"] : []), "fields"].map(tab => action(`ocq-queue-job-tab-${tab}`, tab === "fields" ? "All fields" : tab === "logs" ? "Output" : "Details", cx => {
+          this.detailTab = tab;
+          if (tab === "logs" && !this.log.cursor) this.read(owner, "log", ["queue-log", detail.job.id, detail.job.has_stdout ? "stdout" : "stderr", "0"], cx);
+          cx.notify();
+        }).when(this.detailTab === tab, e => e.bg(t.hover).font_semibold()))));
       if (this.detailTab === "summary") {
       const item = detail.job || detail.event;
-      content.child(div().child(`${item.kind || "Completion event"}${item.role ? ` / ${item.role}` : ""} · ${item.state}\nOutcome: ${item.outcome || "not recorded"}\nValidation: ${typeof item.validation === "object" ? item.validation?.status || "not recorded" : item.validation || "not recorded"}\nID: ${item.id}\nLast reason: ${item.reason || "not recorded"}`));
-      if (detail.job) content.child(div().text_size(12).text_color(t.muted).child(`${detail.job.id}\nRecorded session and worktree are not live availability proof.`));
+       content.child(div().child(`${human(item.state)}\nOutcome: ${human(item.outcome) || "Not recorded"}\nValidation: ${human(typeof item.validation === "object" ? item.validation?.status : item.validation) || "Not recorded"}\nID: ${item.id}${item.reason ? `\nReason: ${item.reason}` : ""}`));
       if (detail.job && owner.machine === null) content.child(action("ocq-queue-job-journals", this.jobActions ? "Hide job actions and journals" : "Job actions and journal checks…", cx => { this.jobActions = !this.jobActions; cx.notify(); }));
       if (detail.job && owner.machine === null && this.jobActions) this.handoff.render(content, owner, cx, t, action);
       if (detail.job && owner.machine === null && this.jobActions) this.cancel.render(content, owner, cx, t, action);
       if (detail.job && owner.machine === null && this.jobActions) this.resolution.render(content, owner, cx, t, action);
       if (detail.job && owner.machine === null && this.jobActions) this.reconciliation.render(content, owner, cx, t, action);
-      if (owner.machine !== null) content.child(div().text_color(t.muted).child("Execution and acknowledgement actions require this machine’s local UI."));
       if (detail.job?.completion_event_id) content.child(action("ocq-queue-job-event", "Read retained global event / acknowledgement", (cx) => this.read(owner, "detail", ["notification", detail.job.completion_event_id], cx)));
       if (detail.event) content.child(action("ocq-queue-event-job", "Read event's job", (cx) => this.read(owner, "detail", ["queue-job", detail.event.job_id], cx)));
       if (detail.event && owner.machine === null) {
@@ -531,33 +566,44 @@ export class QueueInspection {
         }
       }
       }
-      if (detail.job && this.detailTab === "logs") for (const stream of ["stdout", "stderr"]) {
-        content.child(action(`ocq-log-stream-${stream}`, `Read ${stream} from byte 0`, (cx) => this.read(owner, "log", ["queue-log", detail.job.id, stream, "0"], cx)));
+      if (detail.job && this.detailTab === "logs") {
+        content.child(div().font_semibold().child("Output"));
+        if (detail.job.has_stdout && detail.job.has_stderr || this.logTechnical) content.child(h_flex().gap(4).children(["stdout", "stderr"].map(stream =>
+          action(`ocq-log-stream-${stream}`, stream, cx => this.read(owner, "log", ["queue-log", detail.job.id, stream, "0"], cx)).when(this.log.cursor?.stream === stream, e => e.bg(t.hover)))));
+        if (detail.job.state === "unknown") content.child(div().text_color(t.blocked).child("Completion unknown."));
       }
       if (this.detailTab === "fields") content.child(div().child(JSON.stringify(detail.job || detail.event, null, 2)));
     }
-    if (this.detailTab === "logs") {
-    content.child(status(this.log, "logs"));
+    if (this.inspecting && this.detailTab === "logs") {
+    if (this.log.loading || this.log.error) content.child(status(this.log, "logs"));
     if (this.log.reset) content.child(div().text_color(t.blocked).child(`Selected output reset: ${this.log.reset}. No reset cursor or bytes were adopted.`))
       .child(action("ocq-log-reset-explicit", "Discard displayed stream and read from byte 0", cx => this.read(owner, "log", ["queue-log", this.log.cursor.job_id, this.log.cursor.stream, "0"], cx)));
-    if (this.log.capped) content.child(div().text_color(t.muted).child("Automatic output follow paused at the 64 KiB display cap. Read the next bounded chunk explicitly."));
+    if (this.log.capped || log && !log.eof) content.child(div().text_color(t.muted).child("More output available."));
     if (log && this.log.bytes) {
       const bytes = this.log.bytes, start = this.bytePage * 1024;
       // Reversible byte rendering: never interpret terminal escapes or discard
       // invalid UTF-8. Backslashes and every non-printable/non-ASCII byte escape.
-      const text = Array.from(bytes.slice(start, start + 1024), (b) => b >= 32 && b <= 126 && b !== 92 ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, "0")}`).join("");
-      content.child(div().font_semibold().child(`${log.stream} · byte observation`))
-        .child(div().text_size(12).text_color(t.muted).child(`Chunk [${log.offset}, ${log.next_offset}); observed size ${log.observed_size}. EOF at read: ${log.eof}. Not completion.\nEscaped bytes · display page ${this.bytePage + 1}/${Math.max(1, Math.ceil(bytes.length / 1024))}`));
-      if (this.bytePage > 0) content.child(action("ocq-log-display-prev", "Previous displayed bytes · pause follow", (cx) => { this.log.follow = false; this.bytePage--; cx.notify(); }));
-      if (start + 1024 < bytes.length) content.child(action("ocq-log-display-next", "Next displayed bytes", (cx) => { this.log.follow = false; this.bytePage++; cx.notify(); }));
-      if (!this.log.reset && !this.log.capped) content.child(action("ocq-log-follow", this.log.follow ? "Pause automatic output follow" : "Follow latest displayed bytes", cx => { this.log.follow = !this.log.follow; if (this.log.follow) { this.bytePage = Math.max(0, Math.ceil(bytes.length / 1024) - 1); this.log.needsRead = true; } cx.notify(); }));
-      if (!this.log.reset) content.child(action("ocq-log-read-next", "Read next bounded chunk explicitly", (cx) => this.read(owner, "log", ["queue-log", log.job_id, log.stream, log.next_offset], cx)));
-      content.child(div().child(text || "No bytes at this offset."));
+       const text = bytes.toString("utf8");
+       const readable = Buffer.from(text, "utf8").toString("base64") === bytes.toString("base64") &&
+         !/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(text.replace(/\r\n/g, "\n"));
+       content.child(div().child(readable ? text || "No output at this offset." : "Binary or mixed output. View raw bytes."));
+       if (!this.log.reset && !this.log.capped) content.child(action("ocq-log-follow", this.log.follow ? "Pause" : "Follow", cx => { this.log.follow = !this.log.follow; if (this.log.follow) { this.bytePage = Math.max(0, Math.ceil(bytes.length / 1024) - 1); this.log.needsRead = true; } cx.notify(); }));
+       if (!this.log.reset && (this.log.capped || !log.eof)) content.child(action("ocq-log-read-next", "Load more", (cx) => this.read(owner, "log", ["queue-log", log.job_id, log.stream, log.next_offset], cx)));
+       content.child(action("ocq-log-raw", this.rawOutput ? "Hide raw bytes" : "Raw bytes", cx => { this.rawOutput = !this.rawOutput; cx.notify(); }));
+       if (this.rawOutput) {
+         const escaped = Array.from(bytes.slice(start, start + 1024), b => b >= 32 && b <= 126 && b !== 92 ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, "0")}`).join("");
+         content.child(div().text_size(12).child(`Escaped bytes · ${this.bytePage + 1}/${Math.max(1, Math.ceil(bytes.length / 1024))}`)).child(div().child(escaped || "No bytes at this offset."));
+         if (this.bytePage > 0) content.child(action("ocq-log-display-prev", "Previous bytes", cx => { this.log.follow = false; this.bytePage--; cx.notify(); }));
+         if (start + 1024 < bytes.length) content.child(action("ocq-log-display-next", "Next bytes", cx => { this.log.follow = false; this.bytePage++; cx.notify(); }));
+       }
+       content.child(action("ocq-log-technical", this.logTechnical ? "Hide technical details" : "Technical details", cx => { this.logTechnical = !this.logTechnical; cx.notify(); }));
+       if (this.logTechnical) content.child(status(this.detail, "detail")).child(status(this.log, "logs"))
+         .child(div().text_size(12).text_color(t.muted).child(`${log.stream}\nChunk [${log.offset}, ${log.next_offset}); observed size ${log.observed_size}.\nEOF at read: ${log.eof}; not execution completion.\nDisplay limit: 64 KiB. File observation is separate from queue state.`))
+         .child(action("ocq-log-read-bounded", "Read next bounded chunk", cx => this.read(owner, "log", ["queue-log", log.job_id, log.stream, log.next_offset], cx)));
     }
     }
     return v_flex().id("ocq-queue").size_full().min_h(0).overflow_y_scroll().p(14).gap(8).bg(t.background).text_color(t.foreground)
       .track_focus(owner.handle).on_key_down((e, cx) => this.key(e, owner, cx))
-      .child(div().flex_none().text_size(12).text_color(t.muted).child(`Up/Down select, Enter opens · Esc back\nSelected: ${owner.navigationLabel || "Workspace navigation"}`))
       .child(content);
   }
 }

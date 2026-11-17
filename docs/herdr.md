@@ -1,6 +1,6 @@
 # Herdr workspace
 
-**Current source transport:** the panel now requires an explicitly configured
+**Current source transport:** the panel automatically uses a privately provisioned
 [native push endpoint](push-transport.md), verified with Herdr 0.1.15 and 0.1.16. It does not
 start a listener or inherit an HC socket route. Stored subscriptions and explicit
 reviewed commands use this one socket. Mutations require endpoint-owner
@@ -13,6 +13,10 @@ owner-pinned existing private HC binding. The backend performs the one launch;
 presentation/verification remain separate explicit controls. See the binding
 contract and remaining host limitations in [push transport](push-transport.md).
 There is no exec/long-poll fallback.
+The display host's configuration-only bootstrap and automatic lifecycle are
+documented in [push transport](push-transport.md#automatic-native-association).
+There are no panel connection controls. Queue shows Jobs and Notifications
+together; project Inbox is distinct. Exact lookup is **Advanced → Find receipt**.
 The older helper/action and bounded-observer sections below document retained
 CLI/core contracts, not currently enabled panel capabilities. Do not infer
 deployment readiness or install this experimental source into a shared runtime
@@ -60,6 +64,11 @@ For native inspection clients, keep the matched `bin/ocq`, `bin/ocq-herdr` and
 release-relative `share/opencode/ocq-handoff/tui.js` together; copying only the
 binaries does not install their trusted TUI asset. The panel uses its configured
 socket, not the legacy HC PATH route described below.
+
+The display host additionally needs the matched configuration-only bootstrap at
+`APP_HOME/ocq-push/ocq-herdr` and a privately provisioned exact-context association;
+see [automatic association](push-transport.md#automatic-native-association).
+This does not replace or modify any Herdr binary.
 
 Supply the actual absolute app home if customized. If installation or the layout
 switch fails, inspect retained files and the window before retrying; the
@@ -338,10 +347,16 @@ Context details for diagnostics, not the normal inspection workflow.
 
 The Queue view reads jobs across projects, including standalone jobs, in pages
 of 20. Pending global events are separately paged and accept exact job/event
-IDs, including acknowledged events. Job detail offers stdout/stderr reads in
-chunks of at most 32 KiB. Log bytes are escaped rather than interpreted as terminal
-output; EOF describes that read, not job completion. Only the selected stream can
-follow automatically. Browsing older displayed bytes pauses follow; the retained
+IDs in Advanced, including acknowledged events. Rows show the stored kind and
+human-readable state/outcome, with a short ID suffix only for duplicate rows.
+The current list DTO does not expose command argv or task titles; the UI does not
+invent them. Full IDs remain in accessible labels and detail/All fields.
+Job Output reads stdout/stderr in chunks of at most 32 KiB. Valid UTF-8 without
+ambiguous controls is readable text with line breaks, never terminal escape
+execution. Raw bytes retains reversible escaped pages separately, including
+binary/ambiguous output. Technical details holds offsets, observation timestamps,
+EOF and explicit bounded-read tools; EOF describes that read, not job completion.
+Only the selected stream can follow automatically. Browsing raw byte pages pauses follow; the retained
 display is capped at 64 KiB. Replacement/truncation requires explicit discard and
 rediscovery from zero, never automatic append across identities. Filesystem log
 reads are explicitly non-atomic with the SQLite snapshot and carry a separate

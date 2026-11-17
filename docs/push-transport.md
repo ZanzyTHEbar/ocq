@@ -3,7 +3,8 @@
 OCQ provides a foreground, authenticated WebSocket endpoint and a native GPUI
 adapter. This does not change Herdr, HC, OpenCode, their configuration, helpers,
 or services. No listener is started by opening the panel. There is no automatic
-installation, tunnel, discovery, restart, reconnect, or deployment.
+installation, tunnel, discovery, endpoint restart or deployment. Client transport
+reconnection is automatic against one privately provisioned association.
 
 ## Start and stop explicitly
 
@@ -40,16 +41,13 @@ An encrypted transport is still not filesystem sandboxing.
 
 ## Panel connection and authority
 
-Select the intended machine, space and folder. The panel has native **Endpoint
-URL** and masked **Private token** inputs and explicit Connect/Disconnect controls;
-no hand-authored JSON is needed. Token text stays in memory and is cleared when
-Connect consumes it and on Disconnect. No token is placed in localStorage.
-The user explicitly associates that endpoint with the selected context; an HC
-alias is a UI label, not an authenticated server identity.
+Select the intended machine, space and folder. The panel automatically resolves
+the [private association](#automatic-native-association), authenticates and checks
+the expected queue identity. It has no connection form or lifecycle controls.
+An HC alias is a UI label, not an authenticated server identity.
 
 The client uses Herdr's actual `websocket` module:
 `WebSocket.connect(url)`, then asynchronous `read()`, `write(text)`, and `close()`.
-Inputs use `InputState.new`, `set_masked(true)`, and `Input.new(state)`.
 This is not the browser WebSocket API or an `exec` stream.
 
 One owned socket supplies the existing controller seam:
@@ -60,12 +58,16 @@ recurring UI projection reads, exec/watch-wait renewals, refresh timers, or
 fallback polling. Old unresolved native observers are not silently replaced.
 
 Disconnect, scope/panel-generation changes and view disposal invalidate retained
-confirmations. Explicit reconnect obtains fresh pins and resets projection
-ownership; it never restores earlier confirmation authority. Native close settles
-the pending read. The host bounds connection/handshake and write operations at
+confirmations. Automatic reconnect obtains fresh pins and resets projection
+ownership; it never restores earlier confirmation authority. The prior read loop,
+close and all issued writes must actually settle. The host bounds connection/handshake and write operations at
 30 seconds and view-close cleanup at 250 ms; it exposes no connect-abort API.
 An unresolved old connection remains unavailable rather than permitting a second
-owner or claiming settlement. Use explicit Disconnect before removing a view.
+owner or claiming settlement. Disposal closes automatically. An unrecognized close
+failure holds the physical slot instead of resetting it after either host deadline.
+The pinned native runtime's exact terminal close result,
+`WebSocket connection is closed`, is treated as an already-closed resource,
+not a generic transport failure; see the native evidence below.
 
 The default endpoint is read-only. To allow reviewed OCQ actions, its owner must
 explicitly add `--allow-actions` when starting it. Authentication alone never arms
@@ -252,7 +254,8 @@ dispatcher. The original public CLI transport remains available independently.
 - Snapshots retain `single_sqlite_snapshot` consistency for SQL views, committed
   decimal-string revisions, and the existing device/inode/schema/image/context
   pins. Generation, selector and sequence guards reject stale responses.
-  Context replacement/watch loss closes the connection; reconnect is explicit.
+  Context replacement/watch loss closes the connection; observation reconnects
+  automatically using the same exact private association and fresh pins.
 - Filesystem logs and work/Main/client journals remain separately observed,
   non-atomic with SQL. They are not promoted to committed SQL state or verified
   execution/test evidence. Log cursors advance on the server, within a 64 KiB
@@ -301,7 +304,7 @@ Implementation:
   through that same boundary rather than bypassing the selected socket.
 - `internal/core/{project,publication,resolution}_socket*_linux.go`: concrete
   private-byte adapters retaining journal/preview/claim semantics.
-- `main.js`: one connection render entrypoint and replacement of its two private
+- `main.js`: no connection chrome; replacement of its two private
   transport methods. B's task-first rendered UI and Main/client/Work edits remain
   intact. `command-submission.js`, `result-publication.js`, `command-resolution.js`
   replace their former rendezvous transport only, retaining review validation.
@@ -345,3 +348,95 @@ the 250 ms close budget; no immediate settlement claim is made. The original nat
 fixture used an owned headless compositor after Xvfb lacked the required DRI3
 rendering support. No agent execution, shared service/configuration change,
 production job, or installed-mod replacement was part of validation.
+# Automatic native association
+
+The corrective native panel has no connection form or lifecycle buttons.
+Provision the display host privately before starting the app. This is separate
+from deploying/starting an endpoint; the mod never starts either an endpoint or
+an OCQ job to obtain observations.
+
+The fixed local `process.run(APP_HOME + "/ocq-push/ocq-herdr",
+["push-association", APP_HOME + "/ocq-push", MACHINE, SPACE, FOLDER])` bootstrap
+uses an explicitly provisioned matched OCQ bridge, not an ambient PATH lookup.
+It runs
+only at startup/selected-context change, not on reconnect or a timer, and never
+opens a queue. Native generated API declarations expose reads but no stat/lstat,
+mode or UID validation, so the Go bootstrap does those checks. No HC alias is
+used to discover an endpoint or read remote credentials.
+
+The file is `APP_HOME/ocq-push/association.json`, where `APP_HOME` is the native
+`appHome()` (`HERDR_APP_HOME`, otherwise the app's standard home). Its containing
+`ocq-push` directory must
+be owned mode0700, with a canonical nonsymlink path. Configuration and credential
+are owned nonsymlink regular0600 files opened relative to the verified directory
+descriptor. The credential reference is a basename in that same directory.
+Provision the matched `ocq-herdr` executable there as an owned regular0700 file;
+no Herdr binary is changed. The bootstrap receives this directory explicitly,
+so no shell/profile/XDG override can silently select another association.
+All seven fields are required; example placeholders are not usable credentials:
+
+```json
+{
+  "version": 1,
+  "endpoint": "wss://explicit-server.example:7443/ocq",
+  "credential_file": "endpoint-token",
+  "machine": null,
+  "space": "sp00000000000000000000000000000000",
+  "folder": "/absolute/selected/project",
+  "queue_identity": "<exact 64 lowercase hex queue identity>"
+}
+```
+
+`machine` is the exact selected machine string or explicit null for local;
+`space` is the full native selected space ID (including its machine prefix for
+remote selection), not a guessed local alias. The token file contains the
+endpoint's 64 hex token bytes plus newline. Keep these files out of repositories.
+Neither token nor private bootstrap stdout/stderr may be logged or copied.
+The mod consumes the bootstrap result in memory, never argv, URLs, clipboard or
+localStorage. Provisioning is an operator responsibility; the panel is not a
+credential editor. After correcting a stopped configuration fault, selecting the
+context again or restarting the app triggers a new automatic bootstrap.
+
+The socket authenticates, validates the descriptor against selected context and
+expected queue identity, then subscribes to server-pushed authoritative views.
+One cancellable exponential-backoff timer with jitter (at most30s) recovers
+transient transport loss only after the prior physical owner has settled.
+No polling of projections/configuration, exec observation fallback, command
+replay or old approval recovery exists. Unsafe/missing association, mismatched
+identity or unsupported contract stops recovery with one quiet Check setup
+affordance. An unrecognized physical close failure holds the global slot, never
+clearing it on a grace period/deadline. Disposal/context switch cancels retry and
+invalidates confirmations. Unknown command outcomes remain uncertain even after
+observation reconnects. Human permissions and durable action contracts do not
+change. Independent native lifecycle/visual acceptance is required before release.
+
+### Corrective source verification status
+
+An initial isolated native run established secure automatic association, coherent
+Jobs and Notifications at 320/360px, actual stored output and invalidation of a
+prepared acknowledgement on loss. Recovery initially held ownership because
+the close rejection was not retained precisely.
+
+Fresh native instrumentation of OCQ's calls (not Herdr implementation changes)
+distinguished these outcomes on the pinned host:
+
+- Client close overlapping the outstanding read: read rejected with
+  `WebSocket closed by this endpoint`; the single memoized close resolved.
+- Normal peer close: read rejected with `WebSocket closed by peer`; close
+  rejected with exactly `WebSocket connection is closed`.
+- Abrupt endpoint loss: read rejected with
+  `WebSocket protocol error: Connection reset without closing handshake`;
+  close rejected with exactly `WebSocket connection is closed`.
+- Subsequent direct read, write and duplicate close on that exact old native
+  resource each rejected with `WebSocket connection is closed`.
+
+Only the exact terminal **close** result is accepted as already closed.
+Neither a read error, an arbitrary close rejection nor elapsed time releases
+ownership. The original read loop must finish and all issued writes must settle;
+new writes are refused during closing. One successor then authenticates afresh.
+The fresh native flow passed all three close paths, coherent pushed queue lists,
+old-confirmation rejection and disposal with retry pending. No mutations were
+armed, retried or replayed. This is pinned-host compatibility evidence, not a
+documented guarantee for every future host; unrecognized close results hold.
+Full exact-page review, project-rich Work and independent visual acceptance
+remain separate release gates. Do not deploy from partial acceptance.

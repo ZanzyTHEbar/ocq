@@ -117,6 +117,7 @@ export default class OCQ extends View {
     this.closed = true; this.generation++; this.queue.generation++; this.publication.generation++; this.worktreeCheck.generation++;
     this.queue.dispatcher.dispose();
     this.workOperator.scroll.release();
+    this.queue.scroll.jobs.release(); this.queue.scroll.events.release();
     // Herdr retains an async View.close until settlement or its own deadline.
     // Returning early cancels this view's host calls without settling their JS
     // promises, leaving the shared one-flight observer permanently draining.
@@ -695,8 +696,6 @@ export default class OCQ extends View {
       this.contextDetails ? this.registerAction(id, label, action, this.compatibilityTargets) : (_e, cx) => action(cx));
     return v_flex().size_full().min_h(0).bg(t.background).text_color(t.foreground)
       .when(workspace, e => e.child(this.workspaceHeader(cx, t)))
-      .child(this.updates.connection.render(cx, t))
-      .when(Boolean(this.observationReset) || compatibility.observationBlocked || compatibility.legacyObservationBlocked, e => e.child(this.recoveryNotice(cx, t)))
       .when(this.contextDetails, e => e.child(div().max_h(120).overflow_y_scroll().child(compatibilityView)))
       .child(div().flex_1().min_h(0).child(content));
   }
@@ -727,35 +726,19 @@ export default class OCQ extends View {
 
   navigateWorkspace(view, cx) {
     if (view !== "projects") this.workOperator.suspend();
-    if (view === "queue") { if (!this.queueMode) this.openQueue(cx); }
+    if (view === "queue" || view === "advanced") {
+      if (!this.queueMode) this.openQueue(cx);
+      this.queue.advanced = view === "advanced";
+      this.queue.inspecting = false;
+    }
     else { if (this.queueMode) this.leaveQueue(cx); this.workspaceView = view; this.keyboardMode = false; }
     cx.notify();
-  }
-
-  recoveryNotice(cx, t) {
-    const running = Boolean(this.updates.recovery?.running);
-    return v_flex().px(12).py(8).gap(4).text_size(12).border_b(1).border_color(t.border)
-      .child(h_flex().items_center().gap(8)
-        .child(div().flex_1().font_semibold().text_color(t.blocked).child(running ? "Checking this context…" : "Review paused"))
-        .child(this.panelControl("ocq-recovery-details", "Why?", cx => { this.contextDetails = !this.contextDetails; cx.notify(); }, t, this.compatibilityTargets)))
-      .child(div().text_color(t.muted).child("Old confirmations are invalid. Previous attempts are not resent."))
-      .when(this.contextDetails, e => e.child(div().text_color(t.muted).child(this.observationReset || compatibility.reason))
-        .when(Boolean(this.updateHealth.reason) && this.updateHealth.reason !== this.observationReset, e => e.child(div().child(this.updateHealth.reason))))
-      .child(div().id("ocq-context-recover").role("button").accessibility_label("Recover selected context")
-        .px(8).py(5).rounded(5).cursor_pointer()
-        .when(running, e => e.opacity(0.4))
-        .when(this.navigationTarget === "ocq-context-recover", e => e.bg(t.hover))
-        .hover(e => e.bg(t.hover))
-        .on_click(this.registerAction("ocq-context-recover", "Recover selected context", cx => {
-          if (!this.updates.recovery?.running) this.updates.recover(cx);
-        }, this.compatibilityTargets))
-        .child(running ? "Checking…" : "Reconnect"));
   }
 
   panelControl(id, label, action, t, targets = this.headerTargets, selected = false) {
     // Presentation-only controls. Mutation controls continue through the
     // existing enabledButton/confirmation paths in their original controllers.
-    return div().id(id).role("button").accessibility_label(label).px(8).py(5).rounded(5).cursor_pointer()
+    return div().id(id).role("button").accessibility_label(selected ? `${label}, selected` : label).px(8).py(5).rounded(5).cursor_pointer()
       .when(selected, e => e.bg(t.hover).font_semibold())
       .when(this.navigationTarget === id, e => e.bg(t.hover))
       .hover(e => e.bg(t.hover)).on_click(this.registerAction(id, label, action, targets)).child(label);
@@ -764,36 +747,29 @@ export default class OCQ extends View {
   workspaceHeader(cx, t) {
     const control = (id, label, action, selected = false) => this.panelControl(id, label, action, t, this.headerTargets, selected);
     const queueID = this.updates.binding?.queue_identity || this.queue.jobs.data?.queue_identity || compatibility.status?.queue_identity;
-    const view = this.queueMode ? "queue" : this.workspaceView;
-    const state = this.updateHealth.state;
-    const health = { waiting: "Observed", reading: "Reading…", starting: "Loading…", stored: "Stored",
-      missing: "No queue", draining: "Settling…", reconnecting: "Reconnecting…",
-      stale: "Stale", unavailable: "Unavailable", upgrade_required: "Update required", limit_exceeded: "View too large" }[state] || "Not current";
-    return v_flex().id("ocq-workspace-header").flex_none().px(12).pt(10).pb(6).gap(6).border_b(1).border_color(t.border)
+    const view = this.queueMode ? this.queue.advanced ? "advanced" : "queue" : this.workspaceView;
+    return v_flex().id("ocq-workspace-header").flex_none().px(12).pt(6).pb(4).gap(2).border_b(1).border_color(t.border)
       .child(h_flex().items_center().gap(6)
-        .child(div().font_semibold().child("OCQ"))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(this.machine ?? "This computer"))
-        .child(control("ocq-context-details", this.contextDetails ? "Close details" : "Details", cx => { this.contextDetails = !this.contextDetails; cx.notify(); })))
+        .child(div().flex_1().min_w(0).truncate().font_semibold().child(`${this.board?.project?.label || this.selected || "OCQ"} · ${this.machine ?? this.folder?.split("/").pop() ?? "This computer"}`))
+        .child(control("ocq-context-details", this.updates.connection.fault ? "Check setup" : "Details", cx => { this.contextDetails = !this.contextDetails; cx.notify(); })
+          .when(Boolean(this.updates.connection.fault), e => e.text_color(t.blocked))))
       .child(h_flex().items_center().gap(2)
-        .children([["projects", "Work"], ["queue", "Queue"], ["inbox", "Inbox"]].map(([name, label]) => control(`ocq-workspace-${name}`, label, cx => this.navigateWorkspace(name, cx), view === name)))
-        .child(div().flex_1())
-        .child(div().text_size(12).text_color(["waiting", "reading", "stored", "starting"].includes(state) ? t.muted : t.blocked).child(health)))
+        .children([["projects", "Work"], ["queue", "Queue"], ["inbox", "Inbox"], ["advanced", "Advanced"]].map(([name, label]) => control(`ocq-workspace-${name}`, label, cx => this.navigateWorkspace(name, cx), view === name))))
       .when(this.contextDetails, e => e.child(v_flex().max_h(260).overflow_y_scroll().gap(4)
         .child(div().text_size(12).text_color(t.muted).child(`Folder: ${this.folder || "not selected"}\nSpace: ${this.spaceID || "not selected"}\nQueue: ${queueID || "not observed"}\nRevision: ${this.updates.revision ?? "not observed"}\nSnapshot: ${this.updateHealth.readAt || "not yet read"}\nProjects: ${this.projectsReadAt || "not yet read"}`))
         .child(div().text_size(12).text_color(t.muted).child(this.updateHealth.reason || "Observations are not execution or permission proof."))
         .when(this.machine !== null, e => e.child(div().text_size(12).text_color(t.muted).child("Remote: only explicitly prepared work can be confirmed. Other mutations stay disabled.")))
         .child(h_flex().gap(2)
-          .child(control("ocq-copy-update-diagnostics", "Copy diagnostics", cx => cx.write_to_clipboard(JSON.stringify({ machine: this.machine, health: this.updateHealth, revision: this.updates.revision }))))
-          .child(control("ocq-workspace-read-again", "Reconnect", cx => this.updates.recover(cx))))
+          .child(control("ocq-copy-update-diagnostics", "Copy diagnostics", cx => cx.write_to_clipboard(JSON.stringify({ machine: this.machine, health: this.updateHealth, revision: this.updates.revision })))))
+        .child(control("ocq-project-picker", "Change project", cx => { this.projectPicker = true; this.navigateWorkspace("projects", cx); }, false))
         .child(control("ocq-workspace-overview", "Project summary", cx => this.navigateWorkspace("overview", cx)))));
   }
 
   emptyProjects(cx, t, button) {
     return v_flex().py(12).gap(8)
-      .child(div().text_size(16).font_semibold().child("Start with a project"))
-      .child(div().text_color(t.muted).child("Connect a server-side Main to follow its work, review and handoff here."))
+      .child(div().text_color(t.muted).child("Register a project to follow its work here."))
       .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Register project…", cx => this.intakeController.openIntake(cx)).bg(t.accent).text_color(t.background)))
-      .child(this.panelControl("ocq-setup-guide", this.setupGuide ? "Hide setup steps" : "Setup steps", cx => { this.setupGuide = !this.setupGuide; cx.notify(); }, t, this.renderTargets))
+      .when(!this.composeLocal(), e => e.child(this.panelControl("ocq-setup-guide", "Setup steps", cx => { this.setupGuide = !this.setupGuide; cx.notify(); }, t, this.renderTargets)))
       .when(this.setupGuide, e => e.child(v_flex().gap(6).text_size(12).text_color(t.muted)
         .child(div().child(`On ${this.machine ?? "this computer"}, prepare Main for the canonical checkout, then review and start it. The project appears here after registration.`))
         .child(this.panelControl("ocq-setup-help-copy", "Copy setup help command", cx => cx.write_to_clipboard("ocq project main prepare --help"), t, this.renderTargets))
@@ -966,12 +942,7 @@ export default class OCQ extends View {
         this.workspaceView === "projects" && this.projectView === "operator") {
       return v_flex().id("ocq-tasks-panel").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
         .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
-        .when(Boolean(this.navigationTarget), e => e.child(div().px(12).py(4).text_size(12).text_color(t.muted)
-          .child(`↑↓ · Enter · ${this.navigationLabel || "Navigate"}`)))
-        .child(h_flex().px(12).pt(8).items_center().gap(6)
-          .child(div().flex_1().min_w(0).truncate().font_semibold().child(project?.label || this.selected))
-          .child(this.panelControl("ocq-project-picker", "Change", cx => { this.projectPicker = true; cx.notify(); }, t, this.renderTargets)))
-        .child(this.projectTabs(t, button).px(12))
+        .when(this.contextDetails, e => e.child(this.projectTabs(t, button).px(12)))
         .child(this.workOperator.render(cx, t, button));
     }
     const keyboardTarget = this.keyboardTarget;
@@ -986,8 +957,6 @@ export default class OCQ extends View {
     return v_flex().id("ocq-panel").size_full().min_h(0).bg(t.background)
       .text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => this.key(e, cx))
-      .when(Boolean(this.navigationTarget), e => e.child(div().px(12).py(4).text_size(12).text_color(t.muted)
-        .child(`↑↓ · Enter · ${this.navigationLabel || "Navigate"}`)))
       .when(this.keyboardMode, (e) => e.child(v_flex().id("ocq-keyboard-inspection").flex_1().min_h(0).p(12).gap(8)
         .child(div().text_size(12).text_color(t.muted).child(`Inspection · ←/→ field ${page + 1}/${pages.length} · Esc board`))
         .child(h_flex().gap(8)

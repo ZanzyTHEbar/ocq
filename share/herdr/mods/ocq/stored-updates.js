@@ -19,14 +19,14 @@ function currentScope(scope) {
   return s && s.id === scope.space && s.machine === scope.machine && s.folder === scope.folder;
 }
 
-// Exactly one native socket. No exec/watch-wait, lease renewal, projection timer,
-// background retry or legacy transport fallback.
+// Exactly one native socket. Only transport loss has a recovery timer; projection
+// and configuration reads never poll or fall back to execution.
 export class StoredUpdates {
   constructor(owner, cx) {
     this.owner = owner; this.serial = 0;
     this.connectionGeneration = 0; this.bindingEpoch = 0; this.control = 0;
     this.connection = new PushConnection(this);
-    this.health = { state: "starting", reason: "Configure an explicit push connection.", readAt: null };
+    this.health = { state: "starting", reason: null, readAt: null };
     cx.spawn(task => { this.cx = task; }, { owner });
   }
   sync(cx) {
@@ -36,38 +36,30 @@ export class StoredUpdates {
     if (!next.space || !next.folder || !/^sp[0-9a-f]{32}$/.test(next.localSpace)) {
       if (this.scope) {
         this.scope = null;
-        cx.spawn(async () => this.connection.disconnect());
+        cx.spawn(async () => this.connection.dispose());
       }
       return;
     }
     if (!this.scope || JSON.stringify(this.scope) !== JSON.stringify(next)) {
       if (this.scope) {
         this.owner.resetObservationVersions();
-        cx.spawn(async () => this.connection.disconnect());
       }
       this.scope = Object.freeze(next); this.disposed = false;
       this.binding = null; this.revision = null; this.bindingEpoch++;
       this.subscription = null; this.lastKey = null;
-      this.publish("unavailable", "Configure and connect this selected context explicitly.");
+      this.publish("starting");
+      this.connection.associate(this.scope, cx);
     }
     this.kick();
   }
   current() { return !this.disposed && this.scope && currentScope(this.scope) && this.owner.panelCurrent(); }
   async dispose() {
     this.disposed = true; this.retired = true;
-    await this.connection.disconnect();
+    await this.connection.dispose();
   }
   readAgain() {
     this.lastKey = null; // Explicit user read/selection change, not a timer.
     this.kick();
-  }
-  recover(cx) {
-    cx.spawn(async cx => {
-      await this.connection.disconnect();
-      this.connection.expanded = true;
-      this.publish("unavailable", "Reconnect explicitly with the selected endpoint token. Old confirmations are not restored.");
-      cx.notify();
-    });
   }
   suspendRecovery() { this.lastKey = null; }
   publish(state, reason = null) {
@@ -134,7 +126,10 @@ export class StoredUpdates {
         this.subscription = { id, capture, scope, generation };
         await this.connection.write({ type: "subscribe", id, request });
       } catch (_) {
-        if (this.scope === scope && this.connectionGeneration === generation) this.invalidate("Subscription unavailable. Reconnect explicitly; no retry.");
+        if (this.scope === scope && this.connectionGeneration === generation) {
+          // Closing the one owner wakes its read loop; its finally owns recovery.
+          await this.connection.disconnect();
+        }
       } finally { this.sending = false; cx.notify(); }
     });
   }
@@ -168,6 +163,7 @@ export class StoredUpdates {
       this.owner.workOperator.apply(flight.capture.work, result.work, result.revision, cx, result.main, result.clients);
     }
     this.health.readAt = result.read_at;
+    this.connection.attempt = 0;
     if (this.plan().length <= 8) this.publish("waiting", compatibility.allowActions
       ? "Server push current · actions still require fresh exact review; this is not execution success."
       : "Server push current · endpoint actions are disabled.");

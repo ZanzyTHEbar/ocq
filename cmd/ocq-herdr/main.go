@@ -49,6 +49,7 @@ func bridgeRoot() *cobra.Command {
 	root.AddCommand(workCommands()...)
 	root.AddCommand(mainClientCommands()...)
 	root.AddCommand(pushCommands()...)
+	root.AddCommand(pushAssociationCommand())
 	installCompatibility(root)
 	root.SetContext(context.Background())
 	return root

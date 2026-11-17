@@ -1,5 +1,5 @@
-import { div } from "gpui-kit";
-import { v_flex, InputState, Input } from "gpui-base";
+import { run } from "process";
+import { appHome, checking } from "herdr";
 import { WebSocket } from "websocket";
 import { URL } from "url";
 import { Buffer } from "buffer";
@@ -18,76 +18,146 @@ function endpoint(value) {
   return u.toString();
 }
 
+function contractError(message) { return Object.assign(Error(message), { permanent: true }); }
+// Pinned native WebSocket terminal result, not a generic transport failure.
+// See docs/push-transport.md. Only close's result is accepted; callers still wait for
+// the original read loop and every outstanding write before releasing ownership.
+const nativeClosed = "WebSocket connection is closed";
+
 export class PushConnection {
   constructor(updates) {
     this.updates = updates;
-    this.url = InputState.new({ placeholder: "wss://server:port/ocq" });
-    this.secret = InputState.new({ placeholder: "Endpoint token (memory only)" });
-    this.secret.set_masked(true);
-    this.expanded = true;
     this.state = "disconnected";
     this.pending = new Map();
-    for (const input of [this.url, this.secret]) {
-      input.on("change", (_e, cx) => cx.notify());
-      input.on("focus", () => { this.inputFocused = true; });
-      input.on("blur", () => { this.inputFocused = false; });
-    }
+    this.writes = new Set();
+    this.lifecycle = 0; this.attempt = 0;
   }
-  configure(cx) { this.expanded = !this.expanded; cx.notify(); }
-  connect(cx) {
-    if (this.state === "connecting" || this.state === "connected") return;
-    let address;
-    try {
-      address = endpoint(this.url.value().trim());
-      if (!/^[0-9a-f]{64}$/.test(this.secret.value().trim())) throw Error("Enter the private endpoint token.");
-      if (!this.updates.scope) throw Error("Select an explicit machine/space/folder first.");
-      if (globalThis.__ocq_observation_physical_v1?.flight) throw Error("An older native observer is unresolved. Quiesce it and use a fresh runtime; it cannot be replaced by a socket.");
-    } catch (error) { this.updates.publish("unavailable", error.message); return; }
-    if (physical.socket || physical.owner) { this.updates.publish("unavailable", "Previous socket is still settling. Disconnect it first."); return; }
-    const scope = this.updates.scope;
+  associate(scope, cx) {
+    const lifecycle = ++this.lifecycle;
+    this.cancelRetry(); this.association = null; this.fault = null; this.faultPhase = null; this.attempt = 0;
+    const draining = this.disconnect();
+    if (checking()) return;
+    cx.spawn(async cx => {
+      await draining;
+      // No grace-period reset: an orphaned owner holds this slot indefinitely.
+      await physical.settled;
+      if (!this.active(scope, lifecycle)) return;
+      let phase = "bootstrap";
+      try {
+        if (globalThis.__ocq_observation_physical_v1?.flight) throw Error("Older observer is unresolved.");
+        // Fixed local bootstrap, not selected-machine exec or an observation
+        // fallback. Never log stdout/stderr: stdout carries the private token.
+        const directory = `${appHome()}/ocq-push`;
+        const result = await run(`${directory}/ocq-herdr`, ["push-association", directory, scope.machine ?? "", scope.space, scope.folder]);
+        if (!this.active(scope, lifecycle)) return;
+        phase = "configuration";
+        if (result.code !== 0 || result.stdout.length > 32768) throw Error("Private association unavailable.");
+        phase = "configuration-contract";
+        const a = JSON.parse(result.stdout);
+        if (a.version !== 1 || a.machine !== scope.machine || a.space !== scope.space || a.folder !== scope.folder ||
+          !/^[0-9a-f]{64}$/.test(a.queue_identity) || !/^[0-9a-fA-F]{64}$/.test(a.token)) throw Error("Private association mismatch.");
+        a.endpoint = endpoint(a.endpoint);
+        this.association = a;
+      } catch (_) {
+        if (this.active(scope, lifecycle)) {
+          this.faultPhase = phase; // Constant diagnostic only; never stderr/token.
+          this.stopWithFault(phase === "bootstrap" ? "Local OCQ bootstrap unavailable." : "Check private OCQ association.", cx);
+        }
+        return;
+      }
+      this.connect(scope, lifecycle, cx);
+    });
+  }
+  active(scope, lifecycle) {
+    return lifecycle === this.lifecycle && this.updates.scope === scope && this.updates.current();
+  }
+  cancelRetry() { this.retry?.cancel(); this.retry = null; }
+  stopWithFault(reason, cx) {
+    this.cancelRetry(); this.fault = reason; this.association = null;
+    this.updates.publish("unavailable", reason); cx.notify();
+  }
+  connect(scope, lifecycle, cx) {
+    if (!this.active(scope, lifecycle) || !this.association) return;
+    if (physical.owner || physical.socket) {
+      this.stopWithFault("Another OCQ panel owns this connection.", cx);
+      return;
+    }
     const generation = ++this.updates.connectionGeneration;
+    const association = this.association;
     this.state = "connecting";
-    const token = this.secret.value().trim(); // Never persisted, logged or echoed.
-    this.secret.set_value("");
+    this.closing = null;
     physical.owner = this;
     physical.settled = new Promise(resolve => { this.settle = resolve; });
-    this.updates.invalidate("Connecting explicitly; all prior confirmations remain invalid.");
+    this.updates.invalidate("Connection changed; prior confirmations remain invalid.");
+    this.updates.publish("reconnecting");
     cx.spawn(async cx => {
-      let socket;
+      let socket, permanent = false;
       try {
-        socket = await WebSocket.connect(address);
+        socket = await WebSocket.connect(association.endpoint);
         physical.socket = socket;
         this.socket = socket;
-        if (!this.current(scope, generation)) { await socket.close(); return; }
-        await socket.write(JSON.stringify({ protocol: pushProtocol, type: "auth", token, space: scope.localSpace, folder: scope.folder }));
+        if (!this.current(scope, generation)) return;
+        await socket.write(JSON.stringify({ protocol: pushProtocol, type: "auth", token: association.token, space: scope.localSpace, folder: scope.folder }));
         const welcome = await this.read(socket);
         if (!this.current(scope, generation)) return;
-        this.updates.welcome(welcome);
+        try {
+          if (welcome.descriptor?.queue_identity !== association.queue_identity) throw Error("Queue identity mismatch");
+          this.updates.welcome(welcome);
+        } catch (_) { throw contractError("Check OCQ endpoint identity or version."); }
         this.state = "connected";
-        this.expanded = false;
         this.updates.kick();
         cx.notify();
         while (this.current(scope, generation)) {
           const frame = await this.read(socket);
           if (this.current(scope, generation)) {
-            if (frame.type === "command-received") {
-              if (!this.pending.has(frame.id) || frame.connection_id !== this.updates.connectionID) throw Error("Unexpected transport receipt");
-              // Not action success or permission. Keep the durable UI attempt
-              // marker uncertain until the original command result arrives.
-            } else if (frame.type === "command-result") {
-              if (!this.pending.has(frame.id) || frame.connection_id !== this.updates.connectionID) throw Error("Unexpected command receipt");
-              const pending = this.pending.get(frame.id); this.pending.delete(frame.id);
-              pending.resolve(frame.result);
-            } else this.updates.message(frame, cx);
+            try {
+              if (frame.type === "command-received") {
+                if (!this.pending.has(frame.id) || frame.connection_id !== this.updates.connectionID) throw Error("Unexpected transport receipt");
+                // Not action success or permission. Keep the durable UI attempt
+                // marker uncertain until the original command result arrives.
+              } else if (frame.type === "command-result") {
+                if (!this.pending.has(frame.id) || frame.connection_id !== this.updates.connectionID) throw Error("Unexpected command receipt");
+                const pending = this.pending.get(frame.id); this.pending.delete(frame.id);
+                pending.resolve(frame.result);
+              } else this.updates.message(frame, cx);
+            } catch (_) { throw contractError("Check OCQ endpoint contract."); }
           }
         }
-      } catch (_error) {
-        if (this.current(scope, generation)) this.updates.invalidate("Push connection unavailable or closed. Reconnect explicitly; no command was retried.");
+      } catch (error) {
+        permanent = error.permanent === true;
+        if (this.current(scope, generation)) {
+          this.updates.invalidate("Connection lost; prior confirmations invalid. Pending outcomes remain uncertain; no resend.");
+          if (permanent) this.stopWithFault("Check OCQ endpoint identity or version.", cx);
+          else this.updates.publish("reconnecting");
+        }
       } finally {
+        this.state = "closing";
         this.rejectPending();
-        if (socket) { try { await socket.close(); } catch (_) {} }
+        let closeError;
+        if (socket) {
+          try { await this.closeSocket(socket); }
+          catch (error) { closeError = error; }
+          // No timeout/cancel as proof. Closing stops new writes; native writes
+          // already issued must themselves finish before a successor is possible.
+          await Promise.allSettled([...this.writes]);
+          if (closeError) {
+            // An unsuccessful close is not proof of physical settlement. Hold
+            // the global slot; neither retries nor successors may replace it.
+            this.state = "unsettled";
+            if (this.active(scope, lifecycle)) this.stopWithFault("OCQ connection did not settle; restart the app after inspection.", cx);
+            return;
+          }
+        }
         if (physical.owner === this) { physical.socket = null; physical.owner = null; this.settle?.(); }
         this.socket = null; this.state = "disconnected";
+        // Only after close and the physical owner have actually settled.
+        if (!permanent && this.active(scope, lifecycle) && this.association) {
+          const delay = Math.min(30000, 500 * 2 ** Math.min(this.attempt++, 6)) * (0.75 + Math.random() * 0.25);
+          this.retry = cx.timer.after(delay, cx => {
+            this.retry = null;
+            if (this.active(scope, lifecycle)) this.connect(scope, lifecycle, cx);
+          });
+        }
         if (!this.updates.disposed) cx.notify();
       }
     });
@@ -97,16 +167,20 @@ export class PushConnection {
   }
   async read(socket) {
     const raw = await socket.read();
-    if (typeof raw !== "string" || Buffer.from(raw).length > 1048576 + 16384) throw Error("Bounded text push message required");
-    const frame = JSON.parse(raw);
-    if (frame.protocol !== pushProtocol) throw Error("Unsupported push protocol");
+    if (typeof raw !== "string" || Buffer.from(raw).length > 1048576 + 16384) throw contractError("Bounded text push message required");
+    let frame;
+    try { frame = JSON.parse(raw); } catch (_) { throw contractError("Invalid push message"); }
+    if (!frame || frame.protocol !== pushProtocol) throw contractError("Unsupported push protocol");
     return frame;
   }
   async write(value) {
     if (!this.socket || this.state !== "connected") throw Error("No authenticated push connection");
     const raw = JSON.stringify(value);
     if (Buffer.from(raw).length > (value.type === "command" ? 1048576 : 16384)) throw Error("Frame exceeds transport bound");
-    await this.socket.write(raw);
+    const operation = this.socket.write(raw);
+    this.writes.add(operation);
+    try { await operation; }
+    finally { this.writes.delete(operation); }
   }
   rejectPending() {
     for (const pending of this.pending.values()) {
@@ -122,28 +196,36 @@ export class PushConnection {
     this.pending.set(id, { resolve, reject });
     try {
       await this.write({ type: "command", id, request: { connection_id: this.updates.connectionID, args, ...(payload !== undefined ? { payload } : {}) } });
-    } catch (_) { this.rejectPending(); }
+    } catch (_) {
+      this.rejectPending();
+      // A failed command is never retried, even if observation reconnects.
+      void this.disconnect();
+    }
     return result;
   }
+  closeSocket(socket) {
+    if (!this.closing) this.closing = (async () => {
+      try { await socket.close(); }
+      catch (error) {
+        if (error?.message !== nativeClosed) throw error;
+        // The native resource explicitly reports terminal closure. This is not
+        // enough by itself: the owner finally also drains reads and writes.
+      }
+    })();
+    return this.closing;
+  }
   async disconnect() {
+    this.cancelRetry();
+    this.state = "closing";
     ++this.updates.connectionGeneration;
     this.updates.invalidate("Disconnected. Stored data may be stale; confirmations stay invalid.");
     this.rejectPending();
-    if (this.socket) { try { await this.socket.close(); } catch (_) {} }
+    if (this.socket) { try { await this.closeSocket(this.socket); } catch (_) { /* Physical slot remains held. */ } }
     if (physical.owner === this) await physical.settled;
-    this.secret.set_value("");
+    if (physical.owner !== this) this.state = "disconnected";
   }
-  render(cx, theme) {
-    const control = (id, text, action) => div().id(id).role("button").accessibility_label(text).cursor_pointer()
-      .px(8).py(4).hover(e => e.bg(theme.hover)).on_click((_e, cx) => action(cx)).child(text);
-    return v_flex().px(10).py(6).gap(4).text_size(12)
-      .child(control("ocq-push-setup", `Push connection · ${this.state}`, cx => this.configure(cx)))
-      .when(this.expanded, e => e
-        .child(div().text_color(theme.muted).child("Bind this endpoint to the selected machine, space and folder. Token stays in memory. No HC alias is treated as server identity."))
-        .child(div().child("Endpoint URL")).child(Input.new(this.url))
-        .child(div().child("Private token · masked, memory only")).child(Input.new(this.secret))
-        .child(control("ocq-push-connect", "Connect selected context", cx => this.connect(cx)))
-        .child(control("ocq-push-disconnect", "Disconnect", cx => cx.spawn(async () => this.disconnect())))
-        .child(div().text_color(theme.muted).child("Actions require server opt-in and fresh exact review. Native operations also require the reviewed private HC binding.")));
+  async dispose() {
+    ++this.lifecycle; this.association = null;
+    await this.disconnect();
   }
 }

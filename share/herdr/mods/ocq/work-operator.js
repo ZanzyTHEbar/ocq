@@ -266,13 +266,13 @@ export class WorkOperator {
     if (!this.readAt) add(div().text_size(12).text_color(theme.muted).child("Reading prepared tasks…"));
     if (this.storageError) add(div().text_color(theme.blocked).child("Private client attempt evidence unavailable. Confirmations disabled."));
     if (this.error) add(div().text_color(theme.blocked).child(this.error));
-    if (this.readAt && !this.rows.length) add(div().text_color(theme.muted).child("No tasks prepared yet. Main prepares work on the server; it appears here for review."));
+    if (this.readAt && !this.rows.length) add(div().text_color(theme.muted).child("Tasks appear here when Main prepares work."));
     const kindLabel = { implementation: "Work", capture: "Snapshot", review: "Review", review_result: "Handoff" };
     const stateLabel = { preparing: "Preparing", prepared: "Needs review", armed: "Claimed", uncertain: "Unknown", recorded_observed: "Recorded", blocked: "Blocked" };
     for (const item of this.rows) {
       const label = `${kindLabel[item.kind]} · ${stateLabel[item.state]}`;
       add(control(`ocq-work-select-${item.request_id}`, label, cx => this.choose(item, cx), `${label} · ${item.request_id}`)
-        .child(div().text_size(12).text_color(theme.muted).child(item.request_id))
+        .min_w(0).child(div().truncate().text_size(12).text_color(theme.muted).child(item.request_id))
         .when(item.request_id === this.selectedID, e => e.bg(theme.hover)));
       if (item.request_id === this.selectedID && this.selected)
         this.renderSelected(items, theme, control, disclosure);
