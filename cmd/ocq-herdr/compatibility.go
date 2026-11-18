@@ -205,7 +205,7 @@ func installCompatibility(root *cobra.Command) {
 	}})
 	root.PersistentPreRunE = func(cmd *cobra.Command, a []string) error {
 		name := cmd.Name()
-		if name == "push-serve" || name == "push-token" || name == "push-association" {
+		if name == "push-serve" || name == "push-token" || name == "push-association" || name == "runtime-discover" {
 			return nil
 		} // Standalone transport setup/configuration only; no queue mutation.
 		if modRead(name) || name == "hc-binding" {

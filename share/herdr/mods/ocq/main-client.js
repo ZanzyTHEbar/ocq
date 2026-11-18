@@ -57,6 +57,8 @@ function clientStatus(value, scope, digest) {
 export class MainClientControls {
   constructor(host) {
     this.host = host; this.generation = 0; this.mains = []; this.clients = [];
+    this.compatibility = host.compatibility || compatibility;
+    this.command = (args, options) => bridgeCommand(args, { ...options, compatibility: this.compatibility });
     try {
       this.attempts = JSON.parse(localStorage.getItem("main-client-attempts-v1") ?? "{}");
       this.navigations = JSON.parse(localStorage.getItem("native-navigation-v1") ?? "{}");
@@ -100,20 +102,20 @@ export class MainClientControls {
   base(scope, target) { return [scope.space, scope.queue, scope.project, target]; }
   context(scope, bridge) { return [scope.machine ?? "local", scope.folder, scope.store, bridge.image_sha256]; }
   async call(action, scope, target, contextual = false, tail = [], guard, hcBinding) {
-    const bridge = compatibility.status;
+    const bridge = this.compatibility.status;
     const positions = [...this.base(scope, target), ...(contextual ? this.context(scope, bridge) : []), ...tail];
     const mutation = ["main-start", "client-prepare", "client-attention-prepare-v1", "client-open"].includes(action);
     const args = mutation ? [action, ...positions] : [action,
       ...(contextual ? ["--work-observation-context", scope.bridge] : []), "--", ...positions];
-    const response = await bridgeCommand(args, { on: scope.machine, hcBinding, ...(guard ? { current: guard } : {}) });
+    const response = await this.command(args, { on: scope.machine, hcBinding, ...(guard ? { current: guard } : {}) });
     if (response.code !== 0 || Buffer.from(response.stdout || "").length > 1048576) throw Error("Main/client response unavailable");
     return JSON.parse(response.stdout);
   }
   async check(scope, generation) {
-    const checking = compatibility.check(() => this.current(scope, generation), true, true);
+    const checking = this.compatibility.check(() => this.current(scope, generation), true, true);
     // Pin this check's generation before yielding, including the promise-return
     // gap. A later Recheck cannot lend authority to its earlier response.
-    const epoch = compatibility.epoch, serial = compatibility.serial;
+    const epoch = this.compatibility.epoch, serial = this.compatibility.serial;
     const bridge = await checking;
     const authorization = { epoch, serial, pins: pins(bridge), bridge };
     if (!this.current(scope, generation) || bridge.queue_identity !== scope.queue ||
@@ -122,9 +124,9 @@ export class MainClientControls {
     return authorization;
   }
   authorized(authorization, scope, generation) {
-    return this.current(scope, generation) && compatibility.workReady() &&
-      compatibility.epoch === authorization.epoch && compatibility.serial === authorization.serial &&
-      pins(compatibility.status) === authorization.pins;
+    return this.current(scope, generation) && this.compatibility.workReady() &&
+      this.compatibility.epoch === authorization.epoch && this.compatibility.serial === authorization.serial &&
+      pins(this.compatibility.status) === authorization.pins;
   }
   freeze(kind, value, scope, generation, authorization) {
     if (!this.authorized(authorization, scope, generation)) throw Error("Review authorization changed");
@@ -137,12 +139,12 @@ export class MainClientControls {
   pinned(review) {
     const currentBinding = this.host.board?.project?.current_binding;
     const revision = review?.kind === "main" ? review.value.binding.revision : review?.value.pointer.binding_revision;
-    return review && !review.readOnly && this.review === review && this.current(review.scope, review.generation) && compatibility.workReady() &&
+    return review && !review.readOnly && this.review === review && this.current(review.scope, review.generation) && this.compatibility.workReady() &&
       (review.kind !== "client" || review.hc === this.host.nativeHC.approved && !!this.host.nativeHC.approvedDigest()) &&
-      compatibility.epoch === review.epoch && compatibility.serial === review.serial && pins(compatibility.status) === review.pins &&
+      this.compatibility.epoch === review.epoch && this.compatibility.serial === review.serial && pins(this.compatibility.status) === review.pins &&
       currentBinding?.repo_root === review.scope.folder && String(currentBinding.revision) === String(revision);
   }
-  markerKey(action, scope, target) { return JSON.stringify([action, scope.machine, scope.space, scope.queue, scope.project, target]); }
+  markerKey(action, scope, target) { return JSON.stringify([action, scope.source ?? scope.machine, scope.space, scope.queue, scope.project, target]); }
   attempted(action, scope, target) {
     const marker = this.attempts[this.markerKey(action, scope, target)];
     return marker && marker.state !== "not_invoked";
@@ -197,12 +199,12 @@ export class MainClientControls {
       finally { if (this.current(scope, generation)) { this.working = false; cx.notify(); } }
     }); cx.notify();
   }
-  navigationKey(scope, kind, work) { return JSON.stringify([scope.machine, scope.space, scope.queue, scope.project, kind, work]); }
+  navigationKey(scope, kind, work) { return JSON.stringify([scope.source ?? scope.machine, scope.space, scope.queue, scope.project, kind, work]); }
   prepareNavigation(kind, work, cx, attention = false) {
     const scope = this.work().bound;
     this.sync(scope);
     const generation = this.generation;
-    if (!this.current(scope) || this.working || this.storageError || !compatibility.nativeReady()) return;
+    if (!this.current(scope) || this.working || this.storageError || !this.compatibility.nativeReady()) return;
     const key = this.navigationKey(scope, attention ? `attention-${kind}` : kind, work);
     const previous = this.navigations[key];
     const found = previous && this.clients.some(item => item.pointer.navigation_id === previous.id);
@@ -241,7 +243,7 @@ export class MainClientControls {
         const value = clientStatus(await this.call("client-status", scope, item.pointer_sha256), scope, item.pointer_sha256);
         if (!this.current(scope, generation)) return;
         this.selectClient(value);
-        if (compatibility.nativeReady() && value.pointer.space === scope.space) {
+        if (this.compatibility.nativeReady() && value.pointer.space === scope.space) {
           const authorization = await this.check(scope, generation);
           if (!this.authorized(authorization, scope, generation)) return;
           this.freeze("client", value, scope, generation, authorization);
@@ -305,7 +307,7 @@ export class MainClientControls {
   }
   verifiedClient(value = this.client) {
     const v = this.verification;
-    return !!v && !!value?.terminal && this.current(v.scope, v.generation) && compatibility.nativeReady() &&
+    return !!v && !!value?.terminal && this.current(v.scope, v.generation) && this.compatibility.nativeReady() &&
       v.hc === this.host.nativeHC.approved && v.context === this.host.nativeHC.context() &&
       v.digest === value.pointer_sha256 && v.pointer === identity(value.pointer) && v.receipt === identity(value.terminal);
   }

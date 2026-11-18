@@ -52,8 +52,11 @@ func (q *Queries) AgentPromptIntent(ctx context.Context, jobID string) ([]byte, 
 	return intent, err
 }
 
-const completeAgentJob = `-- name: CompleteAgentJob :exec
+const completeAgentJob = `-- name: CompleteAgentJob :execrows
 UPDATE jobs SET state='finished',outcome=?,reason=? WHERE id=?
+ AND state IN ('launching','running','unknown')
+ AND EXISTS(SELECT 1 FROM agent_ownership a WHERE a.job_id=jobs.id
+  AND a.phase='terminal' AND a.terminal_evidence<>'')
 `
 
 type CompleteAgentJobParams struct {
@@ -62,9 +65,12 @@ type CompleteAgentJobParams struct {
 	ID      string
 }
 
-func (q *Queries) CompleteAgentJob(ctx context.Context, arg CompleteAgentJobParams) error {
-	_, err := q.db.ExecContext(ctx, completeAgentJob, arg.Outcome, arg.Reason, arg.ID)
-	return err
+func (q *Queries) CompleteAgentJob(ctx context.Context, arg CompleteAgentJobParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, completeAgentJob, arg.Outcome, arg.Reason, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const completeAgentOwnership = `-- name: CompleteAgentOwnership :exec
@@ -118,13 +124,18 @@ func (q *Queries) InsertAgentOwnership(ctx context.Context, arg InsertAgentOwner
 	return err
 }
 
-const markAgentRunning = `-- name: MarkAgentRunning :exec
-UPDATE jobs SET state='running',outcome='agent_pending',reason='prompt accepted; CLI exit is not agent completion' WHERE id=?
+const markAgentRunning = `-- name: MarkAgentRunning :execrows
+UPDATE jobs SET state='running',outcome='agent_pending',reason='prompt accepted; CLI exit is not agent completion'
+ WHERE id=? AND state='launching'
+ AND EXISTS(SELECT 1 FROM agent_ownership a WHERE a.job_id=jobs.id AND a.phase='prompt_accepted')
 `
 
-func (q *Queries) MarkAgentRunning(ctx context.Context, id string) error {
-	_, err := q.db.ExecContext(ctx, markAgentRunning, id)
-	return err
+func (q *Queries) MarkAgentRunning(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markAgentRunning, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const markAgentUnknown = `-- name: MarkAgentUnknown :exec

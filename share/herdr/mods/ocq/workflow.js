@@ -14,6 +14,8 @@ const pin = b => JSON.stringify([b?.image_sha256, b?.bridge_context, b?.queue_id
 export class OperatorWorkflow {
   constructor(host) {
     this.host = host; this.choices = {};
+    this.compatibility = host.compatibility || compatibility;
+    this.command = (args, options) => bridgeCommand(args, { ...options, compatibility: this.compatibility });
     this.label = InputState.new({ placeholder: "Project name" });
     this.goal = TextareaState.new({ placeholder: "What should Main accomplish?", rows: 4 });
     for (const field of [this.label, this.goal]) field.on("change", (_e, cx) => { this.review = null; cx.notify(); });
@@ -28,18 +30,20 @@ export class OperatorWorkflow {
     catch (_) { this.storageError = true; }
   }
   scope() {
-    const h = this.host, b = compatibility.status;
-    return !h.closed && h.panelCurrent() && h.machine === null && b && {
+    const h = this.host, b = this.compatibility.status;
+    return !h.closed && h.panelCurrent() && this.compatibility.machineReady() && b && {
+      machine: h.machine,
+      ...(h.sourceKey ? { source: h.sourceKey } : {}),
       folder: h.folder, space: b.space_id, queue: b.queue_identity, store: b.observation_store_context,
       bridge: b.observation_context, image: b.image_sha256, epoch: h.panelEpoch, owner: h.generation,
       project: h.selected || null,
     };
   }
   current(scope) { return !!scope && JSON.stringify(scope) === JSON.stringify(this.scope()) && this.host.workOperator.visible(); }
-  key(s) { return JSON.stringify([s.space, s.queue, s.folder, s.project]); }
-  args(s, project, operation) { return [s.space, s.queue, project, operation, "local", s.folder, s.store, s.image]; }
+  key(s) { return JSON.stringify([...(s.source ? [s.source] : []), s.space, s.queue, s.folder, s.project]); }
+  args(s, project, operation) { return [s.space, s.queue, project, operation, s.machine ?? "local", s.folder, s.store, s.image]; }
   async read(action, args) {
-    const r = await bridgeCommand([action, "--", ...args], { on: null });
+    const r = await this.command([action, "--", ...args], { on: this.host.machine });
     if (r.code !== 0 || Buffer.byteLength(r.stdout || "") > 1048576) throw Error("Workflow unavailable");
     return JSON.parse(r.stdout);
   }
@@ -83,11 +87,11 @@ export class OperatorWorkflow {
       this.status = null; this.review = null;
       this.saved[key] = record; await this.persist();
       if (!this.current(s)) return;
-      const b = await compatibility.check(() => this.current(s), true, true);
-      const epoch = compatibility.epoch, serial = compatibility.serial, pins = pin(b);
-      const current = () => this.current(s) && compatibility.epoch === epoch && compatibility.serial === serial && pin(compatibility.status) === pins;
-      const response = await bridgeCommand(["main-author-v1", ...this.args(s, project, operation)], {
-        on: null, current, payload: JSON.stringify(input),
+      const b = await this.compatibility.check(() => this.current(s), true, true);
+      const epoch = this.compatibility.epoch, serial = this.compatibility.serial, pins = pin(b);
+      const current = () => this.current(s) && this.compatibility.epoch === epoch && this.compatibility.serial === serial && pin(this.compatibility.status) === pins;
+      const response = await this.command(["main-author-v1", ...this.args(s, project, operation)], {
+        on: s.machine, current, payload: JSON.stringify(input),
       });
       if (!current() || response.code !== 0) throw Error("Retained author response unavailable");
       const status = JSON.parse(response.stdout);
@@ -97,14 +101,14 @@ export class OperatorWorkflow {
     });
   }
   async preview(s, record) {
-    const b = await compatibility.check(() => this.current(s), true, true);
-    const epoch = compatibility.epoch, serial = compatibility.serial, pins = pin(b);
-    const response = await bridgeCommand(["main-preview", "--work-observation-context", s.bridge, "--", ...this.args(s, record.project, record.operation)], { on: null });
+    const b = await this.compatibility.check(() => this.current(s), true, true);
+    const epoch = this.compatibility.epoch, serial = this.compatibility.serial, pins = pin(b);
+    const response = await this.command(["main-preview", "--work-observation-context", s.bridge, "--", ...this.args(s, record.project, record.operation)], { on: s.machine });
     const value = response.code === 0 && JSON.parse(response.stdout), c = value?.context;
-    if (!this.current(s) || epoch !== compatibility.epoch || serial !== compatibility.serial || pin(compatibility.status) !== pins ||
+    if (!this.current(s) || epoch !== this.compatibility.epoch || serial !== this.compatibility.serial || pin(this.compatibility.status) !== pins ||
       value.protocol !== "ocq-main-v1" || !hex(value.preview_sha256) || value.status?.project_id !== record.project ||
       value.status.operation_id !== record.operation || value.status.mode !== record.mode || value.status.repo !== s.folder ||
-      c?.protocol !== "ocq-main-v1" || c.action !== "start" || c.image_role !== "bridge" || c.peer !== "local" ||
+      c?.protocol !== "ocq-main-v1" || c.action !== "start" || c.image_role !== "bridge" || c.peer !== (s.machine ?? "local") ||
       c.space !== s.space || c.folder !== s.folder || c.queue_identity !== s.queue || c.store_context !== s.store || c.image_sha256 !== s.image ||
       value.role?.session_id !== value.status.session_id || value.role.project_id !== record.project ||
       value.role.repo !== s.folder || value.role.queue_identity !== s.queue || value.role.store_context !== s.store ||
@@ -112,14 +116,14 @@ export class OperatorWorkflow {
       ["input_json", "session_json", "registration_json", "prompt_json"].some(key => typeof value[key] !== "string"))
       throw Error("Exact Main preview/context mismatch");
     const hc = await this.host.nativeHC.load();
-    if (!this.current(s) || epoch !== compatibility.epoch || serial !== compatibility.serial || pin(compatibility.status) !== pins) throw Error("Native review context changed");
+    if (!this.current(s) || epoch !== this.compatibility.epoch || serial !== this.compatibility.serial || pin(this.compatibility.status) !== pins) throw Error("Native review context changed");
     this.review = { scope: s, record, value, epoch, serial, pins, hc,
       pages: this.host.workOperator.pagesFor({ main: value, native_backend: hc.value }), page: 0, seen: new Set() };
   }
   pinned(r) {
-    return r && this.review === r && this.current(r.scope) && compatibility.workReady() &&
+    return r && this.review === r && this.current(r.scope) && this.compatibility.workReady() &&
       r.hc === this.host.nativeHC.review && r.hc.context === this.host.nativeHC.context() &&
-      compatibility.epoch === r.epoch && compatibility.serial === r.serial && pin(compatibility.status) === r.pins;
+      this.compatibility.epoch === r.epoch && this.compatibility.serial === r.serial && pin(this.compatibility.status) === r.pins;
   }
   start(cx) {
     const review = this.review;
@@ -138,8 +142,8 @@ export class OperatorWorkflow {
       if (!this.pinned(review)) {
         record.phase = "prepared"; await this.persist(); return;
       }
-      const response = await bridgeCommand(["main-start", ...this.args(s, record.project, record.operation), review.value.preview_sha256],
-        { on: null, current: () => this.pinned(review) });
+      const response = await this.command(["main-start", ...this.args(s, record.project, record.operation), review.value.preview_sha256],
+        { on: s.machine, current: () => this.pinned(review) });
       this.review = null;
       if (!this.current(s) || response.code !== 0) throw Error("Start outcome unknown");
       const value = JSON.parse(response.stdout);

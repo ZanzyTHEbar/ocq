@@ -35,6 +35,8 @@ function status(value, project, request) {
 export class WorkOperator {
   constructor(host) {
     this.host = host; this.generation = 0; this.dirty = true; this.rows = [];
+    this.compatibility = host.compatibility || compatibility;
+    this.command = (args, options) => bridgeCommand(args, { ...options, compatibility: this.compatibility });
     this.scroll = ScrollHandle.new();
     try {
       this.attempts = JSON.parse(localStorage.getItem("work-attempts-v1") ?? "{}");
@@ -47,7 +49,7 @@ export class WorkOperator {
     if (!h.selected || !observation || !hex(observation.queue_identity)) return null;
     const machine = h.machine, space = h.updates.scope?.localSpace;
     if (!/^sp[0-9a-f]{32}$/.test(space || "")) return null;
-    return { project: h.selected, machine, space, folder: h.folder, queue: observation.queue_identity,
+    return { project: h.selected, machine, space, folder: h.folder, queue: observation.queue_identity, ...(h.sourceKey ? { source: h.sourceKey } : {}),
       store: observation.store_context, bridge: observation.bridge_context, epoch: h.panelEpoch, owner: h.generation };
   }
   current(scope) {
@@ -101,7 +103,7 @@ export class WorkOperator {
   hint(capture) {
     if (capture && capture.target === this && capture.generation === this.generation && this.current(capture.scope)) this.dirty = true;
   }
-  attemptKey(scope, item) { return JSON.stringify([scope.machine, scope.space, scope.queue, scope.project, item.request_id, item.intent_sha256]); }
+  attemptKey(scope, item) { return JSON.stringify([scope.source ?? scope.machine, scope.space, scope.queue, scope.project, item.request_id, item.intent_sha256]); }
   attempted() {
     const marker = this.selected && this.bound && this.attempts[this.attemptKey(this.bound, this.selected)];
     return marker && marker.state !== "not_invoked";
@@ -113,18 +115,18 @@ export class WorkOperator {
   async call(action, scope, extra = []) {
     const args = [action, ...(action === "work-preview" ? ["--work-observation-context", scope.bridge] : []),
       "--", scope.space, scope.queue, scope.project, ...(action === "work-list" ? [] : [this.selectedID]), ...extra];
-    const r = await bridgeCommand(args, { on: scope.machine });
+    const r = await this.command(args, { on: scope.machine });
     if (r.code !== 0 || Buffer.from(r.stdout || "").length > 1048576) throw Error("Work read unavailable");
     return JSON.parse(r.stdout);
   }
   async check(scope, generation) {
-    return compatibility.check(() => this.current(scope) && this.generation === generation, true, true);
+    return this.compatibility.check(() => this.current(scope) && this.generation === generation, true, true);
   }
   pinned() {
     const p = this.reviewScope;
     const binding = this.host.board?.project?.current_binding;
-    return p && this.visible() && this.current(p.scope) && this.generation === p.generation && compatibility.workReady() &&
-      compatibility.epoch === p.epoch && compatibility.serial === p.serial && pins(compatibility.status) === p.pins &&
+    return p && this.visible() && this.current(p.scope) && this.generation === p.generation && this.compatibility.workReady() &&
+      this.compatibility.epoch === p.epoch && this.compatibility.serial === p.serial && pins(this.compatibility.status) === p.pins &&
       binding && String(binding.revision) === String(this.preview?.binding.revision) && binding.repo_root === p.scope.folder;
   }
   contextArgs(scope, bridge) { return [scope.machine ?? "local", scope.folder, scope.store, bridge.image_sha256]; }
@@ -144,9 +146,9 @@ export class WorkOperator {
         const bridge = await this.check(scope, generation);
         if (!this.visible() || !this.current(scope) || this.generation !== generation || bridge.queue_identity !== scope.queue ||
           bridge.observation_store_context !== scope.store || bridge.observation_context !== scope.bridge) throw Error("Observation/authorization binding changed");
-        const serial = compatibility.serial, epoch = compatibility.epoch;
+        const serial = this.compatibility.serial, epoch = this.compatibility.epoch;
         const value = await this.call("work-preview", scope, this.contextArgs(scope, bridge));
-        if (!this.visible() || !this.current(scope) || this.generation !== generation || serial !== compatibility.serial || epoch !== compatibility.epoch) return;
+        if (!this.visible() || !this.current(scope) || this.generation !== generation || serial !== this.compatibility.serial || epoch !== this.compatibility.epoch) return;
         status(value.status, scope.project, selected.request_id);
         const c = value.context;
         if (!keys(value, ["protocol", "status", "context", "preview_sha256", "binding", "input_json", "payload", "payload_sha256"]) ||
@@ -220,8 +222,8 @@ export class WorkOperator {
         await localStorage.flush();
         if (!this.pinned() || this.preview !== preview) throw Error("Context changed");
         invoked = true;
-        const r = await bridgeCommand(["work-confirm", scope.space, scope.queue, scope.project, preview.status.request_id,
-          ...this.contextArgs(scope, compatibility.status), preview.preview_sha256],
+        const r = await this.command(["work-confirm", scope.space, scope.queue, scope.project, preview.status.request_id,
+          ...this.contextArgs(scope, this.compatibility.status), preview.preview_sha256],
           { on: scope.machine, current: () => this.pinned() && this.preview === preview });
         if (r.code !== 0 || Buffer.from(r.stdout || "").length > 1048576) throw Error("Confirmation response unavailable");
         const value = status(JSON.parse(r.stdout), scope.project, preview.status.request_id);

@@ -32,23 +32,24 @@ type store struct {
 }
 
 type Job struct {
-	ID             string          `json:"id"`
-	Sequence       int64           `json:"sequence"`
-	Key            string          `json:"key"`
-	Digest         string          `json:"digest"`
-	Request        json.RawMessage `json:"request"`
-	State          string          `json:"state"`
-	Reason         string          `json:"reason"`
-	Process        Process         `json:"process"`
-	Stdout         string          `json:"stdout"`
-	Stderr         string          `json:"stderr"`
-	ExitCode       *int            `json:"exit_code"`
-	Outcome        string          `json:"outcome"`
-	Validation     string          `json:"validation"`
-	Evidence       string          `json:"resolution_evidence"`
-	AcceptedAt     string          `json:"accepted_at"`
-	OutputStatus   string          `json:"output_status"`
-	Agent          *AgentOwnership `json:"agent,omitempty"`
+	Scheduling     *SchedulingEnvelope `json:"scheduling,omitempty"`
+	ID             string              `json:"id"`
+	Sequence       int64               `json:"sequence"`
+	Key            string              `json:"key"`
+	Digest         string              `json:"digest"`
+	Request        json.RawMessage     `json:"request"`
+	State          string              `json:"state"`
+	Reason         string              `json:"reason"`
+	Process        Process             `json:"process"`
+	Stdout         string              `json:"stdout"`
+	Stderr         string              `json:"stderr"`
+	ExitCode       *int                `json:"exit_code"`
+	Outcome        string              `json:"outcome"`
+	Validation     string              `json:"validation"`
+	Evidence       string              `json:"resolution_evidence"`
+	AcceptedAt     string              `json:"accepted_at"`
+	OutputStatus   string              `json:"output_status"`
+	Agent          *AgentOwnership     `json:"agent,omitempty"`
 	commandRequest *commandRequest
 	agentRequest   *agentRequest
 }
@@ -186,7 +187,7 @@ func openStore(dir string) (*store, error) {
 		database.Close()
 		return nil, classifyDiagnostic(faults.CodeDatabaseRead, err)
 	}
-	if version < 0 || version > 6 {
+	if version < 0 || version > 7 {
 		database.Close()
 		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("unsupported schema version %d", version))
 	}
@@ -197,7 +198,11 @@ func openStore(dir string) (*store, error) {
 			return nil, faults.Wrap(faults.CodeResourceLimit, "stop dispatcher before schema migration", err)
 		}
 	}
-	if err := migrateStore(db); err != nil {
+	if err := migrateStore(db, false); err != nil {
+		database.Close()
+		return nil, err
+	}
+	if err := s.validateSchedulingIdentity(); err != nil {
 		database.Close()
 		return nil, err
 	}
@@ -209,7 +214,7 @@ func openStore(dir string) (*store, error) {
 // Goose commits each callback and its applied-version record in one transaction.
 // Goose may first commit an empty version table separately; this does not change
 // user_version or queue data and a subsequent open retries the migration.
-func migrateStore(db *sql.DB) error {
+func migrateStore(db *sql.DB, schedulingUpgrade bool) error {
 	migration := goose.NewGoMigration(1, &goose.GoFunc{RunTx: migrateSchema}, &goose.GoFunc{
 		RunTx: func(context.Context, *sql.Tx) error {
 			return faults.New(faults.CodeConfigInvalid, "schema downgrade is not supported")
@@ -219,6 +224,9 @@ func migrateStore(db *sql.DB) error {
 		RunTx: func(context.Context, *sql.Tx) error {
 			return faults.New(faults.CodeConfigInvalid, "schema downgrade is not supported")
 		},
+	})
+	scheduling := goose.NewGoMigration(3, &goose.GoFunc{RunTx: migrateSchedulingSchema}, &goose.GoFunc{
+		RunTx: func(context.Context, *sql.Tx) error { return fmt.Errorf("schema downgrade is not supported") },
 	})
 	// Reject a damaged ledger before Goose can hide it with a later migration.
 	queries := dbquery.New(db)
@@ -235,23 +243,31 @@ func migrateStore(db *sql.DB) error {
 		if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 			return err
 		}
-		if applied > 2 || (applied == 2 && version != 6) || (applied == 1 && version < 5) {
+		if applied > 3 || (applied == 3 && version != 7) || (applied == 2 && version != 6) || (applied == 1 && version < 5) {
 			return faults.New(faults.CodeInvariantFailed, "inconsistent Goose ledger and queue schema")
 		}
 	}
 	provider, err := goose.NewProvider(goose.DialectSQLite3, db, nil,
-		goose.WithDisableGlobalRegistry(true), goose.WithGoMigrations(migration, observation))
+		goose.WithDisableGlobalRegistry(true), goose.WithGoMigrations(migration, observation, scheduling))
 	if err != nil {
 		return classifyDiagnostic(faults.CodeConfigInvalid, err)
 	}
-	if _, err := provider.Up(context.Background()); err != nil {
+	target := int64(2)
+	var current int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&current); err != nil {
+		return err
+	}
+	if schedulingUpgrade || current == 7 {
+		target = 3
+	}
+	if _, err := provider.UpTo(context.Background(), target); err != nil {
 		return classifyDiagnostic(faults.CodeDatabaseWrite, err)
 	}
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return classifyDiagnostic(faults.CodeDatabaseRead, err)
 	}
-	if version != 6 {
+	if (target == 2 && version != 6) || (target == 3 && version != 7) {
 		return faults.New(faults.CodeInvariantFailed, fmt.Sprintf("inconsistent Goose migration and schema version %d", version))
 	}
 	return validateObservationSchema(context.Background(), db)
@@ -295,7 +311,7 @@ func migrateObservationSchema(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
-func supportedProjectSchema(version int) bool { return version == 5 || version == 6 }
+func supportedProjectSchema(version int) bool { return version == 5 || version == 6 || version == 7 }
 
 // Non-initializing read-only store open for projection reads. Fails closed if
 // the directory or database file does not exist or is not at schema version 5/6.
@@ -375,7 +391,7 @@ func openReadOnlyStoreVersionContext(ctx context.Context, dir string, requireSup
 	}
 	if requireSupported && !supportedProjectSchema(version) {
 		database.Close()
-		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("read-only store requires schema version 5 or 6, got %d", version))
+		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("read-only store requires schema version 5, 6 or 7, got %d", version))
 	}
 	return &store{db: db, database: database, dir: dir}, nil
 }
@@ -464,9 +480,14 @@ func openExistingWritableStore(dir string) (*store, error) {
 	}
 	if !supportedProjectSchema(version) {
 		database.Close()
-		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing writable store requires schema version 5 or 6, got %d", version))
+		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing writable store requires schema version 5, 6 or 7, got %d", version))
 	}
-	return &store{db: db, database: database, dir: dir}, nil
+	s := &store{db: db, database: database, dir: dir}
+	if err := s.validateSchedulingIdentity(); err != nil {
+		database.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 // Short IMMEDIATE transactions serialize receipt creation and state transitions.
@@ -506,6 +527,10 @@ func (s *store) submit(key string, request commandRequest) (Job, error) {
 }
 
 func (s *store) acceptCanonical(key string, data []byte, agent bool) (Job, error) {
+	return s.acceptScheduledCanonical(key, data, agent, nil, "unattributed")
+}
+
+func (s *store) acceptScheduledCanonical(key string, data []byte, agent bool, schedule []byte, project string) (Job, error) {
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
 	id := ""
@@ -517,12 +542,12 @@ func (s *store) acceptCanonical(key string, data []byte, agent bool) (Job, error
 			if !bytes.Equal(data, previous.Canonical) {
 				return faults.New(faults.CodeValidationFailed, "idempotency key already belongs to a different canonical request")
 			}
-			return nil
+			return compareScheduling(c, id, schedule, project)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return classifyDiagnostic(faults.CodeDatabaseRead, err)
 		}
-		id, err = insertCanonicalReceipt(c, key, data, digest, agent)
+		id, err = insertScheduledReceipt(c, key, data, digest, agent, schedule, project)
 		return err
 	})
 	if err != nil {
@@ -535,6 +560,10 @@ func (s *store) acceptCanonical(key string, data []byte, agent bool) (Job, error
 // prepared agent admission. No validation callbacks, subprocesses or filesystem
 // setup may run while the write transaction is held.
 func insertCanonicalReceipt(c *sql.Conn, key string, data []byte, digest string, agent bool) (string, error) {
+	return insertScheduledReceipt(c, key, data, digest, agent, nil, "unattributed")
+}
+
+func insertScheduledReceipt(c *sql.Conn, key string, data []byte, digest string, agent bool, schedule []byte, project string) (string, error) {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", classifyDiagnostic(faults.CodeRuntimeFailed, err)
@@ -551,6 +580,9 @@ func insertCanonicalReceipt(c *sql.Conn, key string, data []byte, digest string,
 		if err := insertAgentOwnership(c, id); err != nil {
 			return "", err
 		}
+	}
+	if err := insertScheduling(c, id, schedule, project); err != nil {
+		return "", err
 	}
 	return id, nil
 }
@@ -601,7 +633,10 @@ func (s *store) getFrom(q sqlQueryer, id string) (_ Job, resultErr error) {
 		return Job{}, classifyDiagnostic(faults.CodeDatabaseRead, err)
 	}
 	job, err := jobFromRow(row)
-	if err == nil && job.State == "queued" {
+	if err == nil {
+		job.Scheduling, err = readJobScheduling(q, id)
+	}
+	if err == nil && job.State == "queued" && job.Scheduling == nil {
 		var head string
 		head, err = dbquery.New(q).QueuedHead(context.Background())
 		if err == nil && head != id {
@@ -627,6 +662,10 @@ func (s *store) list() (_ []Job, resultErr error) {
 	jobs := []Job{}
 	for _, row := range rows {
 		job, err := jobFromRow(dbquery.JobByIDRow(row))
+		if err != nil {
+			return nil, err
+		}
+		job.Scheduling, err = readJobScheduling(s.db, job.ID)
 		if err != nil {
 			return nil, err
 		}

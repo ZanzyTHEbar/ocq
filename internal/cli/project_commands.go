@@ -110,6 +110,7 @@ func projectSubmit(state *string) *cobra.Command {
 	cmd := queueCommand(state, "submit", nil)
 	f := cmd.Flags()
 	envelopeFile := f.String("envelope-file", "", "caller-retained version-1 project submission envelope JSON file")
+	schedulingFile := f.String("scheduling-file", "", "separate version-1 immutable scheduling envelope")
 	fileAlias := f.String("file", "", "alias for --envelope-file")
 	cmd.RunE = queueRun(state, func(q *core.Queue, args []string) error {
 		target := *envelopeFile
@@ -126,7 +127,14 @@ func projectSubmit(state *string) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		result, err := q.SubmitProject(envelope)
+		var scheduling []byte
+		if *schedulingFile != "" {
+			scheduling, err = readInput(*schedulingFile)
+			if err != nil {
+				return err
+			}
+		}
+		result, err := q.SubmitScheduledProject(envelope, scheduling)
 		if err != nil {
 			return err
 		}

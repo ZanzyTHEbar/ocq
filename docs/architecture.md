@@ -32,17 +32,22 @@ completion events also commit together. External processes and APIs are outside
 SQLite transactions: durable mutation intent precedes launch, and ambiguous
 responses preserve unknown ownership rather than replaying effects.
 
-Current schema **6** includes agent ownership, completion notifications, projects,
+Legacy schema **6** includes agent ownership, completion notifications, projects,
 lanes, inbox mail and a committed observation revision. Migration is additive and
 transactional with dispatch stopped; immutable request bytes and receipts are
 preserved. Project projection reads use non-initializing read-only connections
-and support existing schema-5 or schema-6 state. Automatic observation requires 6;
+and support existing schema-5, schema-6 or schema-7 state. Automatic observation supports 6 and 7;
 neither read path creates or migrates a queue. See the
 [coordinated upgrade sequence](command-core.md#state-and-upgrades).
+Explicit [scheduling activation](scheduling.md) applies migration 3 / schema 7,
+retaining immutable job metadata, exact-artifact prerequisites and a local RR cursor.
 
 ## Admission
 
-Only the earliest queued receipt is considered. Default admission requires fewer
+Under legacy FIFO only the earliest queued receipt is considered. After explicit
+activation, a legacy queued drain barrier remains; subsequent admissions rotate
+fitting project heads selected from each project's dependency-ready FIFO.
+Default admission requires fewer
 than two launching/running/unknown jobs and:
 
 ```text

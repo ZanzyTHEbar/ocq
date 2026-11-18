@@ -7,31 +7,7 @@ package dbquery
 
 import (
 	"context"
-	"database/sql"
 )
-
-const finishRunningJob = `-- name: FinishRunningJob :exec
-UPDATE jobs SET state=?,outcome=?,reason=?,exit_code=? WHERE id=? AND state='running'
-`
-
-type FinishRunningJobParams struct {
-	State    string
-	Outcome  string
-	Reason   string
-	ExitCode sql.NullInt64
-	ID       string
-}
-
-func (q *Queries) FinishRunningJob(ctx context.Context, arg FinishRunningJobParams) error {
-	_, err := q.db.ExecContext(ctx, finishRunningJob,
-		arg.State,
-		arg.Outcome,
-		arg.Reason,
-		arg.ExitCode,
-		arg.ID,
-	)
-	return err
-}
 
 const inflightRequests = `-- name: InflightRequests :many
 SELECT r.canonical FROM jobs j JOIN receipts r ON j.id=r.job_id
@@ -59,67 +35,6 @@ func (q *Queries) InflightRequests(ctx context.Context) ([][]byte, error) {
 		return nil, err
 	}
 	return items, nil
-}
-
-const markLaunchFailure = `-- name: MarkLaunchFailure :exec
-UPDATE jobs SET state='finished',outcome='launch_failed',reason=? WHERE id=?
-`
-
-type MarkLaunchFailureParams struct {
-	Reason string
-	ID     string
-}
-
-func (q *Queries) MarkLaunchFailure(ctx context.Context, arg MarkLaunchFailureParams) error {
-	_, err := q.db.ExecContext(ctx, markLaunchFailure, arg.Reason, arg.ID)
-	return err
-}
-
-const recordLaunchIntent = `-- name: RecordLaunchIntent :exec
-UPDATE jobs SET state='launching',reason='launch intent committed; spawn may be uncertain',
- boot=?,stdout=?,stderr=? WHERE id=?
-`
-
-type RecordLaunchIntentParams struct {
-	Boot   string
-	Stdout string
-	Stderr string
-	ID     string
-}
-
-func (q *Queries) RecordLaunchIntent(ctx context.Context, arg RecordLaunchIntentParams) error {
-	_, err := q.db.ExecContext(ctx, recordLaunchIntent,
-		arg.Boot,
-		arg.Stdout,
-		arg.Stderr,
-		arg.ID,
-	)
-	return err
-}
-
-const recordProcessIdentity = `-- name: RecordProcessIdentity :exec
-UPDATE jobs SET state=?,reason=?,pid=?,start_ticks=?,boot=? WHERE id=?
-`
-
-type RecordProcessIdentityParams struct {
-	State      string
-	Reason     string
-	Pid        int64
-	StartTicks int64
-	Boot       string
-	ID         string
-}
-
-func (q *Queries) RecordProcessIdentity(ctx context.Context, arg RecordProcessIdentityParams) error {
-	_, err := q.db.ExecContext(ctx, recordProcessIdentity,
-		arg.State,
-		arg.Reason,
-		arg.Pid,
-		arg.StartTicks,
-		arg.Boot,
-		arg.ID,
-	)
-	return err
 }
 
 const recoverInterruptedJobs = `-- name: RecoverInterruptedJobs :exec

@@ -7,6 +7,7 @@ import { Buffer } from "buffer";
 export const pushProtocol = "ocq-push-v1";
 const cell = "__ocq_push_connection_v1";
 export const physical = globalThis[cell] || (globalThis[cell] = { owner: null, socket: null, settled: Promise.resolve() });
+const sourceSlots = globalThis.__ocq_runtime_sockets_v1 || (globalThis.__ocq_runtime_sockets_v1 = {});
 
 function endpoint(value) {
   let u;
@@ -27,14 +28,18 @@ const nativeClosed = "WebSocket connection is closed";
 export class PushConnection {
   constructor(updates) {
     this.updates = updates;
+    this.physical = updates.runtime
+      ? (sourceSlots[updates.sourceKey] ||= { owner: null, socket: null, settled: Promise.resolve() }) : physical;
     this.state = "disconnected";
     this.pending = new Map();
     this.writes = new Set();
     this.lifecycle = 0; this.attempt = 0;
   }
   associate(scope, cx) {
+    const physical = this.physical;
     const lifecycle = ++this.lifecycle;
     this.cancelRetry(); this.association = null; this.fault = null; this.faultPhase = null; this.attempt = 0;
+    this.executionPeer = null; this.executionCore = null;
     const draining = this.disconnect();
     if (checking()) return;
     cx.spawn(async cx => {
@@ -44,6 +49,11 @@ export class PushConnection {
       if (!this.active(scope, lifecycle)) return;
       let phase = "bootstrap";
       try {
+        if (this.updates.runtime) {
+          this.association = this.updates.runtime;
+          this.connect(scope, lifecycle, cx);
+          return;
+        }
         if (globalThis.__ocq_observation_physical_v1?.flight) throw Error("Older observer is unresolved.");
         // Fixed local bootstrap, not selected-machine exec or an observation
         // fallback. Never log stdout/stderr: stdout carries the private token.
@@ -77,6 +87,7 @@ export class PushConnection {
     this.updates.publish("unavailable", reason); cx.notify();
   }
   connect(scope, lifecycle, cx) {
+    const physical = this.physical;
     if (!this.active(scope, lifecycle) || !this.association) return;
     if (physical.owner || physical.socket) {
       this.stopWithFault("Another OCQ panel owns this connection.", cx);
@@ -97,12 +108,22 @@ export class PushConnection {
         physical.socket = socket;
         this.socket = socket;
         if (!this.current(scope, generation)) return;
-        await socket.write(JSON.stringify({ protocol: pushProtocol, type: "auth", token: association.token, space: scope.localSpace, folder: scope.folder }));
+        await socket.write(JSON.stringify(this.updates.runtime
+          ? { protocol: pushProtocol, type: "auth", token: association.token, core_id: association.core_id, queue_identity: association.queue_identity, peer: scope.machine ?? "" }
+          : { protocol: pushProtocol, type: "auth", token: association.token, space: scope.localSpace, folder: scope.folder }));
         const welcome = await this.read(socket);
         if (!this.current(scope, generation)) return;
         try {
           if (welcome.descriptor?.queue_identity !== association.queue_identity) throw Error("Queue identity mismatch");
+          if (this.updates.runtime && (welcome.runtime?.protocol !== "ocq-runtime-v1" ||
+              welcome.runtime.core_id !== association.core_id || welcome.runtime.queue_identity !== association.queue_identity ||
+              welcome.execution_peer !== (scope.machine ?? "local"))) throw Error("Runtime core/queue/route identity mismatch");
+          if (!this.updates.runtime && welcome.execution_peer !== undefined &&
+              (welcome.execution_peer !== scope.machine || typeof welcome.execution_core_id !== "string" || !welcome.execution_core_id))
+            throw Error("Selected execution machine mismatch");
           this.updates.welcome(welcome);
+          this.executionPeer = welcome.execution_peer ?? null;
+          this.executionCore = welcome.execution_core_id ?? null;
         } catch (_) { throw contractError("Check OCQ endpoint identity or version."); }
         this.state = "connected";
         this.updates.kick();
@@ -188,14 +209,14 @@ export class PushConnection {
     }
     this.pending.clear();
   }
-  async command(args, payload) {
+  async command(args, payload, context) {
     if (this.pending.size >= 4 || !this.updates.current() || this.state !== "connected") throw Error("Command unavailable or four commands are unsettled");
     const id = String(++this.updates.control);
     let resolve, reject;
     const result = new Promise((yes, no) => { resolve = yes; reject = no; });
     this.pending.set(id, { resolve, reject });
     try {
-      await this.write({ type: "command", id, request: { connection_id: this.updates.connectionID, args, ...(payload !== undefined ? { payload } : {}) } });
+      await this.write({ type: "command", id, request: { connection_id: this.updates.connectionID, args, ...(payload !== undefined ? { payload } : {}), ...(context ? { context } : {}) } });
     } catch (_) {
       this.rejectPending();
       // A failed command is never retried, even if observation reconnects.
@@ -215,6 +236,7 @@ export class PushConnection {
     return this.closing;
   }
   async disconnect() {
+    const physical = this.physical;
     this.cancelRetry();
     this.state = "closing";
     ++this.updates.connectionGeneration;

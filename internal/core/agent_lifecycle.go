@@ -215,7 +215,11 @@ func (s *store) launchAgent(j Job) error {
 		return err
 	}
 	return s.write(func(c *sql.Conn) error {
-		return dbquery.New(c).MarkAgentRunning(context.Background(), j.ID)
+		n, err := dbquery.New(c).MarkAgentRunning(context.Background(), j.ID)
+		if err == nil && n != 1 {
+			return fmt.Errorf("agent prompt acceptance CAS failed; ownership retained")
+		}
+		return err
 	})
 }
 

@@ -300,6 +300,10 @@ func nullStringEqual(a sql.NullString, b *string) bool {
 // SubmitProject accepts the exact retained envelope, creating a job, owned lane,
 // and assignment mail atomically after receipt-first recovery checks.
 func (q *Queue) SubmitProject(rawEnvelope []byte) (_ ProjectSubmissionResult, resultErr error) {
+	return q.SubmitScheduledProject(rawEnvelope, nil)
+}
+
+func (q *Queue) SubmitScheduledProject(rawEnvelope, scheduling []byte) (_ ProjectSubmissionResult, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeRuntimeFailed, resultErr) }()
 	s := q.store
 	var empty ProjectSubmissionResult
@@ -307,12 +311,16 @@ func (q *Queue) SubmitProject(rawEnvelope []byte) (_ ProjectSubmissionResult, re
 	if err != nil {
 		return empty, faults.Wrap(faults.CodeValidationFailed, "invalid project submission", err)
 	}
+	scheduling, err = projectScheduling(s.db, parsed, scheduling)
+	if err != nil {
+		return empty, err
+	}
 
 	// B1 resolution: check global receipts / project_submissions key FIRST before any live repo/session/binding checks.
 	if existing, found, err := s.lookupProjectSubmission(s.db, parsed); err != nil {
 		return empty, err
 	} else if found {
-		return existing, nil
+		return existing, compareScheduling(s.db, existing.JobID, scheduling, parsed.Envelope.ProjectID)
 	}
 
 	ctx := context.Background()
@@ -320,16 +328,16 @@ func (q *Queue) SubmitProject(rawEnvelope []byte) (_ ProjectSubmissionResult, re
 		// If external validation fails, recheck the key before returning failure so an
 		// exact concurrent acceptance can still be recovered receipt-first.
 		if existing, found, err := s.lookupProjectSubmission(s.db, parsed); err == nil && found {
-			return existing, nil
+			return existing, compareScheduling(s.db, existing.JobID, scheduling, parsed.Envelope.ProjectID)
 		}
 		return empty, verifyErr
 	}
 
 	err = s.write(func(c *sql.Conn) error {
-		if _, found, err := s.lookupProjectSubmissionRow(ctx, c, parsed); err != nil {
+		if previous, found, err := s.lookupProjectSubmissionRow(ctx, c, parsed); err != nil {
 			return err
 		} else if found {
-			return nil
+			return compareScheduling(c, previous.jobID, scheduling, parsed.Envelope.ProjectID)
 		}
 
 		currentRev, err := currentBindingRevision(ctx, c, parsed.Envelope.ProjectID)
@@ -375,6 +383,9 @@ func (q *Queue) SubmitProject(rawEnvelope []byte) (_ ProjectSubmissionResult, re
 			return err
 		}
 		if err := insertAgentOwnership(c, jobID); err != nil {
+			return err
+		}
+		if err := insertScheduling(c, jobID, scheduling, parsed.Envelope.ProjectID); err != nil {
 			return err
 		}
 		if err := queries.InsertSubmission(ctx, dbquery.InsertSubmissionParams{Key: parsed.Envelope.Key, EnvelopeDigest: parsed.EnvelopeDigest, EnvelopeCanonical: parsed.EnvelopeBytes, JobID: jobID, RecordedAt: ts}); err != nil {

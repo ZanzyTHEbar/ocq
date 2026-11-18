@@ -182,11 +182,20 @@ func commandPalette(state *string) []*cobra.Command {
 		return output(job)
 	})
 	submit := queueCommand(state, "submit [flags] -- COMMAND [ARG...]", nil)
+	schedulingFile := submit.Flags().String("scheduling-file", "", "separate version-1 immutable scheduling envelope")
 	key := submit.Flags().String("key", "", "required immutable idempotency key")
 	cwd := submit.Flags().String("cwd", ".", "existing working directory (canonicalized at submission)")
 	memory := submit.Flags().Int64("memory-bytes", 64<<20, "declared memory demand, not an enforced limit")
 	submit.RunE = queueRun(state, func(q *core.Queue, args []string) error {
-		job, err := q.SubmitCommand(*key, *cwd, args, *memory)
+		var scheduling []byte
+		var err error
+		if *schedulingFile != "" {
+			scheduling, err = readInput(*schedulingFile)
+			if err != nil {
+				return err
+			}
+		}
+		job, err := q.SubmitScheduledCommand(*key, *cwd, args, *memory, scheduling)
 		if err != nil {
 			return err
 		}
@@ -260,7 +269,30 @@ func commandPalette(state *string) []*cobra.Command {
 		}
 		return output(job)
 	})
-	return []*cobra.Command{notifications, ack, submitAgentCommand(state), reconcile, submit, jobCommand("status", false), jobCommand("cancel", true), list, logs, dispatch, resolve, projectCommand(state)}
+	activate := queueCommand(state, "activate-scheduling", func(q *core.Queue, args []string) error {
+		if len(args) != 0 {
+			return validation("activate-scheduling takes no arguments; stop dispatch first")
+		}
+		if err := q.ActivateScheduling(); err != nil {
+			return err
+		}
+		v, err := core.ReadSchedulingPolicy(*state)
+		if err != nil {
+			return err
+		}
+		return output(v)
+	})
+	policy := &cobra.Command{Use: "scheduling-policy", RunE: func(_ *cobra.Command, args []string) error {
+		if len(args) != 0 {
+			return validation("scheduling-policy takes no arguments")
+		}
+		v, err := core.ReadSchedulingPolicy(*state)
+		if err != nil {
+			return err
+		}
+		return output(v)
+	}}
+	return []*cobra.Command{policy, activate, notifications, ack, submitAgentCommand(state), reconcile, submit, jobCommand("status", false), jobCommand("cancel", true), list, logs, dispatch, resolve, projectCommand(state)}
 }
 
 func queueRun(state *string, run func(*core.Queue, []string) error) func(*cobra.Command, []string) error {

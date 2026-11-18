@@ -52,7 +52,7 @@ function attentionDetail(job) {
 
 // The bridge is a short-lived Go process. OCQ's database remains authoritative;
 // no Herdr status, pane state, or mod state is interpreted as job completion.
-export default class OCQ extends View {
+export class OCQ extends View {
   // Stored-view consumers read the actual controller state, never a copy.
   get compose() { return this.composeController.compose; }
   get intake() { return this.intakeController.intake; }
@@ -153,7 +153,7 @@ export default class OCQ extends View {
     this.projectPages.forEach((page, index) => add({ slot: `projects-${index}`, kind: "projects", cursor: page.start }, page, (slot, meta, readAt) => {
       if (!this.projectPages.includes(page) || !acceptObservationVersion(page.observationVersion, meta)) return false;
       page.observationVersion = meta; page.items = slot.status === "ready" ? slot.data : []; page.readAt = readAt;
-      page.error = slot.status === "ready" ? null : `Project page ${page.start}: ${slot.status}`;
+      page.error = slot.status === "ready" ? null : `Project page: ${slot.status}`;
       page.next = slot.cursor || page.start; page.hasMore = slot.has_more;
       this.projects = this.projectPages.flatMap(item => item.items || []);
       this.projectsHasMore = this.projectPages[this.projectPages.length - 1].hasMore !== false;
@@ -993,7 +993,8 @@ export default class OCQ extends View {
         .when(!project && this.projects.length > 1, (e) => e.child(div().child("Choose a project")))
           .when(this.workspaceView !== "overview" && this.projects.length > 0 && (this.projectPicker || !this.selected), (e) => e.child(v_flex().gap(3).children(this.projects.map((p) =>
            button(`ocq-project-${p.project_id}`, `${p.label || p.project_id}${p.integrator_unread_mail_count ? ` · ${p.integrator_unread_mail_count} unread` : ""}`, cx => { this.select(p.project_id, cx); this.projectPicker = false; })))))
-          .when(this.workspaceView !== "overview" && this.projectsHasMore, e => e.child(button("ocq-project-pages-more", "Load next 20 projects", cx => { const last = this.projectPages[this.projectPages.length - 1]; if (last.next && !this.projectPages.some(page => page.start === last.next)) this.projectPages.push({ start: last.next }); cx.notify(); })))
+           .when(this.workspaceView !== "overview" && this.projectsHasMore, e => e.child(button("ocq-project-pages-more", "Load next 20 projects", cx => { const last = this.projectPages[this.projectPages.length - 1]; if (last.next && !this.projectPages.some(page => page.start === last.next)) this.projectPages.push({ start: last.next }); cx.notify(); })))
+           .when(this.projectPages.some(page => page.error?.includes("reset_required")), e => e.child(button("ocq-project-pages-reset", "Queue changed · restart project pages", cx => { this.projectPages = [{ start: "0" }]; this.updates.readAgain(cx); cx.notify(); })))
           .when(Boolean(this.selected) && this.workspaceView !== "overview", (e) => e
             .when(this.workspaceView === "projects", e => e.child(this.projectTabs(t, button)))
            .when(this.workspaceView === "projects" && this.projectView === "operator", e => e.child(this.workOperator.render(cx, t, button)))
@@ -1044,7 +1045,8 @@ export default class OCQ extends View {
            .when(this.workspaceView === "projects" && this.projectView === "lanes", e => e
            .child(button("ocq-compose-open", "Compose / recover retained message…", cx => compose.openCompose(null, cx)))
            .child(div().pt(8).font_semibold().child("Lanes"))
-           .children(this.lanePages.filter(page => page.error).map(page => this.readFault(page.error, `lanes page ${page.start}`, t)))
+            .children(this.lanePages.filter(page => page.error).map(page => this.readFault(page.error, "lanes page", t)))
+            .when(this.lanePages.some(page => page.error === "reset_required"), e => e.child(button("ocq-lane-pages-reset", "Queue changed · restart lane pages", cx => { this.lanePages = [{ start: "0" }]; this.lanes = []; this.updates.readAgain(cx); cx.notify(); })))
            .when(Boolean(this.lanePages[0].readAt) && !this.lanePages[0].error && !(this.lanes || []).length, (e) => e.child(div().text_color(t.dim).child("No lanes.")))
            .children((this.lanes || []).map((lane) => button(`ocq-lane-${lane.lane_id}`, `${lane.role} · ${lane.job_state} · ${lane.lane_id}`, (cx) => this.openTarget("lane", lane.lane_id, cx))))
            .when(this.composeLocal() && this.compose.state === "idle", (e) => e.children((this.lanes || []).map((lane) => button(`ocq-compose-lane-${lane.lane_id}`, `Compose update · ${lane.lane_id}`, (cx) => compose.openCompose(lane, cx)))))
@@ -1091,3 +1093,7 @@ export default class OCQ extends View {
       }).when(this.projectView === view, e => e.bg(t.hover).font_semibold())));
   }
 }
+
+// The legacy single-context view remains available to existing embedded callers.
+// The installed panel's default is the source-owned all-machine surface.
+export { RuntimeSources as default } from "./runtime-sources.js";

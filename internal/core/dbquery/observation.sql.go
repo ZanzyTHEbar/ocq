@@ -32,12 +32,14 @@ const observationLanesPage = `-- name: ObservationLanesPage :many
 SELECT l.lane_id,l.project_id,l.owner_job_id,l.role,j.state,l.base_commit,
  l.fsfork_driver,l.fsfork_path,l.sealed_manifest_digest,l.created_at,l.sealed_at
  FROM project_lanes l JOIN jobs j ON j.id=l.owner_job_id WHERE l.project_id=?1
- ORDER BY l.created_at,l.lane_id LIMIT 21 OFFSET ?2
+ AND (l.created_at,l.lane_id)>(?2,?3)
+ ORDER BY l.created_at,l.lane_id LIMIT 21
 `
 
 type ObservationLanesPageParams struct {
-	ProjectID  string
-	PageOffset int64
+	ProjectID    string
+	AfterCreated string
+	AfterID      string
 }
 
 type ObservationLanesPageRow struct {
@@ -55,7 +57,7 @@ type ObservationLanesPageRow struct {
 }
 
 func (q *Queries) ObservationLanesPage(ctx context.Context, arg ObservationLanesPageParams) ([]ObservationLanesPageRow, error) {
-	rows, err := q.db.QueryContext(ctx, observationLanesPage, arg.ProjectID, arg.PageOffset)
+	rows, err := q.db.QueryContext(ctx, observationLanesPage, arg.ProjectID, arg.AfterCreated, arg.AfterID)
 	if err != nil {
 		return nil, err
 	}
@@ -182,25 +184,32 @@ func (q *Queries) ObservationNotificationsPage(ctx context.Context, afterSequenc
 }
 
 const observationProjectsPage = `-- name: ObservationProjectsPage :many
-SELECT p.id,p.label,CAST(COALESCE(b.revision,0) AS INTEGER) AS binding_revision,
+SELECT p.id,p.label,p.created_at,CAST(COALESCE(b.revision,0) AS INTEGER) AS binding_revision,
  CAST(COALESCE(b.repo_root,'') AS TEXT) AS repo_root,
  (SELECT count(*) FROM project_inbox_messages m WHERE m.project_id=p.id
   AND m.recipient='integrator:'||p.id AND m.read_at IS NULL) AS unread_count
  FROM projects p LEFT JOIN project_bindings b ON b.project_id=p.id
  AND b.revision=(SELECT max(revision) FROM project_bindings WHERE project_id=p.id)
- ORDER BY p.created_at,p.id LIMIT 21 OFFSET ?1
+  WHERE (p.created_at,p.id)>(?1,?2)
+  ORDER BY p.created_at,p.id LIMIT 21
 `
+
+type ObservationProjectsPageParams struct {
+	AfterCreated string
+	AfterID      string
+}
 
 type ObservationProjectsPageRow struct {
 	ID              string
 	Label           string
+	CreatedAt       string
 	BindingRevision int64
 	RepoRoot        string
 	UnreadCount     int64
 }
 
-func (q *Queries) ObservationProjectsPage(ctx context.Context, pageOffset int64) ([]ObservationProjectsPageRow, error) {
-	rows, err := q.db.QueryContext(ctx, observationProjectsPage, pageOffset)
+func (q *Queries) ObservationProjectsPage(ctx context.Context, arg ObservationProjectsPageParams) ([]ObservationProjectsPageRow, error) {
+	rows, err := q.db.QueryContext(ctx, observationProjectsPage, arg.AfterCreated, arg.AfterID)
 	if err != nil {
 		return nil, err
 	}
@@ -211,6 +220,7 @@ func (q *Queries) ObservationProjectsPage(ctx context.Context, pageOffset int64)
 		if err := rows.Scan(
 			&i.ID,
 			&i.Label,
+			&i.CreatedAt,
 			&i.BindingRevision,
 			&i.RepoRoot,
 			&i.UnreadCount,

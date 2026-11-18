@@ -1,9 +1,55 @@
 # Explicit native push transport
 
-OCQ provides a foreground, authenticated WebSocket endpoint and a native GPUI
+## Machine runtime discovery and aggregation (unreleased)
+
+`push-serve --runtime` uses the same foreground endpoint, native WebSocket and
+read-only SQLite watcher, with one core/queue source rather than an active
+display space. It requires a verified existing HC binding; it does not start HC.
+The optional machine-wide workflow registry still requires explicit
+`--allow-actions`, an actual matching dispatcher and exact configured policies.
+No schema migration, alternate queue authority or new routing service is added.
+
+The endpoint publishes one private runtime registration in the execution user's
+config directory. Exclusive creation and exact read-back prevent silent
+adoption/replacement. On owned endpoint shutdown, only the unchanged registered
+inode/bytes are removed and its directory synced. An uncertain/stale
+registration is unavailable, never automatically overwritten or restarted.
+
+`runtime-discover --json` is a configuration-only trusted bootstrap. Public
+Herdr machine-routed exec retrieves its bounded private response without
+printing it, putting it in argv, rows or localStorage. Public machine core IDs
+must agree with registration. Missing/unsupported/unreachable sources remain
+distinct from successful empty queue observations.
+
+Runtime auth frames add `core_id`, `queue_identity` and the current route `peer`;
+legacy auth/welcome bytes are unchanged. Welcome authenticates the same core and
+queue. Runtime command frames may carry explicit
+`context: {project_id, space, folder}`; the server checks binding/canonical Git
+and reuses existing versioned preview/claim/attempt/receipt contracts. Wrong
+source/project/peer never redirects an action. Old client pointer bytes/digests
+are unchanged; existing claims and terminal receipts already bind the peer.
+
+Runtime selectors add bounded `all-inbox`, `runtime-jobs` and
+`runtime-notifications` pages in the existing coherent read transaction.
+Queue rows retain actual project associations; unassigned jobs are not
+attributed to whichever project happens to be selected. Inbox reads include
+read/archive state but perform no acknowledgement. Each source owns cursors and
+revision independently; no cross-machine atomic snapshot is claimed.
+
+Registration `local_only=true` means a loopback endpoint is usable only on that
+machine. A remote display shows runtime detected / connection unavailable,
+without pretending a route exists. Owner-advertised endpoints are independently
+provisioned; no arbitrary WebSocket forwarding through HC has been added.
+See [all-machine workflow](operator-workflow.md#all-machine-panel).
+
+## Legacy single-context mode
+
+The single-context association described below is retained for legacy callers;
+it is not the installed all-machine default. OCQ provides a foreground,
+authenticated WebSocket endpoint and a native GPUI
 adapter. This does not change Herdr, HC, OpenCode, their configuration, helpers,
 or services. No listener is started by opening the panel. There is no automatic
-installation, tunnel, discovery, endpoint restart or deployment. Client transport
+installation, tunnel, endpoint restart or deployment. Legacy transport
 reconnection is automatic against one privately provisioned association.
 
 ## Start and stop explicitly

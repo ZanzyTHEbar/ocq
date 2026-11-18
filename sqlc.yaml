@@ -8,6 +8,7 @@ sql:
       - internal/core/sql/schema4.sql
       - internal/core/sql/schema5.sql
       - internal/core/sql/schema6.sql
+      - internal/core/sql/schema7.sql
       - internal/core/sql/goose_metadata.sql
     queries:
       - internal/core/sql/receipts.sql

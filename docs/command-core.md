@@ -45,14 +45,17 @@ state. Use SQLite's online backup mechanism when backing up a running database;
 OCQ has no backup or pruning command.
 
 Writable queue opens can initialize or migrate state, including ordinary
-`list`, `status` and notification commands. Current schema is **6**: agent
+`list`, `status` and notification commands. Legacy schema is **6**: agent
 ownership (2), completion events (3), projects (4), lanes/inbox (5), and committed
 observation revisions (6). Goose migration 1 retains the historical schema 1–5
 steps; separate migration 2 upgrades 5→6 under the initialization lock with
-dispatch stopped. Versions above 6 are rejected; there is no downgrade command.
-Non-initializing existing-store readers/writers explicitly support schemas 5 and
-6. Project projection reads never initialize or migrate. Herdr's automatic
-observation requires 6; schema 5 reports `upgrade_required`, not an automatic upgrade.
+dispatch stopped. Explicit `activate-scheduling` applies migration 3 / schema **7**
+and persists the project-round-robin cutoff; ordinary opens do not activate it.
+Versions above 7 are rejected; there is no downgrade command.
+Non-initializing existing-store readers/writers explicitly support schemas 5, 6
+and 7. Project projection reads never initialize or migrate. Herdr's automatic
+observation supports 6 and 7; schema 5 reports `upgrade_required`.
+See [scheduling cutover](scheduling.md) for activation and exact dependencies.
 
 For an existing queue, coordinate the upgrade before any newer writable open:
 
@@ -132,7 +135,10 @@ Do not submit daemonizing commands or unmanaged child trees.
 Defaults are two slots, a 6 GiB Linux MemAvailable floor and 64 MiB declared
 memory per request. `--slots` and `--memory-floor-bytes` change admission only.
 All launching/running/unknown demand counts conservatively. The earliest queued
-job alone is considered; a blocked head prevents backfill. Missing memory data
+job alone is considered under legacy FIFO; a blocked head prevents backfill. After
+explicit activation, fitting project heads rotate with FIFO within each runnable
+project lane; exact-result-blocked jobs are skipped before head selection.
+Missing memory data
 closes admission. See [admission architecture](architecture.md#admission).
 
 An already-admitted unknown job is not a queued FIFO head, but still reserves
@@ -143,7 +149,8 @@ Agent/LLM concurrency must be budgeted separately; two slots do not authorize
 two new workers in addition to the unknown reservation.
 
 `dispatch --commands-only` neither admits agents nor polls their APIs. A queued
-agent at the FIFO head still blocks later commands, and existing unknown agent
+agent at the legacy FIFO head still blocks later commands; under the activated
+policy it blocks only its project lane. Existing unknown agent
 ownership still counts. Plain `dispatch` also handles supported agent jobs.
 
 SIGINT/SIGTERM stops new admission and waits for this dispatcher's direct

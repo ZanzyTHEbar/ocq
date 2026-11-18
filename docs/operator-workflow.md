@@ -1,5 +1,66 @@
 # Operator workflow (unreleased)
 
+## All-machine panel
+
+The default OCQ panel discovers runtimes for every machine in Herdr's public
+catalog, including this computer. Herdr supplies machine routing; HC, OCQ and
+OpenCode run together on each execution machine. No OCQ remote executor,
+transport relay, machine installer or global Main is introduced.
+The matched bridge must already be available as `ocq-herdr` in that machine's
+execution environment. Missing commands or rejected exec probes are unavailable,
+not evidence that its queue is absent.
+
+Work lists projects from all connected runtimes. Queue shows Jobs and
+Notifications simultaneously. Inbox shows project mail and notifications as
+distinct, non-consuming observations. Rows retain machine/project ownership;
+their identity is backend core + queue + entity ID, not a machine label.
+Opening an observation never acknowledges mail or a notification.
+
+An owner starts the existing foreground push endpoint with `--runtime` and an
+existing verified machine-local HC binding. It publishes a private, exclusive,
+read-back-verified registration at `$XDG_CONFIG_HOME/ocq/runtime.json` (or the
+standard user config directory). `ocq-herdr runtime-discover --json` reads only
+that registration and checks its owner/modes, protocol and exact live
+PID/start/boot/executable image. It never opens/initializes a queue, enrolls a
+project, starts HC/OCQ or installs software. Its private stdout contains auth
+material and is consumed only by trusted native code in memory.
+
+Catalog refresh is bounded to two concurrent public Herdr exec probes. Queue
+projections come only from each source's existing authenticated push/watch
+stream, not recurring exec or SQL polling. Sources have separate revisions,
+cursors, pending commands and socket ownership. Reconnect, route/alias changes
+and panel changes invalidate confirmations; retained observations are stale,
+not empty or completed. An unsettled connection holds only its own source.
+
+Registrations without an owner-supplied client-reachable endpoint are
+machine-loopback-only. A remote runtime in that state is detected but connection
+unavailable. The UI never invents WebSocket forwarding or creates SSH routes.
+An owner may advertise an already provisioned reachable `wss` endpoint or
+explicit loopback route using `--advertise-endpoint`; all existing TLS/loopback
+rules still apply. Nothing in discovery proves transport reachability.
+
+Machine-runtime mode authenticates exact core and queue and retains the
+connection's current Herdr route label for peer-bearing action claims. The core
+and queue are identity; the label is routing/display only. Each project action
+also supplies explicit project/space/canonical folder context. Existing
+bindings are checked server-side. New setup requires explicit user choice of a
+Herdr project space and the existing canonical-primary-Git checks; discovery
+never enrolls arbitrary folders.
+
+Machine-runtime workflow registries use the existing profile/dispatcher
+contract below with empty `space` and `folder`; those are bound to explicit
+project action context, not duplicated per project. Roles, the one queue
+dispatcher, image and HC owner remain machine-local. Static reviewer policy is
+unchanged. Main selection/role/journal remains per ProjectID and checkout.
+The endpoint permits only the existing reviewed workflow/native pointer actions;
+aggregation does not enable legacy remote submission, reconcile or mail mutation.
+
+The single-context view/association and original local protocols remain as
+legacy contracts. The named legacy view is retained; the installed default is
+the aggregate surface. Independent aggregate visual/two-source/offline/action
+acceptance and actual intended-machine Main workflow verification are separate
+gates; earlier local acceptance is not relabeled as those gates.
+
 Work can author Main setup and goals through the foreground push endpoint. This
 is not a release or evidence that the complete journey has passed native
 acceptance. The real Main → worker → exact-artifact reviewer → handoff scenario,

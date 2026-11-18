@@ -62,6 +62,23 @@ type Job struct {
 	Evidence   string
 }
 
+type JobDependency struct {
+	JobID          string
+	ProducerJob    string
+	ProjectID      string
+	AssociationID  string
+	ManifestDigest string
+	Criterion      string
+	Verification   string
+}
+
+type JobScheduling struct {
+	JobID     string
+	Sequence  int64
+	ProjectID string
+	Canonical []byte
+}
+
 type ObservationRevision struct {
 	Singleton int64
 	Revision  int64
@@ -177,6 +194,14 @@ type Receipt struct {
 	Canonical  []byte
 	Digest     string
 	AcceptedAt string
+}
+
+type SchedulingPolicy struct {
+	Singleton     int64
+	Cutoff        int64
+	ActivatedAt   string
+	QueueIdentity string
+	LastProject   string
 }
 
 type SqliteMaster struct {

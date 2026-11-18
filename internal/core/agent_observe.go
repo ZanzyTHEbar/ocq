@@ -414,7 +414,11 @@ func (s *store) observeAgent(j Job) error {
 			return err
 		}
 		reason := fmt.Sprintf("session-scoped-v1 / foreground-shell-v1: one exact prompt, stable terminal session, terminal tools (%d errors recorded), no active loop/pending input/permission/form or running owned runtime resources; validation not run", toolErrors)
-		return q.CompleteAgentJob(context.Background(), dbquery.CompleteAgentJobParams{Outcome: "agent_" + terminal.Outcome, Reason: reason, ID: j.ID})
+		n, err := q.CompleteAgentJob(context.Background(), dbquery.CompleteAgentJobParams{Outcome: "agent_" + terminal.Outcome, Reason: reason, ID: j.ID})
+		if err == nil && n != 1 {
+			return fmt.Errorf("agent terminal evidence CAS failed; ownership retained")
+		}
+		return err
 	})
 }
 

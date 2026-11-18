@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,6 +21,17 @@ const ObservationProtocol = "ocq-observe-v1"
 const ObservationRequestBytes = 16 << 10
 const ObservationResponseBytes = 1 << 20
 const observationPageSize = 20
+
+// Runtime views add stored project linkage without changing legacy queue rows.
+type RuntimeQueueJob struct {
+	QueueJobSummary
+	Projects []string `json:"project_ids"`
+}
+
+type RuntimeQueueNotification struct {
+	QueueNotification
+	Projects []string `json:"project_ids"`
+}
 
 // Cursor is the displayed page START, never the next cursor returned by a read.
 // Projects/lanes use offsets; all other pages use stable sequence cursors.
@@ -123,7 +135,7 @@ func (req ObservationRequest) validate() error {
 		// Reject irrelevant fields as well as unknown kinds; selectors are exact.
 		want := ObservationSelector{Slot: s.Slot, Kind: s.Kind}
 		switch s.Kind {
-		case "projects", "queue-jobs", "notifications":
+		case "projects", "queue-jobs", "notifications", "all-inbox", "runtime-jobs", "runtime-notifications":
 			want.Cursor = s.Cursor
 		case "board":
 			want.ProjectID = s.ProjectID
@@ -167,7 +179,11 @@ func (req ObservationRequest) validate() error {
 			return faults.New(faults.CodeValidationFailed, "invalid observation event")
 		}
 		switch s.Kind {
-		case "projects", "queue-jobs", "notifications", "lanes", "inbox", "results":
+		case "projects", "lanes":
+			if len(s.Cursor) > 2048 {
+				return fmt.Errorf("observation cursor too large")
+			}
+		case "queue-jobs", "notifications", "all-inbox", "runtime-jobs", "runtime-notifications", "inbox", "results":
 			if _, e := observationDecimal(s.Cursor); e != nil {
 				return e
 			}
@@ -308,7 +324,7 @@ func observeSnapshot(ctx context.Context, dir string, req ObservationRequest) (r
 		out.Status = "reset"
 		return out, nil
 	}
-	if out.Schema != 6 {
+	if out.Schema != 6 && out.Schema != 7 {
 		if out.Schema == 5 {
 			out.Status = "upgrade_required"
 		}
@@ -400,8 +416,8 @@ func observeSlot(ctx context.Context, s *store, q sqlQueryer, sel ObservationSel
 	var err error
 	switch sel.Kind {
 	case "projects":
-		out.Data, out.Cursor, out.HasMore, err = observationProjects(ctx, q, after)
-	case "queue-jobs":
+		out.Data, out.Cursor, out.HasMore, err = observationProjects(ctx, s, q, sel)
+	case "queue-jobs", "runtime-jobs":
 		rows, e := queries.QueueJobsPage(ctx, dbquery.QueueJobsPageParams{Sequence: after, Limit: 21})
 		err = e
 		items := []QueueJobSummary{}
@@ -416,14 +432,36 @@ func observeSlot(ctx context.Context, s *store, q sqlQueryer, sel ObservationSel
 			out.Cursor = item.Sequence
 		}
 		out.Data = QueueJobsOutput{ReadAt: readAt, Items: items, Cursor: out.Cursor, HasMore: out.HasMore}
+		if sel.Kind == "runtime-jobs" {
+			enriched := []RuntimeQueueJob{}
+			for _, item := range items {
+				projects, e := observationJobProjects(ctx, q, item.ID)
+				if e != nil {
+					return out, e
+				}
+				enriched = append(enriched, RuntimeQueueJob{item, projects})
+			}
+			out.Data = enriched
+		}
 	case "queue-job":
 		var row dbquery.QueueJobByIDRow
 		row, err = queries.QueueJobByID(ctx, sel.JobID)
 		out.Data = queueSummary(row)
-	case "notifications":
+	case "notifications", "runtime-notifications":
 		// Pending sequence paging is non-consuming; exact lookup also retains
 		// acknowledged events.
 		out.Data, out.Cursor, out.HasMore, err = observationNotifications(ctx, q, after)
+		if sel.Kind == "runtime-notifications" && err == nil {
+			enriched := []RuntimeQueueNotification{}
+			for _, item := range out.Data.([]QueueNotification) {
+				projects, e := observationJobProjects(ctx, q, item.JobID)
+				if e != nil {
+					return out, e
+				}
+				enriched = append(enriched, RuntimeQueueNotification{item, projects})
+			}
+			out.Data = enriched
+		}
 	case "notification":
 		var row dbquery.NotificationByIDRow
 		row, err = queries.NotificationByID(ctx, sel.EventID)
@@ -470,6 +508,28 @@ func observeSlot(ctx context.Context, s *store, q sqlQueryer, sel ObservationSel
 		}
 		out.Cursor = strconv.FormatInt(data.NextSequence, 10)
 		out.Data = data
+	case "all-inbox":
+		rows, e := q.QueryContext(ctx, `SELECT id,sequence,key,project_id,sender,recipient,lane_id,job_id,kind,subject,body,manifest_digest,assoc_id,fsfork_path,reply_to_id,created_at,read_at,archived_at FROM project_inbox_messages WHERE sequence>? ORDER BY sequence LIMIT 21`, after)
+		if e != nil {
+			return out, e
+		}
+		defer rows.Close()
+		items := []ProjectInboxMessage{}
+		out.Cursor = sel.Cursor
+		for rows.Next() {
+			var row dbquery.InboxPageRow
+			if e = rows.Scan(&row.ID, &row.Sequence, &row.Key, &row.ProjectID, &row.Sender, &row.Recipient, &row.LaneID, &row.JobID, &row.Kind, &row.Subject, &row.Body, &row.ManifestDigest, &row.AssocID, &row.FsforkPath, &row.ReplyToID, &row.CreatedAt, &row.ReadAt, &row.ArchivedAt); e != nil {
+				return out, e
+			}
+			if len(items) == 20 {
+				out.HasMore = true
+				break
+			}
+			items = append(items, inboxMessageFromRow(row))
+			out.Cursor = strconv.FormatInt(row.Sequence, 10)
+		}
+		err = rows.Err()
+		out.Data = items
 	case "mail":
 		var row dbquery.InboxMessageByIDRow
 		row, err = queries.InboxMessageByID(ctx, dbquery.InboxMessageByIDParams{ProjectID: sel.ProjectID, ID: sel.MessageID})
@@ -478,7 +538,7 @@ func observeSlot(ctx context.Context, s *store, q sqlQueryer, sel ObservationSel
 		}
 		out.Data = inboxMessageFromRow(dbquery.InboxPageRow(row))
 	case "lanes":
-		out.Data, out.Cursor, out.HasMore, err = observationLanes(ctx, q, sel.ProjectID, after)
+		out.Data, out.Cursor, out.HasMore, err = observationLanes(ctx, s, q, sel)
 	case "manifest":
 		var size int64
 		size, err = queries.ObservationManifestSize(ctx, dbquery.ObservationManifestSizeParams{ProjectID: sel.ProjectID, Digest: sel.Digest})
@@ -492,6 +552,11 @@ func observeSlot(ctx context.Context, s *store, q sqlQueryer, sel ObservationSel
 			out.Data = string(raw)
 		}
 	}
+	if errors.Is(err, errObservationPageReset) {
+		out.Status = "reset_required"
+		out.Data = nil
+		err = nil
+	}
 	if errors.Is(err, sql.ErrNoRows) || faults.IsCode(err, faults.CodeNotFound) {
 		out.Status = "not_found"
 		out.Data = nil
@@ -500,8 +565,12 @@ func observeSlot(ctx context.Context, s *store, q sqlQueryer, sel ObservationSel
 	return out, err
 }
 
-func observationProjects(ctx context.Context, q sqlQueryer, offset int64) (any, string, bool, error) {
-	rows, err := dbquery.New(q).ObservationProjectsPage(ctx, offset)
+func observationProjects(ctx context.Context, s *store, q sqlQueryer, sel ObservationSelector) (any, string, bool, error) {
+	key, err := observationPageKey(ctx, s, q, sel)
+	if err != nil {
+		return nil, "", false, err
+	}
+	rows, err := dbquery.New(q).ObservationProjectsPage(ctx, dbquery.ObservationProjectsPageParams{AfterCreated: key.Created, AfterID: key.ID})
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -513,16 +582,19 @@ func observationProjects(ctx context.Context, q sqlQueryer, offset int64) (any, 
 	if more {
 		items = items[:20]
 	}
-	// A huge empty offset stays unchanged; do not overflow int64.
-	next := offset
-	if len(items) > 0 && offset <= int64(^uint64(0)>>1)-int64(len(items)) {
-		next += int64(len(items))
+	if len(items) > 0 {
+		key.Created = rows[len(items)-1].CreatedAt
+		key.ID = rows[len(items)-1].ID
 	}
-	return items, strconv.FormatInt(next, 10), more, nil
+	return items, key.encode(), more, nil
 }
 
-func observationLanes(ctx context.Context, q sqlQueryer, project string, offset int64) (any, string, bool, error) {
-	rows, err := dbquery.New(q).ObservationLanesPage(ctx, dbquery.ObservationLanesPageParams{ProjectID: project, PageOffset: offset})
+func observationLanes(ctx context.Context, s *store, q sqlQueryer, sel ObservationSelector) (any, string, bool, error) {
+	key, err := observationPageKey(ctx, s, q, sel)
+	if err != nil {
+		return nil, "", false, err
+	}
+	rows, err := dbquery.New(q).ObservationLanesPage(ctx, dbquery.ObservationLanesPageParams{ProjectID: sel.ProjectID, AfterCreated: key.Created, AfterID: key.ID})
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -534,11 +606,42 @@ func observationLanes(ctx context.Context, q sqlQueryer, project string, offset 
 	if more {
 		items = items[:20]
 	}
-	next := offset
-	if len(items) > 0 && offset <= int64(^uint64(0)>>1)-int64(len(items)) {
-		next += int64(len(items))
+	if len(items) > 0 {
+		key.Created = rows[len(items)-1].CreatedAt
+		key.ID = rows[len(items)-1].LaneID
 	}
-	return items, strconv.FormatInt(next, 10), more, nil
+	return items, key.encode(), more, nil
+}
+
+func observationJobProjects(ctx context.Context, q sqlQueryer, job string) ([]string, error) {
+	query := "SELECT project_id FROM project_jobs WHERE job_id=? ORDER BY project_id LIMIT 33"
+	args := []any{job}
+	var version int
+	if err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return nil, err
+	}
+	if version == 7 {
+		query = `SELECT project_id FROM project_jobs WHERE job_id=? UNION
+		 SELECT project_id FROM job_scheduling WHERE job_id=? AND project_id<>'unattributed' ORDER BY project_id LIMIT 33`
+		args = append(args, job)
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) > 32 {
+		return nil, errors.New("job project association bound exceeded")
+	}
+	return ids, rows.Err()
 }
 
 func observationNotifications(ctx context.Context, q sqlQueryer, after int64) (any, string, bool, error) {

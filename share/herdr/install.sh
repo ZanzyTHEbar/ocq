@@ -34,7 +34,7 @@ if [ -e "$mod" ] || [ -L "$mod" ] || [ -e "$chrome" ] || [ -L "$chrome" ] || [ -
   exit 1
 fi
 
-echo "Installing a trusted mod that connects to an explicitly configured OCQ push endpoint."
+echo "Installing a trusted mod that discovers existing machine-local OCQ runtimes through Herdr."
 echo "The execution host needs a matched CLI/bridge/assets release; this installer does not start or configure its endpoint."
 echo "Matched mod contract: ocq-herdr-local-v1; runtime compatibility is checked read-only before mutations."
 echo "This installer does not upgrade/overwrite a live panel or quiesce old work. See docs/herdr.md before any upgrade."
@@ -45,6 +45,9 @@ cp "$here/mods/ocq/hc-binding.js" "$mod/hc-binding.js"
 cp "$here/mods/ocq/panel-state.js" "$mod/panel-state.js"
 cp "$here/mods/ocq/work-operator.js" "$mod/work-operator.js"
 cp "$here/mods/ocq/main-client.js" "$mod/main-client.js"
+cp "$here/mods/ocq/workflow.js" "$mod/workflow.js"
+cp "$here/mods/ocq/runtime-sources.js" "$mod/runtime-sources.js"
+cp "$here/mods/ocq/runtime-project.js" "$mod/runtime-project.js"
 cp "$here/mods/ocq/queue.js" "$mod/queue.js"
 cp "$here/mods/ocq/stored-updates.js" "$mod/stored-updates.js"
 cp "$here/mods/ocq/push-connection.js" "$mod/push-connection.js"

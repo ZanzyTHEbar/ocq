@@ -194,6 +194,9 @@ func (w *AgentSubmitter) submitPreparedAgent(ctx context.Context, key string, ra
 		return Job{}, e
 	}
 	if id != "" {
+		if err := compareScheduling(w.store.db, id, nil, "unattributed"); err != nil {
+			return Job{}, err
+		}
 		return w.store.get(id)
 	}
 	permissions, e := json.Marshal(r.Permissions)
@@ -209,8 +212,11 @@ func (w *AgentSubmitter) submitPreparedAgent(ctx context.Context, key string, ra
 	e = w.store.write(func(c *sql.Conn) error {
 		var err error
 		id, err = preparedAgentReceipt(dbquery.New(c), key, raw, digest)
-		if err != nil || id != "" {
+		if err != nil {
 			return err
+		}
+		if id != "" {
+			return compareScheduling(c, id, nil, "unattributed")
 		}
 		if validationErr != nil {
 			return validationErr

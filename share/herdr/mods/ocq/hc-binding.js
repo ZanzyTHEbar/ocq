@@ -9,12 +9,12 @@ const fields = ["protocol", "socket", "device", "inode", "uid", "pid", "start_ti
 // Human-reviewed endpoint identity, not discovery or permission approval.
 // Memory-only: reconnect/panel/scope changes cannot inherit this review.
 export class PrivateHCBinding {
-  constructor(host) { this.host = host; compatibility.hc = this; }
+  constructor(host) { this.host = host; this.compatibility = host.compatibility || compatibility; this.compatibility.hc = this; }
   context() {
     const h = this.host, u = h.updates, b = u.binding;
-    if (h.closed || !h.panelCurrent() || !u.current() || u.scope.machine !== null ||
+    if (h.closed || !h.panelCurrent() || !u.current() || !this.compatibility.machineReady() ||
         u.connection.state !== "connected" || !b) return null;
-    return JSON.stringify([u.scope, b, u.connectionID, u.connectionGeneration, u.bindingEpoch, compatibility.status?.image_sha256]);
+    return JSON.stringify([u.scope, b, u.connectionID, u.connectionGeneration, u.bindingEpoch, this.compatibility.status?.image_sha256]);
   }
   approvedDigest() {
     return this.approved && this.approved === this.review && this.approved.context === this.context()
@@ -33,7 +33,7 @@ export class PrivateHCBinding {
   }
   async load(context = this.context()) {
         if (!context) throw Error("Current native backend context required");
-        const r = await bridgeCommand(["hc-binding"], { on: null });
+        const r = await bridgeCommand(["hc-binding"], { on: this.host.machine, compatibility: this.compatibility });
         if (context !== this.context()) throw Error("Native backend context changed");
         if (r.code !== 0 || r.stdout.length > 16384) throw Error("No verified private HC binding at this endpoint.");
         const value = JSON.parse(r.stdout), b = value.binding, scope = this.host.updates.scope;
@@ -44,7 +44,9 @@ export class PrivateHCBinding {
             !["device", "inode", "uid", "pid"].every(k => Number.isSafeInteger(b[k]) && b[k] >= 0) ||
             b.pid < 1 || b.inode < 1 || !/^[1-9][0-9]*$/.test(b.start_ticks) ||
             !["socket", "boot_id", "host", "core_id"].every(k => typeof b[k] === "string" && b[k]) ||
-            !b.socket.startsWith("/")) throw Error("Private HC identity/context mismatch.");
+             !b.socket.startsWith("/")) throw Error("Private HC identity/context mismatch.");
+        if (scope.machine !== null && b.core_id !== this.host.updates.connection.executionCore)
+          throw Error("Selected-machine HC core changed.");
         // Go's binding struct has a fixed field order and JSON HTML escaping.
         const bytes = JSON.stringify(Object.fromEntries(fields.map(k => [k, b[k]])))
           .replace(/[<>&\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);

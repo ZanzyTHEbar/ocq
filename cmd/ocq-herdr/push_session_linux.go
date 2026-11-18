@@ -21,6 +21,9 @@ type pushFrame struct {
 	Folder   string          `json:"folder,omitempty"`
 	ID       string          `json:"id,omitempty"`
 	Request  json.RawMessage `json:"request,omitempty"`
+	Core     string          `json:"core_id,omitempty"`
+	Queue    string          `json:"queue_identity,omitempty"`
+	Peer     string          `json:"peer,omitempty"`
 }
 
 func readPush(ctx context.Context, c *websocket.Conn) (pushFrame, error) {
@@ -46,10 +49,16 @@ func readPush(ctx context.Context, c *websocket.Conn) (pushFrame, error) {
 	return f, nil
 }
 
-func (e *pushEndpoint) session(c *websocket.Conn) {
+func (e *pushEndpoint) session(c *websocket.Conn, peer string) {
 	c.SetReadLimit(core.ObservationResponseBytes)
 	ctx, cancel := context.WithCancel(e.ctx)
 	defer cancel()
+	if e.runtime {
+		if peer == "" {
+			peer = "local"
+		}
+		ctx = context.WithValue(ctx, runtimePeerKey{}, peer)
+	}
 	binding, err := compatibilityContext(ctx, e.space, e.folder)
 	if err != nil || binding.ObservationSchema != 6 || binding.Queue == "" {
 		return
@@ -65,7 +74,17 @@ func (e *pushEndpoint) session(c *websocket.Conn) {
 		return
 	}
 	defer watch.Close()
-	if pushWrite(ctx, c, map[string]any{"protocol": pushProtocol, "type": "welcome", "connection_id": connection, "descriptor": binding, "commands": append(append([]string{}, pushControls...), "command"), "mutations": e.allowActions}) != nil {
+	welcome := map[string]any{"protocol": pushProtocol, "type": "welcome", "connection_id": connection, "descriptor": binding, "commands": append(append([]string{}, pushControls...), "command"), "mutations": e.allowActions}
+	if e.workflow != nil && e.workflow.peer() != "local" {
+		welcome["execution_peer"] = e.workflow.peer()
+		welcome["execution_core_id"] = e.hc.Core
+	}
+	if e.runtime {
+		welcome["runtime"] = map[string]any{"protocol": runtimeProtocol, "core_id": e.hc.Core, "queue_identity": binding.Queue}
+		welcome["execution_peer"] = peer
+		welcome["execution_core_id"] = e.hc.Core
+	}
+	if pushWrite(ctx, c, welcome) != nil {
 		return
 	}
 	frames := make(chan pushFrame, 1)
@@ -168,7 +187,7 @@ func (e *pushEndpoint) session(c *websocket.Conn) {
 			}
 		case f := <-frames:
 			n, err := strconv.ParseUint(f.ID, 10, 64)
-			if !validPushID(f.ID) || err != nil || n <= lastID || f.Protocol != "" || f.Token != "" || f.Space != "" || f.Folder != "" {
+			if !validPushID(f.ID) || err != nil || n <= lastID || f.Protocol != "" || f.Token != "" || f.Space != "" || f.Folder != "" || f.Core != "" || f.Queue != "" || f.Peer != "" {
 				_ = c.Close(websocket.StatusPolicyViolation, "invalid control identity")
 				return
 			}

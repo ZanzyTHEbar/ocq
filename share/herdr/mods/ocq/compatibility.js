@@ -33,8 +33,8 @@ const supported = action => pointerActions.has(action) || action === "mail-ack" 
 export const compatibility = {
   epoch: 0, serial: 0,
   observe() {
-    const s = spaces().find(s => s.active);
-    const scope = s && { id: s.id, machine: s.machine, folder: s.folder };
+    const s = this.scopeProvider ? this.scopeProvider() : spaces().find(s => s.active);
+    const scope = s && { id: s.id, machine: s.machine, folder: s.folder, ...(s.source ? { source: s.source, generation: s.generation } : {}) };
     const marker = panelEpoch();
     if (JSON.stringify(scope) !== JSON.stringify(this.scope) || marker !== this.panelMarker) {
       this.scope = scope; this.panelMarker = marker;
@@ -51,7 +51,12 @@ export const compatibility = {
   },
   ready() { const s = this.observe(); return this.workReady() && s?.machine === null; },
   workReady() { this.observe(); return panelVisible() && !!this.status && this.allowActions === true && this.pushConnection?.state === "connected" && this.pushConnection.updates.current(); },
-  nativeReady() { return this.ready() && !!this.hc?.approvedDigest(); },
+  machineReady() {
+    const s = this.observe(), c = this.pushConnection;
+    return this.workReady() && (s?.machine === null ||
+      c?.executionPeer === s?.machine && typeof c?.executionCore === "string" && !!c.executionCore);
+  },
+  nativeReady() { return this.machineReady() && !!this.hc?.approvedDigest(); },
   transfer(current) {
     const status = this.status, epoch = this.epoch, serial = this.serial;
     const valid = () => current() && this.ready() && this.status === status && this.epoch === epoch && this.serial === serial;
@@ -84,6 +89,7 @@ export const compatibility = {
     const lengths = { "work-confirm": 9, "main-start": 9, "main-author-v1": 8, "client-prepare": 10, "client-attention-prepare-v1": 10, "client-open": 8 };
     const prepare = action === "client-prepare" || action === "client-attention-prepare-v1";
     const s = this.scope, v = this.status;
+    if (action === "main-author-v1" && !this.machineReady()) throw Error("Selected-machine workflow authority unavailable");
     if (!pointerActions.has(action) || typeof options.current !== "function" || !options.current() || !this.workReady() ||
       options.on !== s.machine || args.length !== lengths[action] || args[0] !== localSpace(s) || args[1] !== v.queue_identity ||
       args[4] !== (s.machine ?? "local") || args[5] !== s.folder || args[6] !== v.observation_store_context || args[7] !== v.image_sha256 ||
@@ -116,9 +122,18 @@ export const compatibility = {
   },
 };
 
+// Each source/project review owns its compatibility state. No aggregate action
+// may borrow the selected Herdr space or another source's transport/pins.
+export function sourceCompatibility(scopeProvider) {
+  return { ...compatibility, scopeProvider, scope: null, status: null, hc: null,
+    pushConnection: null, allowActions: false, epoch: 0, serial: 0, panelMarker: null };
+}
+const legacyCompatibility = compatibility;
+
 // Bridge commands use the selected socket's explicit command allowlist. They
 // cannot fall back to execution, polling or a separately provisioned listener.
 export async function bridgeCommand(args, options = {}) {
+  const compatibility = options.compatibility || legacyCompatibility;
   compatibility.observe();
   const connection = compatibility.pushConnection;
   if (options.on !== compatibility.scope?.machine || connection?.state !== "connected") return unavailable();
@@ -150,7 +165,8 @@ const readButtons = new Set(["ocq-queue-refresh", "ocq-queue-next", "ocq-queue-f
     "ocq-main-observe", "ocq-main-recover", "ocq-main-review-previous", "ocq-main-review-next",
     "ocq-agent-handoff-stored", "ocq-agent-handoff-copy", "ocq-agent-handoff-verify",
    "ocq-agent-reconcile-back", "ocq-agent-reconcile-check", "ocq-dispatch-read", "ocq-dispatch-close", "ocq-dispatch-back-confirm"]);
-export function enabledButton(id) {
+export function enabledButton(id, context = legacyCompatibility) {
+  const compatibility = context;
   // Reading/recovery never borrows mutation readiness, including after an
   // uncertain attempt reconnects to a default read-only endpoint.
   if (readButtons.has(id) || id.startsWith("ocq-result-check-") || id.startsWith("ocq-client-record-")) return true;

@@ -78,7 +78,7 @@ export class StoredUpdates {
     if (frame.type !== "welcome" || !/^[0-9a-f]{32}$/.test(frame.connection_id) || typeof frame.mutations !== "boolean" ||
       JSON.stringify(frame.commands) !== JSON.stringify(["subscribe", "unsubscribe", "ping", "close", "command"])) throw Error("Unsupported endpoint capabilities");
     const d = compatibility.validate(frame.descriptor, { id: this.scope.space, machine: this.scope.machine, folder: this.scope.folder });
-    if (d.observation_schema !== 6 || !hex(d.queue_identity) || !hex(d.observation_context) || !hex(d.observation_store_context)) throw Error("Existing schema6 queue required");
+    if (![6, 7].includes(d.observation_schema) || !hex(d.queue_identity) || !hex(d.observation_context) || !hex(d.observation_store_context)) throw Error("Existing schema6/7 queue required");
     compatibility.observe();
     compatibility.status = d;
     compatibility.pushConnection = this.connection;
@@ -143,12 +143,12 @@ export class StoredUpdates {
     this.receive(frame.snapshot, { command: "push", capture: s.capture, serial: ++this.serial }, cx);
   }
   receive(result, flight, cx) {
-    if (result.protocol !== protocol || result.status !== "ready" || result.schema !== 6 || result.consistency !== "single_sqlite_snapshot" ||
+    if (result.protocol !== protocol || result.status !== "ready" || ![6, 7].includes(result.schema) || result.consistency !== "single_sqlite_snapshot" ||
       !decimal(result.revision) || !this.binding || JSON.stringify(pins(result)) !== JSON.stringify(this.binding) ||
       !Array.isArray(result.slots) || result.slots.length !== flight.capture.selected.length) throw Error("Pinned coherent snapshot required");
     if (this.revision && compareRevision(result.revision, this.revision) < 0) throw Error("Queue revision decreased; investigate restore");
     if (new Set(result.slots.map(s => s.slot)).size !== result.slots.length ||
-      flight.capture.selected.some(d => !result.slots.some(s => s.slot === d.selector.slot && s.kind === d.selector.kind && ["ready", "not_found", "limit_exceeded"].includes(s.status)))) throw Error("Incomplete projection batch");
+      flight.capture.selected.some(d => !result.slots.some(s => s.slot === d.selector.slot && s.kind === d.selector.kind && ["ready", "not_found", "limit_exceeded", "reset_required"].includes(s.status)))) throw Error("Incomplete projection batch");
     this.revision = result.revision;
     const visible = this.plan();
     for (const d of flight.capture.selected) {

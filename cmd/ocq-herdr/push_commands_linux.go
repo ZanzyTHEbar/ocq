@@ -61,9 +61,10 @@ func (w *pushOutput) Write(p []byte) (int, error) {
 }
 
 type pushCommandRequest struct {
-	Connection string   `json:"connection_id"`
-	Args       []string `json:"args"`
-	Payload    *string  `json:"payload,omitempty"`
+	Connection string                 `json:"connection_id"`
+	Args       []string               `json:"args"`
+	Payload    *string                `json:"payload,omitempty"`
+	Context    *runtimeProjectContext `json:"context,omitempty"`
 }
 
 func (e *pushEndpoint) command(ctx context.Context, connection string, request json.RawMessage) any {
@@ -75,6 +76,21 @@ func (e *pushEndpoint) command(ctx context.Context, connection string, request j
 		return reply
 	}
 	name := input.Args[0]
+	if !e.runtime && input.Context != nil {
+		return reply
+	}
+	if e.runtime && input.Context != nil {
+		scoped, err := e.projectEndpoint(ctx, *input.Context, name, input.Payload)
+		if err != nil {
+			return reply
+		}
+		e = scoped
+	} else if e.runtime && (pushAction(name) || name == "main-preview" || name == "work-preview" || name == "hc-binding" || name == "workflow-context") {
+		return reply
+	}
+	if e.runtime && pushAction(name) && !pushContains([]string{"main-author-v1", "main-start", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "work-confirm"}, name) {
+		return reply
+	}
 	if strings.HasPrefix(name, "dispatcher-") && name != "dispatcher-read" && name != "dispatcher-context" && name != "dispatcher-status" && e.hc == nil {
 		return reply
 	}
@@ -110,6 +126,28 @@ func (e *pushEndpoint) command(ctx context.Context, connection string, request j
 	}
 	if err = cmd.ParseFlags(input.Args[1:]); err != nil {
 		return reply
+	}
+	if e.runtime && input.Context != nil && pushContains([]string{"main-author-v1", "main-preview", "main-start", "main-list", "main-status", "main-recover", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "client-list", "client-status", "work-confirm", "work-list", "work-status", "work-output", "work-preview", "work-handoff", "work-recover"}, name) {
+		args := cmd.Flags().Args()
+		if len(args) < 3 || args[0] != e.space || args[2] != input.Context.Project {
+			return reply
+		}
+		if pushContains([]string{"main-author-v1", "main-preview", "main-start", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "work-confirm"}, name) {
+			peer, _ := ctx.Value(runtimePeerKey{}).(string)
+			if len(args) < 5 || args[4] != peer {
+				return reply
+			}
+		}
+	}
+	if e.workflow != nil && e.workflow.peer() != "local" && pushAction(name) &&
+		!pushContains([]string{"main-author-v1", "main-start", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "work-confirm"}, name) {
+		return reply // Selected-machine workflow is not legacy remote execution.
+	}
+	if e.workflow != nil && pushContains([]string{"main-author-v1", "main-preview", "main-start", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "work-confirm"}, name) {
+		args := cmd.Flags().Args()
+		if len(args) < 5 || args[4] != e.workflow.peer() {
+			return reply // Compare the existing peer claim; never rewrite it.
+		}
 	}
 	// Live handoff verification is GET-only, but still scoped to this exact
 	// endpoint's space/queue. It must not borrow another space's service claim.

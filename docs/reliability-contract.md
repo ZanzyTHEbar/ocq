@@ -9,8 +9,11 @@ not promise sandboxing, validated deliverables or exactly-once external effects.
 - Idempotency keys bind immutable requests. Matching retries recover the original
   acceptance; changed requests under the same key fail. Receipts are retained;
   there is no deletion command.
-- Admission is strict FIFO. A resource-blocked head job blocks later work, even
+- Legacy admission is strict FIFO. A resource-blocked head job blocks later work, even
   when later work would fit. Concurrent completion order is unspecified.
+- Explicit [schema-7 activation](scheduling.md) preserves a pre-cutoff FIFO drain
+  barrier, then rotates fitting project heads with FIFO within each runnable
+  project lane. Exact-artifact dependencies, not exits, determine readiness.
 - Memory declarations and concurrency slots control admission, not resource usage.
 
 ## Ownership

@@ -34,6 +34,7 @@ type pushEndpoint struct {
 	sessions                    sync.WaitGroup
 	mu                          sync.Mutex
 	stopping                    bool
+	runtime                     bool
 }
 
 // Credentials are never command arguments, URLs, responses or log fields.
@@ -94,8 +95,8 @@ func pushCommands() []*cobra.Command {
 		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"token_file": file, "created": true, "secret_printed": false})
 	}}
-	var state, listen, tokenFile, cert, key, hcFile, workflowFile string
-	var allowActions bool
+	var state, listen, tokenFile, cert, key, hcFile, workflowFile, advertised string
+	var allowActions, machineRuntime bool
 	serve := &cobra.Command{Use: "push-serve", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if !filepath.IsAbs(state) {
 			return errors.New("explicit absolute --queue-dir for an EXISTING store required")
@@ -131,8 +132,9 @@ func pushCommands() []*cobra.Command {
 		defer cancel()
 		endpoint := &pushEndpoint{state: state, space: space, folder: folder, token: string(secret), ctx: ctx, slots: make(chan struct{}, 8)}
 		endpoint.allowActions = allowActions
+		endpoint.runtime = machineRuntime
 		if hcFile != "" {
-			if !allowActions {
+			if !allowActions && !machineRuntime {
 				return errors.New("private HC binding requires explicit --allow-actions")
 			}
 			endpoint.hc, err = loadHCBinding(hcFile, space, folder, binding.Queue)
@@ -149,7 +151,11 @@ func pushCommands() []*cobra.Command {
 			if !allowActions || endpoint.hc == nil {
 				return errors.New("workflow requires explicit actions and pinned private HC")
 			}
-			endpoint.workflow, err = loadWorkflowRegistry(workflowFile, space, folder, binding.Queue)
+			registrySpace, registryFolder := space, folder
+			if machineRuntime {
+				registrySpace, registryFolder = "", ""
+			}
+			endpoint.workflow, err = loadWorkflowRegistry(workflowFile, registrySpace, registryFolder, binding.Queue)
 			if err != nil {
 				return err
 			}
@@ -162,6 +168,24 @@ func pushCommands() []*cobra.Command {
 			return err
 		}
 		defer listener.Close()
+		if machineRuntime {
+			if endpoint.hc == nil {
+				return errors.New("machine runtime requires an existing verified HC binding")
+			}
+			address := advertised
+			localOnly := address == ""
+			if localOnly {
+				address = "ws://" + listener.Addr().String() + "/ocq"
+				if cert != "" {
+					address = "wss://" + listener.Addr().String() + "/ocq"
+				}
+			}
+			retire, err := endpoint.publishRuntime(address, localOnly)
+			if err != nil {
+				return err
+			}
+			defer retire()
+		}
 		scheme := "ws"
 		if cert != "" {
 			scheme = "wss"
@@ -193,7 +217,9 @@ func pushCommands() []*cobra.Command {
 	serve.Flags().BoolVar(&allowActions, "allow-actions", false, "Explicitly allow supported reviewed OCQ actions; no native launch, dispatcher or agent reconciliation")
 	serve.Flags().StringVar(&hcFile, "hc-binding-file", "", "Explicit private existing HC socket/owner/core/scope pins; never starts HC")
 	serve.Flags().StringVar(&workflowFile, "workflow-registry-file", "", "Owner-provisioned exact workflow profiles and bounded foreground dispatcher identity")
-	return []*cobra.Command{token, serve}
+	serve.Flags().BoolVar(&machineRuntime, "runtime", false, "Publish one machine-local runtime for Herdr discovery; no route provisioning")
+	serve.Flags().StringVar(&advertised, "advertise-endpoint", "", "Owner-provisioned client-reachable wss endpoint; no forwarding or listener exposure")
+	return []*cobra.Command{token, serve, runtimeDiscoverCommand()}
 }
 
 func (e *pushEndpoint) accept(w http.ResponseWriter, r *http.Request) {
@@ -229,12 +255,21 @@ func (e *pushEndpoint) accept(w http.ResponseWriter, r *http.Request) {
 	cancel()
 	if err != nil || frame.Type != "auth" || frame.Protocol != pushProtocol || len(frame.Token) != 64 ||
 		subtle.ConstantTimeCompare([]byte(frame.Token), []byte(e.token)) != 1 ||
-		frame.Space != e.space || frame.Folder != e.folder || frame.ID != "" || len(frame.Request) != 0 {
+		(!e.runtime && (frame.Space != e.space || frame.Folder != e.folder || frame.Core != "" || frame.Queue != "" || frame.Peer != "")) ||
+		(e.runtime && (frame.Space != "" || frame.Folder != "" || frame.Core != e.hc.Core || frame.Queue == "" || len(frame.Peer) > 128 || strings.ContainsAny(frame.Peer, "/\r\n\x00"))) ||
+		frame.ID != "" || len(frame.Request) != 0 {
 		_ = c.Close(websocket.StatusPolicyViolation, "authentication or explicit scope refused")
 		return
 	}
+	if e.runtime {
+		b, checkErr := compatibilityContext(e.ctx, e.space, e.folder)
+		if checkErr != nil || b.Queue != frame.Queue {
+			_ = c.Close(websocket.StatusPolicyViolation, "runtime identity refused")
+			return
+		}
+	}
 	frame.Token = ""
-	e.session(c)
+	e.session(c, frame.Peer)
 }
 
 func pushWrite(ctx context.Context, c *websocket.Conn, value any) error {

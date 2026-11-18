@@ -174,15 +174,20 @@ ocq [--state-dir DIR] project lanes PROJECT
 ocq [--state-dir DIR] project inbox [--recipient RECIPIENT] [--unread-only] [--after-sequence N] [--limit N] PROJECT
 ```
 
-These are non-initializing, non-consuming reads of existing schema-5 or schema-6
+These are non-initializing, non-consuming reads of existing schema-5, schema-6 or schema-7
 state. They work with dispatch stopped and do not inspect live OpenCode execution.
 The CLI board shows project jobs and the first 20 unread integrator messages;
 rerun to refresh.
 Read timestamps describe database observations, not fresh runtime verification.
 Stored permission-or-form reasons have no observation time or type distinction.
 Schema-5 reads remain available, but [Herdr automatic observation](herdr.md#inspect-and-acknowledge)
-requires an explicitly upgraded schema-6 queue and a matched bridge/mod; neither
+requires an explicitly upgraded schema-6 or schema-7 queue and a matched bridge/mod; neither
 these reads nor the panel perform that migration.
+After [scheduling activation](scheduling.md), ordinary project submissions
+automatically enter their project's runnable FIFO/RR lane. Review admission retains
+the exact captured target prerequisite; execution completion remains separate
+from capture, review publication and handoff. CLI intake can additionally retain
+a separate immutable `--scheduling-file` without changing submission/receipt bytes.
 
 `results` joins **all** retained project completion events, including globally
 acknowledged events. It uses ascending event sequence, default cursor 0 and limit

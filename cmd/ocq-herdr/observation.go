@@ -169,6 +169,14 @@ func observationWire(s core.ObservationSnapshot) (observationWireSnapshot, error
 				}{data, messages}
 			case core.ProjectInboxMessage:
 				safe = inboxMessage{data, strconv.FormatInt(data.Sequence, 10)}
+			case []core.ProjectInboxMessage:
+				messages := []inboxMessage{}
+				for _, m := range data {
+					messages = append(messages, inboxMessage{m, strconv.FormatInt(m.Sequence, 10)})
+				}
+				safe = messages
+			case []core.RuntimeQueueJob, []core.RuntimeQueueNotification:
+				safe = data
 			case []core.ProjectSummary, []core.ProjectLane, []core.QueueNotification, core.QueueJobSummary, core.QueueJobsOutput, core.QueueNotification, string:
 				safe = data
 			default:

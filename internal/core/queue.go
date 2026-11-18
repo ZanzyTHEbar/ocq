@@ -32,6 +32,10 @@ func (q *Queue) Close() error {
 
 // SubmitCommand durably records a version-1 receipt before returning.
 func (q *Queue) SubmitCommand(key, cwd string, argv []string, memoryBytes int64) (_ Job, resultErr error) {
+	return q.SubmitScheduledCommand(key, cwd, argv, memoryBytes, nil)
+}
+
+func (q *Queue) SubmitScheduledCommand(key, cwd string, argv []string, memoryBytes int64, scheduling []byte) (_ Job, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeRuntimeFailed, resultErr) }()
 	if key == "" || len(key) > 1024 || !utf8.ValidString(key) || len(argv) == 0 || memoryBytes < 0 {
 		return Job{}, faults.New(faults.CodeValidationFailed, "submit requires --key KEY [--cwd DIR] [--memory-bytes N>=0] -- COMMAND [ARG...]")
@@ -40,7 +44,15 @@ func (q *Queue) SubmitCommand(key, cwd string, argv []string, memoryBytes int64)
 	if err != nil {
 		return Job{}, err
 	}
-	return q.store.submit(key, request)
+	data, _, err := encodeCommandRequest(request)
+	if err != nil {
+		return Job{}, err
+	}
+	project := "unattributed"
+	if len(scheduling) > 0 {
+		project = ""
+	}
+	return q.store.acceptScheduledCanonical(key, data, false, scheduling, project)
 }
 
 func (q *Queue) Job(id string) (Job, error) {

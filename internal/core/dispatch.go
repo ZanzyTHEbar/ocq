@@ -148,23 +148,23 @@ func (s *store) reason(id, reason string) error {
 // Only this singleton goroutine admits and spawns. The next queued job is never
 // considered until this head's durable intent and spawn handoff have completed.
 func (s *store) admit(boot string, slots int, floor int64, done chan<- completion, commandsOnly bool) (bool, error) {
-	row, err := dbquery.New(s.db).QueuedHeadJob(context.Background())
+	available, memoryErr := memAvailable()
+	if memoryErr != nil {
+		return false, memoryErr
+	}
+	id, err := s.schedulingCandidate(s.db, available, slots, floor, commandsOnly)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	head, err := jobFromRow(dbquery.JobByIDRow(row))
+	head, err := s.get(id)
 	if err != nil {
 		return false, err
 	}
 	if commandsOnly && head.agentRequest != nil {
 		return false, s.reason(head.ID, "command-only dispatcher: agent at FIFO head; no admission or API polling; stop dispatch for explicit agent reconciliation")
-	}
-	available, memoryErr := memAvailable()
-	if memoryErr != nil {
-		return false, s.reason(head.ID, "memory observation unavailable; admission closed: "+memoryErr.Error())
 	}
 	// Artifact creation is idempotent and precedes the transaction. A crash here
 	// leaves a queued job with recoverable empty files, never a launched command.
@@ -181,7 +181,7 @@ func (s *store) admit(boot string, slots int, floor int64, done chan<- completio
 	}()
 	admitted := false
 	err = s.write(func(c *sql.Conn) error {
-		first, err := dbquery.New(c).QueuedHead(context.Background())
+		first, err := s.schedulingCandidate(c, available, slots, floor, commandsOnly)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
@@ -223,7 +223,28 @@ func (s *store) admit(boot string, slots int, floor int64, done chan<- completio
 		if reason != "" {
 			return dbquery.New(c).SetJobReason(context.Background(), dbquery.SetJobReasonParams{Reason: reason, ID: head.ID})
 		}
-		err = dbquery.New(c).RecordLaunchIntent(context.Background(), dbquery.RecordLaunchIntentParams{Boot: boot, Stdout: out.Name(), Stderr: errout.Name(), ID: head.ID})
+		result, err := c.ExecContext(context.Background(), `UPDATE jobs SET state='launching',
+		 reason='launch intent committed; spawn may be uncertain',boot=?,stdout=?,stderr=? WHERE id=? AND state='queued'`,
+			boot, out.Name(), errout.Name(), head.ID)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return fmt.Errorf("reservation CAS failed")
+		}
+		var version int
+		if err = c.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil {
+			return err
+		}
+		if version == 7 {
+			_, err = c.ExecContext(context.Background(), `UPDATE scheduling_policy SET last_project=
+		 (SELECT project_id FROM job_scheduling WHERE job_id=?) WHERE singleton=1
+		 AND EXISTS(SELECT 1 FROM job_scheduling WHERE job_id=?)`, head.ID, head.ID)
+		}
 		admitted = err == nil
 		return err
 	})
@@ -245,7 +266,8 @@ func (s *store) admit(boot string, slots int, floor int64, done chan<- completio
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return false, s.write(func(c *sql.Conn) error {
-			return dbquery.New(c).MarkLaunchFailure(context.Background(), dbquery.MarkLaunchFailureParams{Reason: err.Error(), ID: head.ID})
+			_, e := c.ExecContext(context.Background(), `UPDATE jobs SET state='finished',outcome='launch_failed',reason=? WHERE id=? AND state='launching'`, err.Error(), head.ID)
+			return e
 		})
 	}
 	p := Process{PID: cmd.Process.Pid, Boot: boot}
@@ -265,7 +287,16 @@ func (s *store) admit(boot string, slots int, floor int64, done chan<- completio
 		if p.Start > 1<<63-1 {
 			return diagnostic(faults.CodeInvariantFailed, "process start ticks exceed SQLite integer range")
 		}
-		return dbquery.New(c).RecordProcessIdentity(context.Background(), dbquery.RecordProcessIdentityParams{State: state, Reason: reason, Pid: int64(p.PID), StartTicks: int64(p.Start), Boot: p.Boot, ID: head.ID})
+		r, e := c.ExecContext(context.Background(), `UPDATE jobs SET state=?,reason=?,pid=?,start_ticks=?,boot=?
+		 WHERE id=? AND state='launching' AND boot=?`, state, reason, p.PID, int64(p.Start), p.Boot, head.ID, boot)
+		if e != nil {
+			return e
+		}
+		n, e := r.RowsAffected()
+		if e == nil && n != 1 {
+			return fmt.Errorf("exact launch receipt CAS failed")
+		}
+		return e
 	})
 	return true, errors.Join(err, identityErr)
 }
@@ -283,6 +314,9 @@ func (s *store) finish(result completion) error {
 		reason += "; " + result.err.Error()
 	}
 	return s.write(func(c *sql.Conn) error {
-		return dbquery.New(c).FinishRunningJob(context.Background(), dbquery.FinishRunningJobParams{State: state, Outcome: outcome, Reason: reason, ExitCode: sql.NullInt64{Int64: int64(result.code), Valid: true}, ID: result.id})
+		_, err := c.ExecContext(context.Background(), `UPDATE jobs SET state=?,outcome=?,reason=?,exit_code=?
+		 WHERE id=? AND state='running' AND pid=? AND start_ticks=? AND boot=?`,
+			state, outcome, reason, result.code, result.id, result.process.PID, int64(result.process.Start), result.process.Boot)
+		return err
 	})
 }

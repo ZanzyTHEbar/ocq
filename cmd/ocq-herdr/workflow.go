@@ -34,8 +34,16 @@ type workflowRegistry struct {
 	Dispatcher core.Process        `json:"dispatcher"`
 	CLISHA256  string              `json:"cli_sha256"`
 	Selections []workflowSelection `json:"selections"`
+	Peer       string              `json:"peer,omitempty"`
 }
 type workflowKey struct{}
+
+func (r *workflowRegistry) peer() string {
+	if r == nil || r.Peer == "" {
+		return "local"
+	}
+	return r.Peer
+}
 
 func loadWorkflowRegistry(file, space, folder, queue string) (*workflowRegistry, error) {
 	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
@@ -58,6 +66,9 @@ func loadWorkflowRegistry(file, space, folder, queue string) (*workflowRegistry,
 		r.Space != space || r.Folder != folder || r.Queue != queue || !clientDigest.MatchString(r.CLISHA256) ||
 		len(r.Selections) < 3 || len(r.Selections) > 32 {
 		return nil, errors.New("workflow registry scope/contract mismatch")
+	}
+	if len(r.peer()) > 128 || strings.ContainsAny(r.peer(), "/\r\n\x00") {
+		return nil, errors.New("invalid selected-machine peer")
 	}
 	seen := map[string]bool{}
 	roles := map[string]bool{}
@@ -152,8 +163,8 @@ func workflowCommands() []*cobra.Command {
 		if err != nil {
 			return err
 		}
-		if r == nil || a[0] != r.Space || a[1] != r.Queue || a[5] != r.Folder || a[4] != "local" || !workPointer.MatchString(a[3]) {
-			return errors.New("local owner workflow scope required")
+		if r == nil || a[0] != r.Space || a[1] != r.Queue || a[5] != r.Folder || a[4] != r.peer() || !workPointer.MatchString(a[3]) {
+			return errors.New("selected-machine owner workflow scope required")
 		}
 		binding, err := compatibility(a[0], a[5])
 		if err != nil || binding.ObservationStoreContext != a[6] || binding.Queue != a[1] || binding.Image != a[7] {
