@@ -125,8 +125,8 @@ func pushCommands() []*cobra.Command {
 		space, _ := cmd.Flags().GetString("mod-space")
 		folder, _ := cmd.Flags().GetString("mod-folder")
 		binding, err := compatibilityContext(cmd.Context(), space, folder)
-		if err != nil || binding.Queue == "" || binding.ObservationSchema != 6 {
-			return errors.New("push requires an existing private schema6 store and explicit mod-space/mod-folder")
+		if err != nil || binding.Queue == "" || !pushObservationSchema(binding.ObservationSchema) {
+			return errors.New("push requires an existing private schema6/7 store and explicit mod-space/mod-folder")
 		}
 		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
@@ -293,6 +293,8 @@ func pushNonce() string {
 // Retain an explicit allowlist; do not turn the socket into an arbitrary bridge
 // argv dispatcher or silently transport a mutation without its original fences.
 var pushControls = []string{"subscribe", "unsubscribe", "ping", "close"}
+
+func pushObservationSchema(version int) bool { return version == 6 || version == 7 }
 
 func validPushID(s string) bool {
 	return len(s) > 0 && len(s) <= 16 && strings.Trim(s, "0123456789") == "" && s[0] != '0'

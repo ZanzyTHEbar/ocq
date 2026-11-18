@@ -60,7 +60,7 @@ func (e *pushEndpoint) session(c *websocket.Conn, peer string) {
 		ctx = context.WithValue(ctx, runtimePeerKey{}, peer)
 	}
 	binding, err := compatibilityContext(ctx, e.space, e.folder)
-	if err != nil || binding.ObservationSchema != 6 || binding.Queue == "" {
+	if err != nil || !pushObservationSchema(binding.ObservationSchema) || binding.Queue == "" {
 		return
 	}
 	connection := pushNonce()
@@ -134,7 +134,7 @@ func (e *pushEndpoint) session(c *websocket.Conn, peer string) {
 			return err
 		}
 		wire.BridgeContext = binding.ObservationContext
-		if wire.Status != "ready" || wire.Schema != 6 || wire.QueueIdentity != binding.Queue || wire.StoreContext != binding.ObservationStoreContext {
+		if wire.Status != "ready" || !pushObservationSchema(wire.Schema) || wire.QueueIdentity != binding.Queue || wire.StoreContext != binding.ObservationStoreContext {
 			return errors.New("snapshot context unavailable")
 		}
 		after, err := compatibilityContext(ctx, e.space, e.folder)

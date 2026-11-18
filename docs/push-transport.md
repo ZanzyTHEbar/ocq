@@ -55,7 +55,7 @@ reconnection is automatic against one privately provisioned association.
 ## Start and stop explicitly
 
 Build the CLI and bridge from the same source. Use an **existing**, deliberately
-initialized private schema-6 queue; the endpoint never initializes or migrates
+initialized private schema-6 or schema-7 queue; the endpoint never initializes or migrates
 SQLite. Use matched OCQ writers too: they provide the after-commit hints described
 below. The space and folder are explicit literal server-side scope.
 
@@ -384,6 +384,15 @@ Its optional explicitly supplied existing session/repo context exercises real
 project registration, prepared task preview/confirmation/recovery without
 dispatch, and journal-only CLI changes pushed without a SQL revision change.
 It never manufactures terminal results or starts an agent.
+
+The focused runtime schema boundary uses:
+`push-proof --runtime-schema BRIDGE CLI FRESH_PRIVATE_ROOT`.
+It starts a private real HC and real read-only runtime endpoints, explicitly
+activates a fresh schema-7 queue, and checks authenticated welcome plus populated
+projects/lanes snapshots for exactly schemas 6 and 7. It also checks wrong-token/
+queue refusal, unsupported-version refusal before listen, and owned registration
+retirement. Projection rows are historical fixtures, not agent/capture execution.
+This boundary proof is not rendered laptop or full-workflow acceptance.
 
 Acceptance is **not complete**: the later native command/TLS test driver hit an
 explicit filesystem grant denial before connecting, and was stopped without a

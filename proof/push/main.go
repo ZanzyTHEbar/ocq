@@ -98,6 +98,10 @@ func (c *client) ok(args []string) map[string]any {
 }
 
 func main() {
+	if len(os.Args) == 5 && os.Args[1] == "--runtime-schema" {
+		runtimeSchemaProof(os.Args[2], os.Args[3], os.Args[4])
+		return
+	}
 	check(len(os.Args) == 3, "usage: push-proof BRIDGE FRESH_PRIVATE_ROOT")
 	bridge, err := filepath.Abs(os.Args[1])
 	must(err)
