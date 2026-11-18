@@ -33,6 +33,17 @@ func mainClientCommands() []*cobra.Command {
 		}
 		conn.Close()
 		return writeWork(cmd, map[string]any{"binding": b, "binding_sha256": b.digest(), "validation": "existing_socket_peer_and_core_verified", "launch": false})
+	}}, {Use: "hc-binding-check FILE SPACE FOLDER QUEUE", Args: cobra.ExactArgs(4), RunE: func(cmd *cobra.Command, a []string) error {
+		b, err := loadHCBinding(a[0], a[1], a[2], a[3])
+		if err != nil {
+			return err
+		}
+		conn, err := b.connect(cmd.Context())
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		return writeWork(cmd, map[string]any{"binding_sha256": b.digest(), "validation": "existing_socket_peer_and_core_verified", "launch": false})
 	}}}
 	for _, action := range []string{"main-list", "main-status", "main-recover", "main-preview", "main-start", "client-list", "client-status", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify"} {
 		action := action

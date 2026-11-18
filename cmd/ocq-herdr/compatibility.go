@@ -208,7 +208,7 @@ func installCompatibility(root *cobra.Command) {
 		if name == "push-serve" || name == "push-token" || name == "push-association" || name == "runtime-discover" {
 			return nil
 		} // Standalone transport setup/configuration only; no queue mutation.
-		if modRead(name) || name == "hc-binding" {
+		if modRead(name) || name == "hc-binding" || name == "hc-binding-check" {
 			return nil
 		}
 		// Runtime entry already checks exact immutable intent v1, binary image,

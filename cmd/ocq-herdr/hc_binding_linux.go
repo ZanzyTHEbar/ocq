@@ -146,7 +146,9 @@ func (b *hcBinding) connect(ctx context.Context) (*hcConnection, error) {
 		return nil, errors.New("private owned HC socket directory required")
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm()&0077 != 0 || st.Uid != b.UID || uint64(st.Dev) != b.Device || st.Ino != b.Inode {
+	// Traversal of the canonical owned0700 parent gates access even when HC
+	// creates its socket with a normal umask (e.g. 0775). Pin the listener below.
+	if !ok || info.Mode()&os.ModeSocket == 0 || st.Uid != b.UID || uint64(st.Dev) != b.Device || st.Ino != b.Inode {
 		return nil, errors.New("HC socket ownership/incarnation changed")
 	}
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", b.Socket)

@@ -171,10 +171,21 @@ containing exactly the fields of `ocq-private-hc-v1`:
 These are placeholders, **not usable default pins**. Use independently retained
 owner receipts for the existing isolated core. The socket path must be canonical,
 owned, inaccessible to other users and inside an owned `0700` directory.
+The directory traversal gate is mandatory; the socket itself may retain HC's
+normal permissions (for example `0775`). Linux's `0700` group-class mask also
+blocks named-user/group ACL traversal grants. Privileged DAC bypass and hostile
+same-UID namespace/filesystem mutation are outside this local single-user model;
+this is not a filesystem sandbox.
 The bridge connects directly to that Unix socket, checks `SO_PEERCRED` against
 PID/UID/start/boot/host and socket device/inode, then checks JSON-RPC generation 1,
 HC 0.1.21 and the exact core ID. It checks at endpoint startup and on each native
 operation. No HC CLI, discovery, SSH/machine routing, autostart or reconnect exists.
+
+Before creating an endpoint or runtime intent, an owner can run
+`ocq-herdr hc-binding-check FILE SPACE FOLDER QUEUE`. This loads the same exact
+binding and performs the same socket/process/peer/core checks as endpoint startup,
+returning its digest and `launch=false`. It does not initialize a queue, register
+an endpoint or start HC. Metadata-only `stat` checks are not a substitute.
 
 The explicit read `hc-binding` returns the verified exact binding and its SHA256.
 Review those retained bytes alongside the original pointer/intent pages. Native

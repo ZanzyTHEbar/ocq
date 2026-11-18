@@ -149,7 +149,11 @@ func runtimeSchemaProof(bridge, cli, root string) {
 	}
 	hcPath, err := exec.LookPath("herdr-core")
 	must(err)
+	// HC normally creates a 0775 socket under its private directory. Do not
+	// mask that real integration boundary with the proof's private-file umask.
+	syscall.Umask(0002)
 	hc, _ := start("hc", hcPath, "serve")
+	syscall.Umask(0077)
 	socket := filepath.Join(root, "run", "h.sock")
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -176,6 +180,7 @@ func runtimeSchemaProof(bridge, cli, root string) {
 	check(hello.Result.Core.ID != "" && hello.Result.Version == "0.1.21", "actual private HC hello")
 	info, err := os.Stat(socket)
 	must(err)
+	check(info.Mode().Perm() == 0775, "real HC must expose normal0775 socket inside owned0700 directory")
 	socketStat := info.Sys().(*syscall.Stat_t)
 	host, err := os.Hostname()
 	must(err)
@@ -222,6 +227,34 @@ func runtimeSchemaProof(bridge, cli, root string) {
 		binding := map[string]any{"protocol": "ocq-private-hc-v1", "socket": socket, "device": socketStat.Dev, "inode": socketStat.Ino, "uid": os.Getuid(), "pid": hc.identity.PID, "start_ticks": hc.identity.Start, "boot_id": hc.identity.Boot, "host": host, "core_id": hello.Result.Core.ID, "space": space, "folder": root, "queue_identity": descriptor["queue_identity"]}
 		bindingPath := filepath.Join(dir, "hc-binding.json")
 		save(bindingPath, binding)
+		if version == 7 {
+			// Exercise the public preflight against the real listener, including
+			// boundaries that must still refuse before endpoint registration.
+			refuse := func(file, diagnostic string) {
+				cmd := exec.Command(bridge, "hc-binding-check", file, space, root, fmt.Sprint(descriptor["queue_identity"]))
+				cmd.Env, cmd.Dir = env, root
+				out, e := cmd.CombinedOutput()
+				check(e != nil && strings.Contains(string(out), diagnostic), "binding preflight must refuse: "+diagnostic)
+			}
+			must(os.Chmod(filepath.Dir(socket), 0750))
+			refuse(bindingPath, "private owned HC socket directory required")
+			must(os.Chmod(filepath.Dir(socket), 0700))
+			binding["inode"] = socketStat.Ino + 1
+			badSocket := filepath.Join(dir, "wrong-socket.json")
+			save(badSocket, binding)
+			refuse(badSocket, "HC socket ownership/incarnation changed")
+			binding["inode"] = socketStat.Ino
+			self := runtimeProofIdentity(os.Getpid())
+			binding["pid"], binding["start_ticks"] = self.PID, self.Start
+			badPeer := filepath.Join(dir, "wrong-peer.json")
+			save(badPeer, binding)
+			refuse(badPeer, "HC listener owner changed")
+			binding["pid"], binding["start_ticks"] = hc.identity.PID, hc.identity.Start
+			var checked map[string]any
+			must(json.Unmarshal(run(bridge, "hc-binding-check", bindingPath, space, root, fmt.Sprint(descriptor["queue_identity"])), &checked))
+			check(checked["validation"] == "existing_socket_peer_and_core_verified" && checked["launch"] == false, "real HC read-only binding preflight")
+			save(filepath.Join(dir, "binding-boundary.json"), map[string]any{"socket_mode": "0775", "parent_mode": "0700", "real_hc_preflight": checked, "nonprivate_parent_refused": true, "wrong_socket_identity_refused": true, "wrong_peer_refused": true})
+		}
 		tokenPath := filepath.Join(dir, "token")
 		run(bridge, "push-token", tokenPath)
 		endpoint, output := start(fmt.Sprintf("endpoint%d", version), bridge, "--mod-space", space, "--mod-folder", root, "push-serve", "--runtime", "--queue-dir", state, "--listen", "127.0.0.1:0", "--token-file", tokenPath, "--hc-binding-file", bindingPath)
