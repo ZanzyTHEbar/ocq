@@ -5,7 +5,7 @@ import { createHash } from "crypto";
 import { Buffer } from "buffer";
 import { PushConnection } from "./push-connection.js";
 import { decimal, compareRevision } from "./stored-updates.js";
-import { RuntimeProject } from "./runtime-project.js";
+import { RuntimeProject, projectSpaces } from "./runtime-project.js";
 
 const hex = s => typeof s === "string" && /^[0-9a-f]{64}$/.test(s);
 const id = (...parts) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
@@ -234,7 +234,7 @@ export class RuntimeSources extends View {
   openProject(source, project, space, cx) {
     if (!source.current()) return;
     this.detail?.dispose(); this.inspection = null;
-    const matches = spaces().filter(s => s.machine === source.machine && s.folder === project?.repo_root);
+    const matches = projectSpaces(source.machine).filter(s => s.folder === project?.repo_root);
     this.detail = new RuntimeProject(source, project, space || (matches.length === 1 ? matches[0] : null), cx);
     source.subscribe(true); cx.notify();
   }
@@ -283,7 +283,15 @@ export class RuntimeSources extends View {
       const page = source.pages[kind];
       const generation = source.generation;
       for (const item of page.items) region.child(this.row(source, kind, item, t));
-      if (page.error) region.child(div().px(8).text_color(t.blocked).child(`${title(source.machine)} · ${page.error === "reset_required" ? "Queue changed; restart paging." : "Page unavailable; retained data may be stale"}`));
+      if (!page.error && !page.items.length) {
+        const first = page.cursor === "0";
+        const empty = kind === "projects" ? (first ? "No projects registered. Use Set up project to review a Main." : "No projects on this page.") :
+          kind === "jobs" ? (first ? "No submitted jobs recorded in this queue." : "No jobs on this page.") :
+          kind === "inbox" ? "No project mail on this page. An empty inbox does not mean work is complete." :
+          "No pending notifications on this page.";
+        region.child(div().px(8).text_color(t.muted).child(`${title(source.machine)} · ${!source.online() ? "Source unavailable; no current observation. Retained data may be stale." : !page.loaded ? "Reading stored data…" : empty}`));
+      }
+      if (page.error) region.child(div().px(8).text_color(page.error === "reading" ? t.muted : t.blocked).child(`${title(source.machine)} · ${page.error === "reading" ? "Reading stored page…" : page.error === "reset_required" ? "Queue changed; restart paging." : "Page unavailable; retained data may be stale"}`));
        if (page.error === "reset_required") region.child(this.button(id(source.key, kind, "reset"), "Restart pages", cx => {
          if (!source.online() || source.generation !== generation || source.pages[kind] !== page) return;
         page.cursor = "0"; page.history = []; page.error = "reading"; source.subscribe(true); cx.notify();
@@ -325,20 +333,23 @@ export class RuntimeSources extends View {
         .when(!!v.error, e => e.child(div().text_color(t.blocked).child(v.error)))
         .child(div().child(JSON.stringify(v.detail || v.item, null, 2))));
     }
+    if (!this.sources.size) {
+      const states = [...this.catalog.values()].map(e => e.state);
+      const absent = !this.catalogFault && states.length > 0 && states.every(s => s === "absent");
+      root.child(div().px(12).py(8).child(this.discovering ? "Looking for existing OCQ runtimes…" :
+        absent ? "No registered OCQ runtimes found. Discovery does not install or start them." :
+        states.includes("runtimeDetectedConnectionUnavailable") ? "No connected OCQ runtimes. A runtime was detected, but its endpoint is unavailable. Check Details." :
+        "No current queue observation. Discovery is unavailable; existing runtime state is unknown. Check Details."));
+    }
     if (this.view === "work") {
       root.child(this.region("projects", "Work", t));
-      if (!this.sources.size) {
-        const states = [...this.catalog.values()].map(e => e.state);
-        const absent = !this.catalogFault && states.length > 0 && states.every(s => s === "absent");
-        root.child(div().px(12).py(8).child(this.discovering ? "Looking for existing OCQ runtimes…" :
-          absent ? "No registered OCQ runtimes found. Discovery does not install or start them." :
-          states.includes("runtimeDetectedConnectionUnavailable") ? "No connected OCQ runtimes. A runtime was detected, but its endpoint is unavailable." :
-          "No connected OCQ runtimes. Discovery is unavailable; existing runtime state is unknown."));
-      }
-      const targets = spaces().filter(s => s.folder);
       for (const source of this.sources.values()) if (source.online()) {
-        const choices = targets.filter(s => s.machine === source.machine);
-        if (this.newOn === source.key) for (const s of choices) root.child(this.button(id(source.key, s.id, "setup"), `${s.name} · ${title(source.machine)}`, task => this.openProject(source, null, s, task), t));
+        const choices = projectSpaces(source.machine);
+        if (this.newOn === source.key) {
+          root.child(div().px(8).text_size(12).text_color(t.muted).child("Choose a Herdr space and terminal folder to verify—not a project name."));
+          for (const s of choices) root.child(this.button(id(source.key, s.id, s.setupContext.pane, "setup"), `${title(source.machine)} · ${s.name} · Tab ${s.setupContext.tabName}\n${s.folder}`, task => this.openProject(source, null, s, task), t));
+          if (!choices.length) root.child(div().px(8).child("No live terminal folder available. Open a terminal in the intended repository; stored launch folders are not used."));
+        }
         root.child(this.button(id(source.key, "new"), `Set up project · ${title(source.machine)}`, task => { this.newOn = this.newOn === source.key ? null : source.key; task.notify(); }, t));
       }
     } else if (this.view === "queue") root.child(v_flex().flex_1().min_h(0).gap(8).child(this.region("jobs", "Jobs", t)).child(this.region("events", "Notifications", t)));

@@ -1,6 +1,6 @@
 import { div } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { spaces } from "herdr";
+import { spaces, panes, exec } from "herdr";
 import { createHash } from "crypto";
 import { sourceCompatibility, enabledButton } from "./compatibility.js";
 import { WorkOperator } from "./work-operator.js";
@@ -8,14 +8,27 @@ import { MainClientControls } from "./main-client.js";
 import { OperatorWorkflow } from "./workflow.js";
 import { PrivateHCBinding } from "./hc-binding.js";
 
+// Space.folder is a launch default, not its current project. Pick an exact
+// terminal in an exact tab; never substitute the active unrelated space.
+export function projectSpaces(machine) {
+  const live = panes();
+  return spaces().filter(s => s.machine === machine).flatMap(s => s.tabs.flatMap(tab =>
+    live.filter(p => p.tab === tab.id && p.terminal && p.cwd).map(p => ({
+      ...s, folder: p.cwd,
+      setupContext: { tab: tab.id, tabName: tab.name, pane: p.pane, terminal: p.terminal, cwd: p.cwd, branch: p.branch },
+    }))));
+}
+
 // A project detail owns reviews/controllers, not a connection, dispatcher or HC.
 // All reads/actions use its source's one stream and an explicit project context.
 export class RuntimeProject {
   constructor(source, project, space, cx) {
     this.source = source; this.sourceKey = source.key; this.root = source.owner;
     this.selected = project?.project_id || null; this.project = project;
-    this.spaceID = space?.id || null; this.folder = project?.repo_root || space?.folder || null;
+    this.spaceID = space?.setupContext ? space.id : null;
+    this.folder = project?.repo_root || space?.setupContext?.cwd || null;
     this.machine = source.machine; this.space = space;
+    this.setupContext = space?.setupContext || null;
     this.generation = 0; this.panelEpoch = source.generation; this.closed = false;
     this.workspaceView = "projects"; this.projectView = "operator";
     this.worktreeCheck = {}; this.publication = {}; this.intake = {}; this.compose = {};
@@ -54,7 +67,10 @@ export class RuntimeProject {
   localSpace() { return this.spaceID?.startsWith(`${this.machine}/`) && this.machine !== null ? this.spaceID.slice(this.machine.length + 1) : this.spaceID; }
   panelCurrent() {
     return !this.closed && this.root.detail === this && this.source.current() && this.source.generation === this.panelEpoch &&
-      (!this.spaceID || spaces().some(s => s.id === this.spaceID && s.machine === this.machine && s.folder === this.folder));
+      (!this.spaceID || spaces().some(s => s.id === this.spaceID && s.machine === this.machine &&
+        s.tabs.some(tab => tab.id === this.setupContext?.tab))) &&
+      (!this.setupContext || panes().some(p => p.pane === this.setupContext.pane && p.tab === this.setupContext.tab &&
+        p.terminal === this.setupContext.terminal && p.cwd === this.setupContext.cwd && p.branch === this.setupContext.branch));
   }
   invalidate() {
     this.generation++; this.compatibility.invalidateObservation("Owning runtime/route changed; review again.");
@@ -64,9 +80,19 @@ export class RuntimeProject {
   async initialize(cx) {
     if (!this.spaceID || !this.folder) return;
     const generation = this.source.generation;
+    this.verifyingRepository = true;
     try {
+      if (this.setupContext) {
+        const repo = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: this.setupContext.cwd, on: this.machine, timeout: 5000 });
+        if (!this.panelCurrent() || generation !== this.source.generation) return;
+        const folder = repo.stdout?.replace(/\r?\n$/, "");
+        if (repo.code !== 0 || !folder || /[\r\n\0]/.test(folder) || this.project && this.project.repo_root !== folder)
+          throw Error("Selected terminal repository unavailable");
+        this.folder = folder; this.updates.scope.folder = folder;
+      }
       const response = await this.updates.connection.command(["compatibility", this.localSpace(), this.folder]);
-      if (!this.panelCurrent() || generation !== this.source.generation || response.code !== 0) return;
+      if (!this.panelCurrent() || generation !== this.source.generation) return;
+      if (response.code !== 0) throw Error("Repository compatibility unavailable");
       const status = this.compatibility.validate(JSON.parse(response.stdout), { id: this.spaceID, machine: this.machine, folder: this.folder });
       if (status.queue_identity !== this.source.runtime.queue_identity || status.image_sha256 !== this.source.runtime.image_sha256 ||
            status.observation_store_context !== this.source.binding?.store_context || ![6, 7].includes(status.observation_schema) ||
@@ -76,7 +102,8 @@ export class RuntimeProject {
       this.updates.binding = { queue_identity: status.queue_identity, store_context: status.observation_store_context, bridge_context: status.observation_context };
       this.workOperator.sync();
       this.source.subscribe();
-    } catch (_) { this.error = "Project context unavailable; no action was invoked."; }
+    } catch (_) { if (this.panelCurrent() && generation === this.source.generation) this.error = "Cannot verify this terminal's repository. Choose a terminal in the intended repository; the space's launch folder is not used."; }
+    finally { this.verifyingRepository = false; }
     cx.notify();
   }
   dispose() { this.closed = true; this.invalidate(); this.workOperator.scroll.release(); }
@@ -154,12 +181,14 @@ export class RuntimeProject {
     };
     if (!this.source.online() || !this.panelCurrent()) return box.child(div().p(12).child("Owning runtime or project context changed. Retained details are stale; return to Work and reopen the project."));
     if (!this.spaceID) {
-      const choices = spaces().filter(s => s.machine === this.machine && s.folder === this.folder);
-      box.child(div().p(12).child("Choose this project's Herdr space to review actions."));
-      for (const s of choices) box.child(this.panelControl(`space-${s.id}`, s.name, task => this.root.openProject(this.source, this.project, s, task), t));
+      const choices = projectSpaces(this.machine);
+      box.child(div().p(12).child("Choose a terminal folder to verify for this project. Space names and launch folders are not repository identity."));
+      for (const s of choices) box.child(this.panelControl(`space-${s.id}-${s.setupContext.pane}`, `${this.machine ?? "This computer"} · ${s.name} · Tab ${s.setupContext.tabName}\n${s.folder}`, task => this.root.openProject(this.source, this.project, s, task), t));
+      if (!choices.length) box.child(div().p(12).text_color(t.muted).child("No live terminal folder is available. Open a terminal in the intended repository, then choose it here."));
       return box;
     }
-    if (this.error) box.child(div().p(12).text_color(t.blocked).child(this.error));
+    if (this.error) return box.child(div().p(12).text_color(t.blocked).child(this.error));
+    if (this.verifyingRepository) return box.child(div().p(12).child("Verifying the selected terminal's repository…"));
     if (this.navigation) {
       const v = this.navigation, current = this.navigationCurrent(v.scope);
       return box.child(v_flex().flex_1().min_h(0).p(12).gap(6).overflow_y_scroll()

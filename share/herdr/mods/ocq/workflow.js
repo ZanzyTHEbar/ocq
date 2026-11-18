@@ -17,6 +17,7 @@ export class OperatorWorkflow {
     this.compatibility = host.compatibility || compatibility;
     this.command = (args, options) => bridgeCommand(args, { ...options, compatibility: this.compatibility });
     this.label = InputState.new({ placeholder: "Project name" });
+    this.label.on("change", () => { this.labelTouched = true; });
     this.goal = TextareaState.new({ placeholder: "What should Main accomplish?", rows: 4 });
     for (const field of [this.label, this.goal]) field.on("change", (_e, cx) => { this.review = null; cx.notify(); });
     for (const field of [this.label, this.goal]) {
@@ -37,6 +38,7 @@ export class OperatorWorkflow {
       folder: h.folder, space: b.space_id, queue: b.queue_identity, store: b.observation_store_context,
       bridge: b.observation_context, image: b.image_sha256, epoch: h.panelEpoch, owner: h.generation,
       project: h.selected || null,
+      ...(h.setupContext ? { tab: h.setupContext.tab, terminal: h.setupContext.terminal, pane: h.setupContext.pane, cwd: h.setupContext.cwd, branch: h.setupContext.branch } : {}),
     };
   }
   current(scope) { return !!scope && JSON.stringify(scope) === JSON.stringify(this.scope()) && this.host.workOperator.visible(); }
@@ -63,15 +65,26 @@ export class OperatorWorkflow {
   }
   async readiness(s) {
     const value = await this.read("workflow-context", [s.space, s.queue]);
-    if (!this.current(s) || value.protocol !== protocol || typeof value.ready !== "boolean" || !Array.isArray(value.selections)) throw Error("Workflow context changed");
+    if (!this.current(s) || value.protocol !== protocol || typeof value.ready !== "boolean" || !Array.isArray(value.selections) ||
+        value.ready && (value.repo !== s.folder || typeof value.branch !== "string")) throw Error("Workflow context changed");
     this.capability = value; this.capabilityScope = JSON.stringify(s);
+    if (value.ready) {
+      for (const role of ["main", "implementation", "review"]) {
+        const choices = value.selections.filter(item => item.role === role);
+        if (choices.length === 1 && !this.choices[role]) this.choices[role] = choices[0].id;
+      }
+      if (!this.labelSeeded) {
+        this.labelSeeded = true;
+        if (!this.labelTouched && !this.label.value()) this.label.set_value(value.repo.split(/[\\/]/).filter(Boolean).pop() || "");
+      }
+    }
     return value;
   }
   open(cx) { this.run(cx, async s => { await this.readiness(s); this.opened = true; }); }
   prepare(mode, cx) {
     this.run(cx, async s => {
       const ready = await this.readiness(s);
-      if (!ready.ready) return;
+      if (!ready.ready || mode !== "send" && this.setupReason(s, false)) return;
       const key = this.key(s);
       if (this.saved?.[key]) throw Error("Recover retained operation first");
       const project = s.project || token("proj");
@@ -166,11 +179,19 @@ export class OperatorWorkflow {
       if (record.phase === "prepared") await this.preview(s, record);
     });
   }
+  setupReason(s, includeBusy = true) {
+    const ready = this.capabilityScope === JSON.stringify(s) && this.capability;
+    if (!ready?.ready) return "Verify this repository's setup first.";
+    if (includeBusy && this.busy) return "Checking the retained operation.";
+    if (!this.label.value().trim()) return "Enter a project name.";
+    const missing = ["main", "implementation", "review"].filter(role => !ready.selections.some(v => v.role === role && v.id === this.choices[role]));
+    return missing.length ? `Open Advanced to choose ${missing.map(role => ({ main: "Main", implementation: "Implementation", review: "Independent review" }[role])).join(", ")}.` : null;
+  }
   render(cx, t, button, selectedMain = null) {
     const s = this.scope();
     const box = v_flex().id("ocq-workflow").gap(6);
-    if (!s) return box.child(div().text_color(t.muted).child("Project setup needs the verified local workflow connection."));
-    const formContext = JSON.stringify([s.folder, s.space, s.queue, s.store, s.project]);
+    if (!s) return box.child(div().text_color(t.muted).child("Project setup needs a verified connection to the owning runtime."));
+    const formContext = JSON.stringify(s);
     if (this.formContext !== formContext) {
       this.formContext = formContext; this.opened = false; this.capability = null; this.review = null;
       this.choices = {}; this.status = null;
@@ -195,15 +216,22 @@ export class OperatorWorkflow {
       }
     } else if (!selectedMain) {
       box.child(div().font_semibold().child("Set up Main"))
-        .child(div().text_size(12).child(`${ready.repo}\n${ready.branch}`))
-        .child(Input.new(this.label).id("ocq-workflow-label").accessibility_label("Project name").h(36));
-      for (const role of ["main", "implementation", "review"]) {
-        box.child(div().child({ main: "Main", implementation: "Implementation", review: "Independent review" }[role]));
+        .child(div().text_size(12).child(`Machine: ${s.machine ?? "This computer"}\nHerdr space: ${this.host.space?.name || s.space}\nRepository: ${ready.repo}\nBranch: ${ready.branch}${s.tab ? `\nTab: ${this.host.setupContext.tabName} · Terminal: ${s.terminal}` : ""}`))
+        .child(div().child("Project name"))
+        .child(Input.new(this.label).id("ocq-workflow-label").accessibility_label("Project name").h(36).px(8).border_1().border_color(t.border).bg(t.input).text_color(t.foreground))
+        .child(div().text_size(12).text_color(t.muted).child("Configured roles are selected by default. Review setup, then explicitly confirm Create Main. Nothing launches while editing."))
+        .child(button("ocq-main-workflow-advanced", this.advancedRoles ? "Hide Advanced" : "Advanced · roles", cx => { this.advancedRoles = !this.advancedRoles; cx.notify(); }));
+      if (this.advancedRoles) for (const role of ["main", "implementation", "review"]) {
+        box.child(div().child(`Choose ${{ main: "Main", implementation: "Implementation", review: "Independent review" }[role]}`));
         for (const item of ready.selections.filter(v => v.role === role)) box.child(button(`ocq-main-choice-${item.id}`,
-          `${this.choices[role] === item.id ? "Selected · " : ""}${item.label}`, cx => { this.choices[role] = item.id; cx.notify(); }));
+          `${this.choices[role] === item.id ? "Selected · " : "Choose · "}${item.label}`, cx => { this.choices[role] = item.id; this.review = null; cx.notify(); })
+          .when(this.choices[role] === item.id, e => e.bg(t.hover)));
       }
-      if (!this.busy && this.label.value() && ["main", "implementation", "review"].every(role => this.choices[role]))
-        box.child(button("ocq-main-workflow-review", "Review setup", cx => this.prepare(s.project ? "adopt" : "create", cx)));
+      const reason = this.setupReason(s);
+      box.child(reason
+        ? div().id("ocq-main-workflow-review").role("button").accessibility_label(`Review setup — ${reason}`).px(8).py(5).rounded(5).opacity(0.4).child("Review setup")
+        : button("ocq-main-workflow-review", "Review setup", cx => this.prepare(s.project ? "adopt" : "create", cx)));
+      if (reason) box.child(div().text_size(12).text_color(t.muted).child(reason));
     } else {
       box.child(Textarea.new(this.goal).id("ocq-workflow-goal").accessibility_label("Goal for Main").h(110));
       if (!this.busy && this.goal.value().trim()) box.child(button("ocq-main-goal-review", "Review goal", cx => this.prepare("send", cx)));
