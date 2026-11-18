@@ -299,6 +299,13 @@ func ListProjectMain(dir, project string) (MainList, error) {
 			return out, e
 		}
 		out.Items = append(out.Items, s)
+		if s.Mode == "send" {
+			goal, e := InspectProjectGoal(dir, project, id)
+			if e != nil {
+				return out, e
+			}
+			out.Goals = append(out.Goals, goal)
+		}
 	}
 	if setup, _, _, e := selectedMain(r, j, project); e == nil {
 		selected, e := inspectMainRecord(r, j, project, setup.SetupID, false)

@@ -26,8 +26,15 @@ export class PrivateHCBinding {
     this.approved = null; this.review = null; this.working = true; this.error = null;
     cx.spawn(async cx => {
       try {
+        await this.load(context);
+      } catch (error) { if (context === this.context()) this.error = String(error.message || error); }
+      finally { this.working = false; if (context === this.context()) cx.notify(); }
+    }); cx.notify();
+  }
+  async load(context = this.context()) {
+        if (!context) throw Error("Current native backend context required");
         const r = await bridgeCommand(["hc-binding"], { on: null });
-        if (context !== this.context()) return;
+        if (context !== this.context()) throw Error("Native backend context changed");
         if (r.code !== 0 || r.stdout.length > 16384) throw Error("No verified private HC binding at this endpoint.");
         const value = JSON.parse(r.stdout), b = value.binding, scope = this.host.updates.scope;
         if (!b || Object.keys(b).length !== fields.length || fields.some(k => !Object.hasOwn(b, k)) ||
@@ -43,9 +50,7 @@ export class PrivateHCBinding {
           .replace(/[<>&\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
         if (createHash("sha256").update(bytes).digest("hex") !== value.binding_sha256) throw Error("HC binding digest mismatch.");
         this.review = { context, value, pages: this.host.workOperator.pagesFor(value), page: 0, seen: new Set() };
-      } catch (error) { if (context === this.context()) this.error = String(error.message || error); }
-      finally { this.working = false; if (context === this.context()) cx.notify(); }
-    }); cx.notify();
+        return this.review;
   }
   render(cx, theme, button, box = v_flex().gap(6)) {
     const review = this.review, current = review && review.context === this.context();

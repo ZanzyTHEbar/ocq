@@ -13,6 +13,7 @@ import { IntakeController } from "./intake-controller.js";
 import { StoredUpdates, acceptObservationVersion } from "./stored-updates.js";
 import { WorkOperator } from "./work-operator.js";
 import { MainClientControls } from "./main-client.js";
+import { OperatorWorkflow } from "./workflow.js";
 
 function emptyCollection() {
   return { pages: [{ start: "0" }], items: [], history: [], recent: [], readTimes: {}, cursor: "0", readAt: null, loaded: false, loading: false, hasMore: false, error: null };
@@ -61,6 +62,7 @@ export default class OCQ extends View {
     this.updates = new StoredUpdates(this, cx);
     this.workOperator = new WorkOperator(this);
     this.mainClient = new MainClientControls(this);
+    this.workflow = new OperatorWorkflow(this);
     this.nativeHC = new PrivateHCBinding(this);
     this.projectPages = [{ start: "0" }];
     this.lanePages = [{ start: "0" }];
@@ -327,6 +329,10 @@ export default class OCQ extends View {
   }
 
   key(e, cx) {
+    if (this.workflow.focused) {
+      if (e.key === "f6") { this.handle.focus(); this.workflow.focused = false; cx.stop_propagation(); cx.notify(); }
+      return;
+    }
     if (e.modifiers.control || e.modifiers.alt || e.modifiers.platform) return;
     const intake = this.intakeController, compose = this.composeController;
     if (this.intake.screen && !this.intake.authoritySuspended) {
@@ -766,14 +772,7 @@ export default class OCQ extends View {
   }
 
   emptyProjects(cx, t, button) {
-    return v_flex().py(12).gap(8)
-      .child(div().text_color(t.muted).child("Register a project to follow its work here."))
-      .when(this.composeLocal(), e => e.child(button("ocq-intake-open", "Register project…", cx => this.intakeController.openIntake(cx)).bg(t.accent).text_color(t.background)))
-      .when(!this.composeLocal(), e => e.child(this.panelControl("ocq-setup-guide", "Setup steps", cx => { this.setupGuide = !this.setupGuide; cx.notify(); }, t, this.renderTargets)))
-      .when(this.setupGuide, e => e.child(v_flex().gap(6).text_size(12).text_color(t.muted)
-        .child(div().child(`On ${this.machine ?? "this computer"}, prepare Main for the canonical checkout, then review and start it. The project appears here after registration.`))
-        .child(this.panelControl("ocq-setup-help-copy", "Copy setup help command", cx => cx.write_to_clipboard("ocq project main prepare --help"), t, this.renderTargets))
-        .child(div().child("This panel does not start Main from your terminal or upload a prompt/profile."))));
+    return v_flex().py(12).gap(8).child(this.workflow.render(cx, t, button));
   }
 
   readFault(error, label, t) {

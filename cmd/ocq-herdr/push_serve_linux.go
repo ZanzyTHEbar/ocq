@@ -25,6 +25,7 @@ import (
 const pushProtocol = "ocq-push-v1"
 
 type pushEndpoint struct {
+	workflow                    *workflowRegistry
 	hc                          *hcBinding
 	allowActions                bool
 	state, space, folder, token string
@@ -93,7 +94,7 @@ func pushCommands() []*cobra.Command {
 		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"token_file": file, "created": true, "secret_printed": false})
 	}}
-	var state, listen, tokenFile, cert, key, hcFile string
+	var state, listen, tokenFile, cert, key, hcFile, workflowFile string
 	var allowActions bool
 	serve := &cobra.Command{Use: "push-serve", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if !filepath.IsAbs(state) {
@@ -144,6 +145,15 @@ func pushCommands() []*cobra.Command {
 			}
 			check.Close()
 		}
+		if workflowFile != "" {
+			if !allowActions || endpoint.hc == nil {
+				return errors.New("workflow requires explicit actions and pinned private HC")
+			}
+			endpoint.workflow, err = loadWorkflowRegistry(workflowFile, space, folder, binding.Queue)
+			if err != nil {
+				return err
+			}
+		}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/ocq", endpoint.accept)
 		server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 10 * time.Second, MaxHeaderBytes: 8192}
@@ -182,6 +192,7 @@ func pushCommands() []*cobra.Command {
 	serve.Flags().StringVar(&key, "tls-key", "", "Explicit TLS private key")
 	serve.Flags().BoolVar(&allowActions, "allow-actions", false, "Explicitly allow supported reviewed OCQ actions; no native launch, dispatcher or agent reconciliation")
 	serve.Flags().StringVar(&hcFile, "hc-binding-file", "", "Explicit private existing HC socket/owner/core/scope pins; never starts HC")
+	serve.Flags().StringVar(&workflowFile, "workflow-registry-file", "", "Owner-provisioned exact workflow profiles and bounded foreground dispatcher identity")
 	return []*cobra.Command{token, serve}
 }
 

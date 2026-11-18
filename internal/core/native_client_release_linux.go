@@ -118,8 +118,8 @@ func nativeReleaseImages() (nativeImages, error) {
 	var version handoffOutput
 	c.Stdout = &version
 	c.Stderr = io.Discard
-	if c.Run() != nil || strings.TrimSpace(version.String()) != "opencode v2.3.0" {
-		return out, errors.New("native client requires exact source-validated OpenCode 2.3.0")
+	if c.Run() != nil || (strings.TrimSpace(version.String()) != "opencode v2.3.0" && strings.TrimSpace(version.String()) != "opencode v2.3.2") {
+		return out, errors.New("native client requires exact source-validated OpenCode 2.3.0 or 2.3.2")
 	}
 	return out, nil
 }

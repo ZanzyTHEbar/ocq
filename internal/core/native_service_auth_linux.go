@@ -14,9 +14,11 @@ import (
 	"syscall"
 )
 
-// Official 2.3.0 Service.discover contract, NOT CLI service configuration:
+// Official 2.3.0/2.3.2 Service.discover contract, NOT CLI service configuration:
 // packages/client/src/{effect/service.ts,service-probe.ts}. Never marshal this
 // private input or include it in errors, journals, plugin options or argv.
+// 2.3.2 source: anomalyco/opencode@c0ad18b402eb2827fc1ee71c171b1177b3fc02d1;
+// these files are byte-identical to the validated 2.3.0 release.
 type nativeRegistration struct {
 	ID       string `json:"id"`
 	Version  string `json:"version"`
@@ -40,7 +42,7 @@ func readNativeRegistration(ctx context.Context, directory string) (nativeRegist
 	if !filepath.IsAbs(state) || strings.ContainsAny(state, "\r\n\x00") {
 		return reg, errors.New("invalid OpenCode state path")
 	}
-	// Stable 2.3.0 CLI and the documented Service fallback select service.json.
+	// Stable 2.3.0/2.3.2 CLI and the documented Service fallback select service.json.
 	// No legacy/channel scan, config/password getter, migration or ensure/start.
 	fd, err := syscall.Open(state, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
@@ -76,7 +78,7 @@ func readNativeRegistration(ctx context.Context, directory string) (nativeRegist
 		return nativeRegistration{}, errors.New("official registration invalid/bounded")
 	}
 	u, err := url.Parse(reg.URL)
-	if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.Port() == "" || strings.ContainsAny(reg.URL, "\r\n\x00") || reg.Version != "2.3.0" || reg.PID <= 0 || reg.ID == "" {
+	if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.Port() == "" || strings.ContainsAny(reg.URL, "\r\n\x00") || (reg.Version != "2.3.0" && reg.Version != "2.3.2") || reg.PID <= 0 || reg.ID == "" {
 		return nativeRegistration{}, errors.New("source-validated exact managed service identity/origin unavailable")
 	}
 	ip := net.ParseIP(u.Hostname())

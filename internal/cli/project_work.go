@@ -45,6 +45,14 @@ func projectWork(state *string) *cobra.Command {
 		return output(out)
 	}
 	root.AddCommand(wait)
+	link := &cobra.Command{Use: "link-goal PROJECT REQUEST MAIN_OPERATION", Args: cobra.ExactArgs(3), RunE: func(_ *cobra.Command, a []string) error {
+		out, err := core.LinkProjectGoalWork(*state, a[0], a[2], a[1])
+		if err != nil {
+			return err
+		}
+		return output(out)
+	}}
+	root.AddCommand(link)
 	for _, kind := range []string{"implementation", "capture", "review", "review_result"} {
 		kind := kind
 		name := map[string]string{"implementation": "prepare", "capture": "capture-prepare", "review": "review-prepare", "review_result": "review-result-prepare"}[kind]

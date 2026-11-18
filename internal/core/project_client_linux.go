@@ -24,7 +24,7 @@ func clientDigest(p ClientPointer) string {
 }
 
 func clientTarget(r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer, error) {
-	p := ClientPointer{Protocol: ClientProtocol, ProjectID: in.ProjectID, NavigationID: in.NavigationID, WorkRequestID: in.WorkRequestID, TargetKind: in.TargetKind, Space: in.Space}
+	p := ClientPointer{Protocol: in.Protocol, ProjectID: in.ProjectID, NavigationID: in.NavigationID, WorkRequestID: in.WorkRequestID, TargetKind: in.TargetKind, Space: in.Space}
 	binding, err := workBinding(r, in.ProjectID)
 	if err != nil {
 		return p, err
@@ -82,14 +82,19 @@ func clientTarget(r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer
 	if err = nativeIdentity(s, p.SessionID, p.Cwd, p.OpenCodeProjectID, p.OwnershipSHA256); err != nil {
 		return p, err
 	}
-	if err = nativeClientIdle(p.Cwd, service, p.SessionID, s); err != nil {
-		return p, err
+	if in.Protocol != AttentionClientProtocol {
+		if err = nativeClientIdle(p.Cwd, service, p.SessionID, s); err != nil {
+			return p, err
+		}
 	}
 	p.ProfileSHA256 = nativeProfile(s)
 	if expectedProfile != "" && p.ProfileSHA256 != expectedProfile {
 		return p, errors.New("worker immutable execution profile changed; navigation refused")
 	}
 	p.Options = ClientOptions{Protocol: "ocq-handoff-v1", TargetKind: p.TargetKind, ProjectID: p.ProjectID, MainID: p.SetupID, OwnershipMode: p.OwnershipMode, QueueIdentity: p.QueueIdentity, JobID: p.JobID, SessionID: p.SessionID, Worktree: p.Cwd, OpenCodeProjectID: p.OpenCodeProjectID, OwnershipSHA256: p.OwnershipSHA256, ProfileSHA256: p.ProfileSHA256}
+	if in.Protocol == AttentionClientProtocol {
+		p.Options.Protocol = "ocq-attention-handoff-v1"
+	}
 	return p, nil
 }
 
@@ -141,7 +146,7 @@ func PrepareProjectClient(dir string, raw []byte) (ClientPointer, error) {
 	if _, err := decodeStrictJSONObject(raw, 16<<10, &in); err != nil {
 		return ClientPointer{}, err
 	}
-	if in.Protocol != ClientProtocol || !isValidProjectID(in.ProjectID) || !workID(in.NavigationID) || in.Space == "" || len(in.Space) > 256 || strings.ContainsAny(in.Space, "\r\n\x00") || (in.TargetKind != "worker" && in.TargetKind != "integrator") || in.TargetKind == "worker" && !workID(in.WorkRequestID) || in.TargetKind == "integrator" && in.WorkRequestID != "" {
+	if (in.Protocol != ClientProtocol && in.Protocol != AttentionClientProtocol) || !isValidProjectID(in.ProjectID) || !workID(in.NavigationID) || in.Space == "" || len(in.Space) > 256 || strings.ContainsAny(in.Space, "\r\n\x00") || (in.TargetKind != "worker" && in.TargetKind != "integrator") || in.TargetKind == "worker" && !workID(in.WorkRequestID) || in.TargetKind == "integrator" && in.WorkRequestID != "" {
 		return ClientPointer{}, errors.New("invalid exact native client target")
 	}
 	j, err := openLocalJournal(dir, workJournal(in.ProjectID))
@@ -223,7 +228,7 @@ func loadClientPointer(r *Reader, j *os.File, project, digest string) (ClientPoi
 	if _, err = decodeStrictJSONObject(b, WorkResponseBytes, &p); err != nil {
 		return p, err
 	}
-	if p.Protocol != ClientProtocol || p.ProjectID != project || p.PointerSHA256 != digest || clientDigest(p) != digest || len(p.LauncherArgv) != 8 || p.LauncherArgv[2] != r.store.dir || p.LauncherArgv[7] != digest {
+	if (p.Protocol != ClientProtocol && p.Protocol != AttentionClientProtocol) || p.ProjectID != project || p.PointerSHA256 != digest || clientDigest(p) != digest || len(p.LauncherArgv) != 8 || p.LauncherArgv[2] != r.store.dir || p.LauncherArgv[7] != digest {
 		return p, errors.New("native pointer identity/content mismatch")
 	}
 	queue, store, err := r.WorkQueueContext()
@@ -237,7 +242,7 @@ func loadClientPointer(r *Reader, j *os.File, project, digest string) (ClientPoi
 }
 
 func verifyClientPointer(r *Reader, j *os.File, p ClientPointer) (nativeImages, string, error) {
-	in := ClientPrepareRequest{Protocol: ClientProtocol, ProjectID: p.ProjectID, NavigationID: p.NavigationID, TargetKind: p.TargetKind, WorkRequestID: p.WorkRequestID, Space: p.Space}
+	in := ClientPrepareRequest{Protocol: p.Protocol, ProjectID: p.ProjectID, NavigationID: p.NavigationID, TargetKind: p.TargetKind, WorkRequestID: p.WorkRequestID, Space: p.Space}
 	current, err := clientTarget(r, j, in)
 	if err != nil {
 		return nativeImages{}, "", err

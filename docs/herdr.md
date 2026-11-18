@@ -232,14 +232,20 @@ Main is the persistent conversation on the explicitly configured canonical
 primary checkout and branch. It is not a queue job, capacity owner, or ordinary
 workspace shell.
 
-Initial setup is server-local: use `ocq project main prepare` with an explicit
+The unreleased [complete operator workflow](operator-workflow.md) adds
+owner-registry-bound local setup and goal authoring. It requires explicit agent
+dispatch and native navigation capabilities; read-only observation and the
+historical UI gates are not full-workflow acceptance.
+
+The original server-local setup remains supported: use `ocq project main prepare` with an explicit
 canonical checkout, branch, Main profile file and **`--role-file`** for create
 or adopt. The role selection contains the exact implementation and independent
 review profiles, not inferred agent/model names. Preview and explicitly start
 the setup through the CLI before the newly registered project can appear here.
 See [project control plane](project-control-plane.md) for the full CLI contract.
 Subsequent server-prepared operations appear in the selected project's Operator
-view without copying IDs. The panel has no prompt/profile upload endpoint.
+view without copying IDs. The new authoring capability accepts typed goals and
+selection IDs, never profile uploads or arbitrary server paths.
 
 For a prepared operation, review all retained pages, including the complete
 `MainRoleContract`, exact profile mapping, disclosed instructions, input,
@@ -267,7 +273,7 @@ HC response stays unknown. Replaying that pointer never spawns another client.
 An explicitly new navigation intent can open one fresh inspection client.
 
 The packaged TUI-only extension uses an authenticated existing-session GET and
-the public router on OpenCode 2.3.0. It checks the exact session, directory,
+the public router on OpenCode 2.3.0 or 2.3.2. It checks the exact session, directory,
 project, metadata and current profile digests before navigation. It never uses
 `--session`, creates an absent target, sends a prompt or answers a permission.
 The core launcher pins the exact discovered server, preserves effective plugins,

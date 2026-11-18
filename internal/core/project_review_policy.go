@@ -9,12 +9,16 @@ import (
 	"github.com/ZanzyTHEbar/faults-go"
 )
 
-// OpenCode v2.2.6 and v2.3.0 evaluate agent rules before session rules, check the
+// OpenCode v2.2.6, v2.3.0 and v2.3.2 evaluate agent rules before session rules, check the
 // last matching configured rule, and do not let saved approvals override a deny.
 // v2.3.0 source: anomalyco/opencode@a6b15d33daf6ab7d35569f6d711fdb630b9f04e7,
 // packages/core/src/{permission.ts,session/context.ts,tool.ts}. The permission
 // evaluator is unchanged from v2.2.6; the catch-all session deny also disables
 // Code Mode, leaving only the explicitly allowed read/glob/grep tools.
+// v2.3.2 source: anomalyco/opencode@c0ad18b402eb2827fc1ee71c171b1177b3fc02d1,
+// same paths. Nested permission attribution and optional Code Mode background
+// execution changed, but configured-deny precedence and whole-tool suppression
+// did not; execute remains disabled by the static-review catch-all deny.
 // Other versions require source validation before they can use this gate.
 func verifyReviewerRuntime(directory, agent string, rules []permissionRule) error {
 	if err := validateReviewerPermissions(rules); err != nil {
@@ -30,8 +34,8 @@ func verifyReviewerRuntime(directory, agent string, rules []permissionRule) erro
 	var server struct {
 		Version string `json:"version"`
 	}
-	if err := json.Unmarshal(b, &server); err != nil || (server.Version != "2.2.6" && server.Version != "2.3.0") {
-		return diagnostic(faults.CodeConfigInvalid, "review policy requires source-validated OpenCode server version 2.2.6 or 2.3.0")
+	if err := json.Unmarshal(b, &server); err != nil || (server.Version != "2.2.6" && server.Version != "2.3.0" && server.Version != "2.3.2") {
+		return diagnostic(faults.CodeConfigInvalid, "review policy requires source-validated OpenCode server version 2.2.6, 2.3.0 or 2.3.2")
 	}
 	query := url.Values{"location[directory]": {directory}}
 	// Session creation stores a location reference; it does not initialize its
@@ -46,7 +50,7 @@ func verifyReviewerRuntime(directory, agent string, rules []permissionRule) erro
 	if err := json.Unmarshal(b, &location); err != nil || location.Directory != directory {
 		return diagnostic(faults.CodeRuntimeFailed, "review policy canonical location mismatch")
 	}
-	if server.Version == "2.3.0" {
+	if server.Version == "2.3.0" || server.Version == "2.3.2" {
 		// Pinned 2.3 starts Agent with an empty map and activates its plugins
 		// asynchronously. agent.get does not await activation; model.list does
 		// (server/handlers/model.ts and server/location.ts: awaitPlugins).

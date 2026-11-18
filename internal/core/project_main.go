@@ -60,6 +60,7 @@ type MainList struct {
 	ProjectID string       `json:"project_id"`
 	Items     []MainStatus `json:"items"`
 	Selected  *MainStatus  `json:"selected,omitempty"`
+	Goals     []GoalView   `json:"goals,omitempty"`
 }
 
 type MainPreview struct {

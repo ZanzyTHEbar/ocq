@@ -24,7 +24,7 @@ function mainStatus(value, project, operation) {
 }
 
 function pointer(value, scope) {
-  if (!object(value) || value.protocol !== "ocq-client-v1" || value.project_id !== scope.project || !hex(value.pointer_sha256) ||
+  if (!object(value) || !["ocq-client-v1", "ocq-attention-client-v1"].includes(value.protocol) || value.project_id !== scope.project || !hex(value.pointer_sha256) ||
     !id(value.navigation_id) || !["worker", "integrator"].includes(value.target_kind) || !sessionID(value.session_id) ||
     value.queue_identity !== scope.queue || value.store_context !== scope.store || !/^[a-z0-9]+$/.test(value.space || "") ||
     !decimal(value.binding_revision) || !hex(value.binding_sha256) ||
@@ -70,13 +70,23 @@ export class MainClientControls {
     const key = JSON.stringify(scope);
     if (key === this.scopeKey) return;
     this.suspend(); this.scopeKey = key; this.scope = scope;
-    this.mains = []; this.clients = []; this.selectedMain = null; this.operation = null; this.client = null; this.live = null;
+    this.mains = []; this.clients = []; this.goals = []; this.selectedMain = null; this.operation = null; this.client = null; this.live = null;
   }
   apply(scope, main, clients, cx) {
     this.sync(scope);
     if (main?.protocol !== "ocq-main-v1" || main.project_id !== scope.project || !Array.isArray(main.items) ||
       main.items.length > 128 || !Array.isArray(clients) || clients.length > 128) throw Error("Invalid separate Main/client observation");
     this.mains = main.items.map(item => mainStatus(item, scope.project));
+    this.goals = (main.goals || []).map(goal => {
+      if (goal.protocol !== "ocq-goal-lineage-v1" || goal.integration_authorized !== false ||
+        !Array.isArray(goal.links) || !Array.isArray(goal.work) || goal.work.length !== goal.links.length ||
+        goal.main?.project_id !== scope.project || goal.main.mode !== "send" ||
+        goal.links.some((link, i) => link.protocol !== goal.protocol || link.operation_id !== goal.main.operation_id ||
+          link.prompt_id !== goal.main.prompt_id || link.main_intent_sha256 !== goal.main.intent_sha256 ||
+          link.request_id !== goal.work[i]?.request_id || link.work_intent_sha256 !== goal.work[i]?.intent_sha256))
+        throw Error("Exact goal lineage unavailable");
+      return goal;
+    });
     this.selectedMain = main.selected ? mainStatus(main.selected, scope.project) : null;
     this.clients = clients.map(item => clientStatus(item, scope));
     if (new Set(this.mains.map(item => item.operation_id)).size !== this.mains.length ||
@@ -92,7 +102,7 @@ export class MainClientControls {
   async call(action, scope, target, contextual = false, tail = [], guard, hcBinding) {
     const bridge = compatibility.status;
     const positions = [...this.base(scope, target), ...(contextual ? this.context(scope, bridge) : []), ...tail];
-    const mutation = ["main-start", "client-prepare", "client-open"].includes(action);
+    const mutation = ["main-start", "client-prepare", "client-attention-prepare-v1", "client-open"].includes(action);
     const args = mutation ? [action, ...positions] : [action,
       ...(contextual ? ["--work-observation-context", scope.bridge] : []), "--", ...positions];
     const response = await bridgeCommand(args, { on: scope.machine, hcBinding, ...(guard ? { current: guard } : {}) });
@@ -188,12 +198,12 @@ export class MainClientControls {
     }); cx.notify();
   }
   navigationKey(scope, kind, work) { return JSON.stringify([scope.machine, scope.space, scope.queue, scope.project, kind, work]); }
-  prepareNavigation(kind, work, cx) {
+  prepareNavigation(kind, work, cx, attention = false) {
     const scope = this.work().bound;
     this.sync(scope);
     const generation = this.generation;
     if (!this.current(scope) || this.working || this.storageError || !compatibility.nativeReady()) return;
-    const key = this.navigationKey(scope, kind, work);
+    const key = this.navigationKey(scope, attention ? `attention-${kind}` : kind, work);
     const previous = this.navigations[key];
     const found = previous && this.clients.some(item => item.pointer.navigation_id === previous.id);
     // Unknown preparation reuses its saved ID. A NEW ID requires another
@@ -207,7 +217,7 @@ export class MainClientControls {
         await localStorage.flush();
         const authorization = await this.check(scope, generation);
         if (!this.authorized(authorization, scope, generation)) return;
-        const value = await this.call("client-prepare", scope, navigation.id, true, [kind, work], () => this.authorized(authorization, scope, generation));
+        const value = await this.call(attention ? "client-attention-prepare-v1" : "client-prepare", scope, navigation.id, true, [kind, work], () => this.authorized(authorization, scope, generation));
         if (!this.authorized(authorization, scope, generation)) return;
         pointer(value, scope);
         if (value.navigation_id !== navigation.id || value.target_kind !== kind || (value.work_request_id || "") !== work || value.space !== scope.space) throw Error("Different client target");
@@ -348,15 +358,28 @@ export class MainClientControls {
       .child(div().flex_1().font_semibold().child("Main"))
       .child(this.host.panelControl("ocq-main-details", this.showDetails ? "Hide details" : "Details",
         cx => { this.showDetails = !this.showDetails; cx.notify(); }, theme, this.host.renderTargets)));
-    if (this.showDetails) box.child(div().text_size(12).text_color(theme.muted).child("Persistent canonical-Main conversation, separate from workers and this terminal. Setup/profile/role are prepared on the server. Enter subsequent goals in Main."));
+    if (this.showDetails) box.child(div().text_size(12).text_color(theme.muted).child("Persistent Main in the canonical checkout, separate from workers. The composer sends one retained goal; Open Main shows the same conversation and human attention."));
     if (this.error) box.child(div().text_color(theme.blocked).child(this.error));
     if (this.storageError) box.child(div().text_color(theme.blocked).child("Private attempt evidence unavailable. Starts and client launches disabled."));
     const selected = this.selectedMain;
-    if (!selected) box.child(div().text_color(theme.muted).child("No Main linked. Set it up on the server for this project."));
+    box.child(this.host.workflow.render(cx, theme, button, selected));
+    for (const [index, goal] of (this.goals || []).entries()) {
+      box.child(div().text_size(12).child(`Goal ${index + 1} · ${goal.work.length ? "linked work" : "awaiting assignment"}`));
+      for (const stage of goal.work) {
+        const row = this.work().rows.find(item => item.request_id === stage.request_id && item.intent_sha256 === stage.intent_sha256);
+        if (row) box.child(button(`ocq-work-goal-${stage.request_id}`,
+          `${stage.kind.replace("_", " ")} · ${stage.job?.terminal_proven ? "terminal proven" : stage.job?.state || stage.state}`,
+          cx => this.work().choose(row, cx)));
+      }
+    }
+    if (!selected) box.child(div().text_color(theme.muted).child("Main will stay linked to this project."));
     else {
       box.child(div().text_size(12).text_color(theme.muted).child(`Linked · ${selected.state} (stored)`));
       if (this.showDetails) box.child(div().text_size(12).child(`Session: ${selected.session_id}\nCheckout: ${selected.repo}\nBranch: ${selected.main_branch}\nAnchor: ${selected.commit_anchor}\nStored state is not live completion proof.`));
-      if (!this.working) box.child(button("ocq-main-open", "Prepare new Main client", cx => this.prepareNavigation("integrator", "", cx)))
+      if (!this.working) box.child(button("ocq-main-open", "Open Main / history", cx => {
+        if (!this.host.nativeHC.approvedDigest()) { this.showClients = true; this.host.nativeHC.read(cx); }
+        else this.prepareNavigation("integrator", "", cx, true);
+      }))
         .child(button("ocq-main-observe", "Check Main", cx => this.recoverMain(selected, cx)));
     }
     if (!this.working && this.showDetails) for (const item of this.mains) box.child(button(`ocq-main-operation-${item.operation_id}`, `${item.mode} · ${item.operation_id} · ${item.state}`, cx => { this.suspend(); this.operation = item; cx.notify(); }));

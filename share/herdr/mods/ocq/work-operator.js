@@ -311,7 +311,7 @@ export class WorkOperator {
         this.host.openTarget("job", item.job.job_id, cx);
       }));
       if (!this.working && ["implementation", "review"].includes(item.kind) && item.job?.session_id)
-        add(button("ocq-client-worker-new", "Prepare new worker client", cx => this.host.mainClient.prepareNavigation("worker", item.request_id, cx)));
+        add(button("ocq-client-worker-new", "Open worker / attention", cx => this.host.mainClient.prepareNavigation("worker", item.request_id, cx, true)));
       if (item.result) add(button("ocq-work-result", "View result", cx => { this.suspend(); this.host.openTarget("manifest", item.result.manifest_digest, cx); }));
     }
     if (this.preview) {
@@ -342,6 +342,26 @@ export class WorkOperator {
     } else if (out.kind === "handoff") {
       add(div().text_color(theme.blocked).child(`${value.readiness} · integration NOT authorized`));
       add(div().text_size(12).text_color(theme.muted).child("Tests not run · linked historical evidence"));
+      let report;
+      try { report = JSON.parse(value.review_output?.text); } catch (_) {}
+      if (!keys(report, ["verdict", "findings", "limitations"]) ||
+          !["approved", "needs_revision", "unable_to_review"].includes(report.verdict) ||
+          !Array.isArray(report.findings) || !report.findings.every(finding =>
+            keys(finding, ["location", "severity", "message"]) &&
+            ["location", "message"].every(key => typeof finding[key] === "string" && finding[key].trim() !== "") &&
+            ["critical", "high", "medium", "low", "info"].includes(finding.severity)) ||
+          typeof report.limitations !== "string" || report.limitations.trim() === "") report = null;
+      if (report) {
+        add(div().child(`Verdict: ${report.verdict}`));
+        add(div().child(`Findings: ${report.findings.length ? report.findings.length : "none"}`));
+        for (const finding of report.findings)
+          add(div().child(`${finding.severity} · ${finding.location}\n${finding.message}`));
+      } else add(div().text_color(theme.blocked).child("Review report unavailable. Inspect Exact evidence."));
+      add(button("ocq-work-keep-separate", "Keep separate", cx => {
+        out.keptSeparate = true; cx.notify();
+      }));
+      if (out.keptSeparate) add(div().text_color(theme.muted).child("Work remains in its owned checkout. No integration was requested or authorized."));
+      if (report) add(div().child(`Limitations: ${report.limitations}`));
       for (const kind of ["implementation", "capture", "review", "review_result"]) {
         const linked = value[kind];
         add(div().child(`${kind}: ${linked.request_id}\n${linked.job?.job_id || linked.result?.association_id || linked.state}`));

@@ -35,8 +35,8 @@ func discoverNativeService(directory string) (nativeService, error) {
 		return nativeService{}, err
 	}
 	var info map[string]any
-	if json.Unmarshal(body, &info) != nil || info["version"] != "2.3.0" || info["pid"] != float64(reg.PID) || info["hostname"] == nil {
-		return nativeService{}, errors.New("native client requires source-validated OpenCode server 2.3.0 identity")
+	if json.Unmarshal(body, &info) != nil || info["version"] != reg.Version || info["pid"] != float64(reg.PID) || info["hostname"] == nil {
+		return nativeService{}, errors.New("native client requires matching source-validated OpenCode server 2.3.0 or 2.3.2 identity")
 	}
 	identity, _ := json.Marshal(map[string]any{"origin": reg.URL, "version": info["version"], "pid": info["pid"], "hostname": info["hostname"], "registration_id": reg.ID})
 	service.Identity = sha256Hex(identity)
@@ -74,7 +74,7 @@ func nativeCallContext(parent context.Context, directory string, service nativeS
 	return append([]byte(nil), out.Bytes()...), nil
 }
 
-// Official 2.3.0 api --data has no stdin/file form. Main inputs therefore use
+// Official 2.3.0/2.3.2 api --data has no stdin/file form. Main inputs therefore use
 // this bounded no-redirect, fresh-connection transport, AFTER the explicit CLI
 // GET verified the discovered origin/auth. Auth is selected from the exact
 // official managed registration or explicit inherited choice before transport.

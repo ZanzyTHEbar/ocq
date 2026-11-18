@@ -47,7 +47,9 @@ export default Plugin.define({
       message: "Exact session, role, ownership, profile, or location could not be verified. Return to the OCQ project and inspect its recorded handoff. Nothing was created, resumed, or sent by this plugin.",
       variant: "error", duration: 15000,
     });
-    if (context.app.version !== "2.3.0" || target.protocol !== "ocq-handoff-v1" ||
+    // Public router/plugin contract validated at official 2.3.2 commit
+    // c0ad18b402eb2827fc1ee71c171b1177b3fc02d1, not a semver range.
+    if (!["2.3.0", "2.3.2"].includes(context.app.version) || !["ocq-handoff-v1", "ocq-attention-handoff-v1"].includes(target.protocol) ||
       !/^ses_[A-Za-z0-9_-]{1,128}$/.test(target.session_id || "") ||
       !["worker", "integrator"].includes(target.target_kind) || !text(target.project_id, 128) ||
       (target.target_kind === "worker" ? !text(target.job_id, 128) :
@@ -66,12 +68,16 @@ export default Plugin.define({
       if (!matches(session, target) || context.ui.router.current().type !== "home") { fail(); return; }
       // This is the public router, NOT --session or an API creation fallback.
       // If the session disappears now, the native session view handles absence.
-      context.ui.router.navigate({ type: "session", sessionID: target.session_id });
+       context.ui.router.navigate({ type: "session", sessionID: target.session_id });
+       if (target.protocol === "ocq-attention-handoff-v1") {
+         const route = context.ui.router.current();
+         if (route.type !== "session" || route.sessionID !== target.session_id) { fail(); return; }
+       }
       context.ui.toast.show({
         title: target.target_kind === "worker" ? `OCQ job ${target.job_id}` : `Main / Integrator · ${target.project_id}`,
-        message: target.target_kind === "worker"
+        message: (target.protocol === "ocq-attention-handoff-v1" ? `Exact attention route: ${target.session_id}. ` : "") + (target.target_kind === "worker"
           ? "Inspect this bounded job and respond to human permission requests in OpenCode. Do not send steering prompts or change its execution profile. Navigation is not reconciliation, completion, validation, or integration approval."
-          : "Persistent Main conversation in the configured canonical checkout. Send subsequent goals here normally; Main coordinates bounded OCQ work, exact snapshot review and authorized integration. Opening this client does not submit a prompt or grant integration permission.",
+          : "Persistent Main conversation in the configured canonical checkout. Send subsequent goals here normally; Main coordinates bounded OCQ work, exact snapshot review and authorized integration. Opening this client does not submit a prompt or grant integration permission."),
         variant: "warning", duration: 15000,
       });
     } catch (_) { fail(); }

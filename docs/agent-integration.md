@@ -116,7 +116,7 @@ or tool payloads. Idle or CLI exit alone never releases ownership.
 ## Recovery
 
 Project reviews inspect the effective agent in the exact owned checkout before
-creating a session, and revalidate it before prompting. On source-pinned 2.3.0,
+creating a session, and revalidate it before prompting. On source-pinned 2.3.0/2.3.2,
 session creation does not initialize location services and the agent route can
 observe an empty catalog during asynchronous plugin activation. The gate resolves
 `GET /api/location` with the explicit directory, then uses the read-only
@@ -167,7 +167,7 @@ not forgery. A shared-server tool is not contained by the client's cgroup.
 General tool support, unattended agent supervision and complete project
 implementation-to-review execution are not end-to-end verified. The project
 static-review gate accepts only source-validated OpenCode server
-**2.2.6 or 2.3.0**; see [review constraints](project-control-plane.md#static-review).
+**2.2.6, 2.3.0 or 2.3.2**; see [review constraints](project-control-plane.md#static-review).
 Source compatibility is not live implementation-to-review execution validation.
 
 ## Main-conversation handoff
@@ -210,6 +210,6 @@ permissions/unknown ownership remain human attention—not permission to retry.
 The [native client launcher](project-control-plane.md#exact-native-client-navigation)
 opens verified existing targets only. Main bootstrap is the separate explicitly
 confirmed creation path. Main mutation bodies use the verified explicit-server
-origin/authentication in a bounded private HTTP request because OpenCode 2.3.0's
+origin/authentication in a bounded private HTTP request because OpenCode 2.3.0/2.3.2's
 `api --data` accepts argv text only. No prompt, permissions, token or credentials
 are put in argv; no service discovery/authentication settings are changed.

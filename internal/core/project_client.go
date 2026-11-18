@@ -2,6 +2,9 @@ package core
 
 const ClientProtocol = "ocq-client-v1"
 
+// Sibling navigation-only contract. Original idle inspection semantics stay frozen.
+const AttentionClientProtocol = "ocq-attention-client-v1"
+
 type ClientActionContext WorkActionContext
 
 type ClientPrepareRequest struct {

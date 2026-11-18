@@ -40,7 +40,9 @@ func modActions() map[string]string {
 	out := map[string]string{"mail-ack": "mail-ack-sequence-read-before-archive-v1"}
 	out["work-confirm"] = core.WorkProtocol
 	out["main-start"] = core.MainProtocol
+	out["main-author-v1"] = workflowProtocol + "/author"
 	out["client-prepare"] = core.ClientProtocol + "/prepare"
+	out["client-attention-prepare-v1"] = core.AttentionClientProtocol + "/prepare"
 	out["client-open"] = core.ClientProtocol + "/open"
 	out["capture-receipt-preview"] = "capture/recorded-receipt-preview/v1"
 	for family, ops := range families {
@@ -59,7 +61,7 @@ func modRead(action string) bool {
 		return true
 	}
 	switch action {
-	case "work-list", "work-status", "work-recover", "work-output", "work-handoff", "work-preview",
+	case "workflow-context", "workflow-goal", "work-list", "work-status", "work-recover", "work-output", "work-handoff", "work-preview",
 		"main-list", "main-status", "main-recover", "main-preview", "client-list", "client-status", "client-verify":
 		// Preview retains private authorization evidence, but never arms/submits.
 		return true
@@ -233,7 +235,7 @@ func installCompatibility(root *cobra.Command) {
 		if name == "work-confirm" && (len(a) != 9 || a[5] != folder || a[7] != image || workObservation != s.ObservationContext) {
 			return errors.New("work context differs from matched bridge")
 		}
-		if name == "main-start" || name == "client-prepare" || name == "client-open" {
+		if name == "main-author-v1" || name == "main-start" || name == "client-prepare" || name == "client-attention-prepare-v1" || name == "client-open" {
 			if len(a) < 8 || a[5] != folder || a[7] != image || workObservation != s.ObservationContext {
 				return errors.New("Main/client context differs from matched bridge")
 			}

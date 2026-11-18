@@ -77,7 +77,7 @@ func main() {
 	_, e = run(repo, *bin, "--state-dir", state, "list")
 	must(e)
 	profile := filepath.Join(*root, "main-profile.json")
-	must(os.WriteFile(profile, []byte(`{"role":"integrator","agent":"build","provider_id":"openai","model_id":"gpt-6.1-sol","variant":"","permissions":[{"action":"*","resource":"*","effect":"ask"}]}`), 0600))
+	must(os.WriteFile(profile, []byte(`{"role":"integrator","agent":"build","provider_id":"openai","model_id":"gpt-6.1-sol","variant":"default","permissions":[{"action":"*","resource":"*","effect":"ask"}]}`), 0600))
 	roleFile := filepath.Join(*root, "role-selection.json")
 	fixtureProfile := `{"agent":"fixture-explicit","provider_id":"fixture","model_id":"fixture","variant":"","memory_bytes":"1048576","permissions":[{"action":"*","resource":"*","effect":"ask"}]}`
 	roleBytes, e := json.Marshal(core.MainRoleSelection{Protocol: core.MainRoleProtocol, ImplementationProfile: fixtureProfile, ReviewProfile: fixtureProfile})

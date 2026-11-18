@@ -15,7 +15,7 @@ import (
 // Explicit user-invoked reads only. Projections still arrive by subscription.
 // No native launch, arbitrary executable, global flags or observation wait API.
 var pushReads = strings.Fields(`compatibility projects board job recent-inbox inbox mail recent-results results manifest verify-worktree
-hc-binding
+hc-binding workflow-context workflow-goal
 capture-receipt
 queue-jobs queue-job queue-log notifications notification
 dispatcher-context dispatcher-status dispatcher-read agent-reconcile-status agent-handoff-status agent-handoff-verify
@@ -38,7 +38,7 @@ func pushAction(name string) bool {
 	if strings.HasPrefix(name, "dispatcher-") && modActions()[name] != "" && name != "dispatcher-helper" {
 		return true
 	}
-	if name == "work-confirm" || name == "main-start" || name == "client-prepare" || name == "client-open" || name == "client-verify" || name == "mail-ack" {
+	if name == "main-author-v1" || name == "work-confirm" || name == "main-start" || name == "client-prepare" || name == "client-attention-prepare-v1" || name == "client-open" || name == "client-verify" || name == "mail-ack" {
 		return true
 	}
 	for _, family := range []string{"compose-", "intake-", "notification-ack-", "queued-cancel-", "command-resolve-", "agent-reconcile-", "command-submit-", "agent-submit-", "result-publish-", "capture-"} {
@@ -81,6 +81,9 @@ func (e *pushEndpoint) command(ctx context.Context, connection string, request j
 	if e.hc != nil {
 		ctx = context.WithValue(ctx, hcBindingKey{}, e.hc)
 	}
+	if e.workflow != nil {
+		ctx = context.WithValue(ctx, workflowKey{}, e.workflow)
+	}
 	if !e.allowActions && (name == "work-preview" || name == "main-preview") {
 		return reply
 	}
@@ -97,6 +100,7 @@ func (e *pushEndpoint) command(ctx context.Context, connection string, request j
 	root := bridgeRoot()
 	root.SetArgs(input.Args)
 	root.SetContext(ctx)
+	root.SetIn(strings.NewReader(""))
 	var output pushOutput
 	root.SetOut(&output)
 	root.SetErr(io.Discard)
@@ -124,6 +128,11 @@ func (e *pushEndpoint) command(ctx context.Context, connection string, request j
 		}
 	}
 	switch name {
+	case "main-author-v1":
+		if input.Payload == nil || len(*input.Payload) > 20<<10 {
+			return reply
+		}
+		root.SetIn(strings.NewReader(*input.Payload))
 	case "compose-receive", "compose-preview", "intake-receive-text", "intake-review-preview", "intake-registration-draft", "intake-implementation-draft", "intake-review-draft",
 		"command-resolve-receive", "command-resolve-preview",
 		"command-submit-draft", "command-submit-receive", "command-submit-preview", "agent-submit-draft", "agent-submit-import", "agent-submit-receive", "agent-submit-preview",

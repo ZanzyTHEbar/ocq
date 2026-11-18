@@ -20,7 +20,7 @@ var clientDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // HC 0.1.21 IDs use consonant/base-30 suffixes (e.g. t1b), not decimal.
 var nativeTerminalID = regexp.MustCompile(`^t[1-9][0-9bcdfghjkmnpqrstvwxyz]*$`)
 
-// No Main authoring/upload endpoint. Setup/profile/prompt files stay server-side.
+// Workflow authoring is a separate versioned, owner-registry-bound capability.
 func mainClientCommands() []*cobra.Command {
 	commands := []*cobra.Command{{Use: "hc-binding", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		b, _ := cmd.Context().Value(hcBindingKey{}).(*hcBinding)
@@ -34,14 +34,14 @@ func mainClientCommands() []*cobra.Command {
 		conn.Close()
 		return writeWork(cmd, map[string]any{"binding": b, "binding_sha256": b.digest(), "validation": "existing_socket_peer_and_core_verified", "launch": false})
 	}}}
-	for _, action := range []string{"main-list", "main-status", "main-recover", "main-preview", "main-start", "client-list", "client-status", "client-prepare", "client-open", "client-verify"} {
+	for _, action := range []string{"main-list", "main-status", "main-recover", "main-preview", "main-start", "client-list", "client-status", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify"} {
 		action := action
 		n, use := 3, action+" SPACE QUEUE PROJECT"
 		if action != "main-list" && action != "client-list" {
 			n++
 			use += " POINTER"
 		}
-		contextual := action == "main-preview" || action == "main-start" || action == "client-prepare" || action == "client-open" || action == "client-verify"
+		contextual := action == "main-preview" || action == "main-start" || action == "client-prepare" || action == "client-attention-prepare-v1" || action == "client-open" || action == "client-verify"
 		if contextual {
 			n += 4
 			use += " PEER FOLDER STORE BRIDGE_IMAGE"
@@ -50,7 +50,7 @@ func mainClientCommands() []*cobra.Command {
 			n++
 			use += " PREVIEW_SHA256"
 		}
-		if action == "client-prepare" {
+		if action == "client-prepare" || action == "client-attention-prepare-v1" {
 			n += 2
 			use += " worker|integrator WORK_REQUEST_OR_EMPTY"
 		}
@@ -97,12 +97,17 @@ func mainClientCommands() []*cobra.Command {
 			case "main-preview":
 				out, err = core.PreviewProjectMain(dir, a[2], a[3], core.MainActionContext(c))
 			case "main-start":
+				if registry, _ := cmd.Context().Value(workflowKey{}).(*workflowRegistry); registry != nil {
+					if _, err = registry.ready(cmd.Context(), dir); err != nil {
+						return err
+					}
+				}
 				out, err = core.StartProjectMain(dir, a[2], a[3], a[8], core.MainActionContext(c))
 			case "client-list":
 				out, err = core.ListProjectClients(dir, a[2])
 			case "client-status":
 				out, err = core.InspectProjectClient(dir, a[2], a[3])
-			case "client-prepare":
+			case "client-prepare", "client-attention-prepare-v1":
 				if a[8] != "integrator" && a[8] != "worker" || a[8] == "integrator" && a[9] != "" || a[8] == "worker" && !workPointer.MatchString(a[9]) {
 					return errors.New("exact client role/work pointer required")
 				}
@@ -115,7 +120,11 @@ func mainClientCommands() []*cobra.Command {
 				if e != nil || binding.RepoRoot != c.Folder {
 					return errors.New("native client selected project/folder changed")
 				}
-				raw, e := json.Marshal(core.ClientPrepareRequest{Protocol: core.ClientProtocol, ProjectID: a[2], NavigationID: a[3], TargetKind: a[8], WorkRequestID: a[9], Space: a[0]})
+				protocol := core.ClientProtocol
+				if action == "client-attention-prepare-v1" {
+					protocol = core.AttentionClientProtocol
+				}
+				raw, e := json.Marshal(core.ClientPrepareRequest{Protocol: protocol, ProjectID: a[2], NavigationID: a[3], TargetKind: a[8], WorkRequestID: a[9], Space: a[0]})
 				if e != nil {
 					return e
 				}
@@ -151,7 +160,7 @@ func mainClientCommands() []*cobra.Command {
 			commands[len(commands)-1].Flags().String("hc-binding-sha256", "", "Exact reviewed endpoint HC binding digest")
 		}
 	}
-	return commands
+	return append(commands, workflowCommands()...)
 }
 
 type nativeClientView struct {
