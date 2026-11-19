@@ -42,7 +42,7 @@
                 "header": { "content": { "mod": "pane" }, "height": 30, "position": "top", "reveal": "always" }
               } }
             },
-            { "id": "ocq-panel", "type": "block", "size": { "px": 360 }, "min": 280, "max": 900, "content": { "mod": "ocq" } },
+            { "id": "ocq-panel", "type": "block", "size": { "px": 360 }, "min": 0, "max": 900, "content": { "mod": "ocq" } },
             {
               "id": "panel", "type": "column", "hidden": true,
               "size": { "px": 368 }, "min": 280, "max": 900,

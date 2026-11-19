@@ -1,92 +1,12 @@
 #!/bin/sh
-# Explicitly install a personal Herdr layout; never modify a shipped layout.
+# Canonical personal installation; never modify a shipped layout or queue.
 set -eu
 umask 077
-
-if [ "$#" -ne 3 ] || [ "$3" != "--activate" ]; then
-  echo "usage: sh share/herdr/install.sh HERDR_APP_HOME HERDR_APP --activate" >&2
-  echo "Requires a running Herdr app 0.1.14, 0.1.15 or 0.1.16; switches it to a new personal ocq-workspace layout." >&2
+if [ "$#" -ne 3 ] || { [ "$3" != "--activate" ] && [ "$3" != "--plan" ]; }; then
+  echo "usage: sh share/herdr/install.sh HERDR_APP_HOME HERDR_APP --plan|--activate" >&2
   exit 2
 fi
-
-home=$1
-app=$2
-case "$home" in /*) ;; *) echo "HERDR_APP_HOME must be an absolute path" >&2; exit 2 ;; esac
+case "$1" in /*) ;; *) echo "HERDR_APP_HOME must be an absolute path" >&2; exit 2 ;; esac
 here=$(CDPATH= cd -P "$(dirname "$0")" && pwd -P)
-
-if [ ! -d "$home/mods" ] || [ ! -d "$home/layouts" ] || [ -L "$home/mods" ] || [ -L "$home/layouts" ]; then
-  echo "Start Herdr once with this app home first; mods and layouts must be real directories." >&2
-  exit 1
-fi
-case "$("$app" --version)" in
-  'herdr-app 0.1.14'|'herdr-app 0.1.15'|'herdr-app 0.1.16') ;;
-  *) echo "This personal layout is validated only with herdr-app 0.1.14, 0.1.15 or 0.1.16." >&2; exit 1 ;;
-esac
-if ! HERDR_APP_HOME="$home" "$app" status >/dev/null; then
-  echo "No running Herdr app found for the specified home; no files changed." >&2
-  exit 1
-fi
-mod="$home/mods/ocq"
-chrome="$home/mods/ocq-chrome"
-layout="$home/layouts/ocq-workspace.json"
-if [ -e "$mod" ] || [ -L "$mod" ] || [ -e "$chrome" ] || [ -L "$chrome" ] || [ -e "$layout" ] || [ -L "$layout" ]; then
-  echo "OCQ mod, personal chrome or ocq-workspace layout already exists; refusing to overwrite any." >&2
-  exit 1
-fi
-
-echo "Installing a trusted mod that discovers existing machine-local OCQ runtimes through Herdr."
-echo "The execution host needs a matched CLI/bridge/assets release; this installer does not start or configure its endpoint."
-echo "Matched mod contract: ocq-herdr-local-v1; runtime compatibility is checked read-only before mutations."
-echo "This installer does not upgrade/overwrite a live panel or quiesce old work. See docs/herdr.md before any upgrade."
-mkdir "$mod"
-cp "$here/mods/ocq/main.js" "$mod/main.js"
-cp "$here/mods/ocq/compatibility.js" "$mod/compatibility.js"
-cp "$here/mods/ocq/hc-binding.js" "$mod/hc-binding.js"
-cp "$here/mods/ocq/panel-state.js" "$mod/panel-state.js"
-cp "$here/mods/ocq/work-operator.js" "$mod/work-operator.js"
-cp "$here/mods/ocq/main-client.js" "$mod/main-client.js"
-cp "$here/mods/ocq/workflow.js" "$mod/workflow.js"
-cp "$here/mods/ocq/action-review.js" "$mod/action-review.js"
-cp "$here/mods/ocq/runtime-sources.js" "$mod/runtime-sources.js"
-cp "$here/mods/ocq/runtime-project.js" "$mod/runtime-project.js"
-cp "$here/mods/ocq/queue.js" "$mod/queue.js"
-cp "$here/mods/ocq/stored-updates.js" "$mod/stored-updates.js"
-cp "$here/mods/ocq/push-connection.js" "$mod/push-connection.js"
-cp "$here/mods/ocq/queued-cancel.js" "$mod/queued-cancel.js"
-cp "$here/mods/ocq/command-resolution.js" "$mod/command-resolution.js"
-cp "$here/mods/ocq/agent-reconcile.js" "$mod/agent-reconcile.js"
-cp "$here/mods/ocq/agent-handoff.js" "$mod/agent-handoff.js"
-cp "$here/mods/ocq/worktree-check.js" "$mod/worktree-check.js"
-cp "$here/mods/ocq/result-publication.js" "$mod/result-publication.js"
-cp "$here/mods/ocq/compose-controller.js" "$mod/compose-controller.js"
-cp "$here/mods/ocq/intake-controller.js" "$mod/intake-controller.js"
-cp "$here/mods/ocq/private-frames.js" "$mod/private-frames.js"
-cp "$here/mods/ocq/registration.js" "$mod/registration.js"
-cp "$here/mods/ocq/submission.js" "$mod/submission.js"
-cp "$here/mods/ocq/compose-form.js" "$mod/compose-form.js"
-cp "$here/mods/ocq/command-submission.js" "$mod/command-submission.js"
-cp "$here/mods/ocq/agent-submission.js" "$mod/agent-submission.js"
-cp "$here/mods/ocq/command-dispatcher.js" "$mod/command-dispatcher.js"
-cp "$here/mods/ocq/mod.json" "$mod/mod.json"
-mkdir "$chrome"
-cp "$here/mods/ocq-chrome/main.js" "$chrome/main.js"
-cp "$here/mods/ocq-chrome/mod.json" "$chrome/mod.json"
-cp "$here/mods/ocq-chrome/LICENSE" "$chrome/LICENSE"
-cp "$here/mods/ocq-chrome/NOTICE" "$chrome/NOTICE"
-if ! HERDR_APP_HOME="$home" "$app" check "$chrome"; then
-  echo "Personal chrome check failed; new directories retained for inspection." >&2
-  exit 1
-fi
-if ! HERDR_APP_HOME="$home" "$app" check "$mod"; then
-  echo "Mod check failed; the newly created mod directory was retained for inspection." >&2
-  exit 1
-fi
-if ! (set -C; cat "$here/layouts/ocq-workspace.json" > "$layout"); then
-  echo "Could not create the personal layout without overwriting; the new mod was retained." >&2
-  exit 1
-fi
-if ! HERDR_APP_HOME="$home" "$app" do layout.switch --name ocq-workspace; then
-  echo "Layout switch failed or its response was lost; inspect Herdr before retrying. Files were retained." >&2
-  exit 1
-fi
-echo "Requested the personal ocq-workspace layout. Verify it in Herdr; your previous layout is retained."
+command -v node >/dev/null 2>&1 || { echo "Node.js 18+ is required for structured, ownership-checked installation." >&2; exit 1; }
+exec node "$here/install.mjs" "$1" "$2" "$3"

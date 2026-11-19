@@ -35,10 +35,27 @@ It does not enable older remote submission or execution controls.
 
 ## Install
 
-The installer requires a running **herdr-app 0.1.14 or 0.1.15** and an initialized app home.
-It accepts only those exact versions, validates the mod, refuses to overwrite an existing
-OCQ mod, personal `ocq-chrome` mod or `ocq-workspace` layout, and requests activation of a separate personal
-layout. It does not merge or replace the previous layout.
+The installer requires a running **herdr-app 0.1.14, 0.1.15 or 0.1.16**,
+Node.js 18+ and an initialized app home. Node is used only by the one-shot
+installer for structured JSON ownership checks and exact pointer handling, not
+by the panel or a service.
+
+There is one canonical personal layout, **ocq-workspace**, using **ocq** and
+**ocq-chrome**. Always retire previous proven OCQ installations before publishing
+the replacement; do not create version-named visible layouts. The installer
+recognizes OCQ source graphs/chrome and actual layout references, not an `ocq*`
+name alone. It backs up their files privately in `APP_HOME/ocq-install-backups`,
+then removes old OCQ layout entries **before** installing the checked canonical
+replacement. Superseded inactive module assets leave `mods/` too. Non-OCQ
+layouts, data/localStorage namespaces, queues, sessions and user panes are never
+deleted. Unrecognized/conflicting ownership or live references hold the upgrade.
+Begin from a non-OCQ layout so no active OCQ namespace is replaced in place.
+Use the same command with `--plan` instead of `--activate` for a read-only exact
+retirement inventory before authorizing an upgrade.
+Historical inspection-only copies without the product graph require an explicit
+`OCQ_RETIRE_MOD_RECEIPT` JSON file: an array of exact `name` and `main_sha256`
+records from their owned installation receipts. A mismatched digest holds;
+these assets receive the same backup, inactive-reference and readback checks.
 
 The 0.1.15 compatibility check used the official Linux x86-64 app with HC 0.1.19
 in isolated native fixtures: module loading, stored selected-machine queue reads,
@@ -70,17 +87,29 @@ The display host additionally needs the matched configuration-only bootstrap at
 see [automatic association](push-transport.md#automatic-native-association).
 This does not replace or modify any Herdr binary.
 
-Supply the actual absolute app home if customized. If installation or the layout
-switch fails, inspect retained files and the window before retrying; the
-installer does not overwrite or clean up partial installation. Switch back with
-Herdr's layout controls.
+Supply the actual absolute app home if customized. If installation or the one
+public layout switch fails, inspect the private intent/backup/check receipts and
+the window before retrying; uncertain clone/switch commands are never retried
+automatically. Old files remain outside the visible layout/mod lists for recovery.
+Native module checks and a complete closed JS graph precede retirement; the
+canonical layout becomes visible only after installed module checks/readback.
+
+For a migration from an exact old mod namespace, supply `OCQ_POINTER_PIN`, a
+private JSON record with its exact `path`, `device`, `inode`, `uid`, `mode`,
+`size`, `file_sha256` and `value_sha256`. The installer checks this previously
+observed source identity and the exact
+`operator-workflow-pointers-v1` JSON-string value, carries it once into an absent
+canonical store, and reads it back. An existing canonical store must already
+contain the identical value; a mismatch holds rather than overwriting it.
+No nested JSON reserialization, scope remapping, preparation or execution occurs.
+Without this pin existing data namespaces are simply preserved.
 
 Update mod and bridge together. **Before upgrading, stop older panel/bridge
 processes and ensure no delayed old `compose-dispatch` can start later.** Older
 bridges do not require the durable claim; mixed versions are unsafe.
 For schema 5→6, also coordinate the CLI and dispatcher replacement before any
 newer writable queue open. Follow the [explicit upgrade sequence](command-core.md#state-and-upgrades);
-the installer refuses existing mod/layout overwrites and is not a queue migrator.
+the installer retires only inactive, recognized UI assets and is not a queue migrator.
 
 ## Which machine runs what?
 
@@ -213,6 +242,13 @@ width when hidden and remembers visibility per space. Enter/Space activates the
 toggle when its personal chrome is focused; the public `ocq-chrome.toggle`
 command is also available for a user-selected key binding. Installation does not
 edit global keys.
+
+Collapsing uses a native GPUI width transition (180 ms, ease-out) on the
+still-mounted OCQ view. Its actual size callbacks resize the host layout box;
+its existing content is clipped at its expanded width rather than reflowed or
+removed early. Only measured zero width may hide the layout node. Callbacks are
+fenced by request revision and active space, so reversing or changing spaces
+cannot let an old close hide a newly opened panel. No timer guesses completion.
 
 Collapsing does not stop Main, workers, or dispatch. One outstanding observation
 read may settle normally; the hidden panel does not renew it. Reopening retains
@@ -882,8 +918,9 @@ blocked; a closed panel or retained journal alone does not prove quiescence.
 Drain owned dispatchers and verify their actual terminal/resource exits. Preserve
 the queue, immutable receipts and journals. Only then arrange a matched bridge
 binary and mod release, reopen the panel in the intended context, and use the
-read-only compatibility recheck before authorizing new work. The installer still
-refuses to overwrite existing files; it does not perform upgrades or quiescing.
+read-only compatibility recheck before authorizing new work. The installer can
+replace inactive, recognized UI assets with private backups; it does not quiesce
+execution or migrate queues.
 
 A handshake does **not** lock an executable or environment. Replacement after
 checking can race native process launch (the helper's existing image check then

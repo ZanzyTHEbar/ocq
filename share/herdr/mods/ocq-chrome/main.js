@@ -65,20 +65,29 @@ export default class OCQChrome extends View {
     // Invalidate old confirmations synchronously, before layout/async updates.
     this.visibilityChanged();
     this.ocqShown = shown;
-    run(shown ? "layout.show" : "layout.hide", { id: "ocq-panel" });
+    const panel = find(layout(), "ocq-panel");
+    const prior = shared("ocq.panel.transition");
+    const width = prior && (prior.moving || !prior.shown) ? prior.width : panel?.size?.px > 0 ? panel.size.px : 360;
+    setShared("ocq.panel.transition", { space: this.ocqSpace, shown, width, moving: shown || !panel?.hidden, revision: shared("ocq.panel.epoch") });
+    // The panel's native width transition drives the host box from measured
+    // geometry. Keep it mounted until zero, including when the target reverses.
+    if (shown) {
+      if (panel?.hidden || panel?.size?.px === 0) run("layout.resize", { id: "ocq-panel", px: 1 });
+      run("layout.show", { id: "ocq-panel" });
+    }
   }
 
   syncOCQ(space, panel) {
     if (!space || !panel) return;
-    const shown = !panel.hidden;
+    const transition = shared("ocq.panel.transition");
+    const shown = transition?.space === space.id ? transition.shown : !panel.hidden;
     if (this.ocqSpace !== space.id) {
       const first = this.ocqSpace === undefined;
       this.ocqSpace = space.id;
       const saved = this.ocqPanels[space.id];
       // Keep Herdr's persisted layout on the first unrecorded space.
-      const want = typeof saved === "boolean" ? saved : first ? shown : true;
-      if (want !== shown) { this.showOCQ(want); return; }
-      this.ocqShown = shown;
+      const want = typeof saved === "boolean" ? saved : first ? !panel.hidden : true;
+      this.showOCQ(want); return;
     }
     if (this.ocqShown !== shown) { this.visibilityChanged(); this.ocqShown = shown; }
     if (this.ocqPanels[space.id] !== shown) {
@@ -91,9 +100,11 @@ export default class OCQChrome extends View {
     const panel = find(layout(), "ocq-panel");
     const space = spaces().find(item => item.active);
     if (!panel || !space) return;
-    this.ocqPanels[space.id] = panel.hidden;
+    this.syncOCQ(space, panel);
+    const shown = this.ocqShown ?? !panel.hidden;
+    this.ocqPanels[space.id] = !shown;
     localStorage.setItem("ocq-panels", JSON.stringify(this.ocqPanels));
-    this.showOCQ(panel.hidden);
+    this.showOCQ(!shown);
   }
 
   render() {
@@ -163,9 +174,9 @@ export default class OCQChrome extends View {
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
       .when(Boolean(ocq), el => el.child(h_flex().id("panel-ocq").role("button")
-        .accessibility_label(ocq?.hidden ? "Show OCQ panel" : "Hide OCQ panel")
+        .accessibility_label(this.ocqShown ? "Hide OCQ panel" : "Show OCQ panel")
         .h(26).px(8).gap(5).flex_none().items_center().rounded(6).text_size(12)
-        .bg(ocq?.hidden ? t.chrome : t.selected).text_color(ocq?.hidden ? t.muted : t.foreground)
+        .bg(this.ocqShown ? t.selected : t.chrome).text_color(this.ocqShown ? t.foreground : t.muted)
         .cursor_pointer().hover(s => s.bg(t.hover)).tooltip("Toggle OCQ panel · Enter or Space when focused")
         .on_mouse_down("left", stop).on_click((_event, cx) => { this.handle.focus(); this.toggleOCQ(); cx.notify(); })
         .child(svg("mods/workspace-chrome/sidebar.svg").size(14)).child("OCQ")))

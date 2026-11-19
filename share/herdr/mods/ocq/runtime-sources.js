@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex, ScrollHandle } from "gpui-base";
-import { machines, spaces, exec, hc, theme, checking, nextCommand } from "herdr";
+import { machines, spaces, exec, hc, theme, checking, nextCommand, shared, setShared, run, layout } from "herdr";
 import { createHash } from "crypto";
 import { Buffer } from "buffer";
 import { PushConnection } from "./push-connection.js";
@@ -302,6 +302,29 @@ export class RuntimeSources extends View {
     return region;
   }
   render(cx) {
+    const transition = shared("ocq.panel.transition");
+    const findPanel = node => node?.id === "ocq-panel" ? node : (node?.children || []).map(findPanel).find(Boolean);
+    const panel = findPanel(layout());
+    if (!transition || !panel) return this.renderContents(cx);
+    const space = spaces().find(s => s.active)?.id;
+    const moving = !!transition && transition.space === space && transition.moving;
+    const target = transition.shown === false ? 0 : moving ? transition.width : panel.size?.px ?? transition.width;
+    return v_flex().id("ocq-panel-motion").w(target).h_full().flex_none().min_w(0).min_h(0)
+      .overflow_hidden().transition("width", { duration: 180, easing: "ease-out" })
+      .child(v_flex().id(`ocq-panel-viewport-${transition?.revision ?? "open"}`).size_full().min_w(0).min_h(0)
+      .on_size_change(size => {
+        const current = shared("ocq.panel.transition");
+        if (!moving || !current?.moving || current.revision !== transition.revision || current.space !== space ||
+            spaces().find(s => s.active)?.id !== space) return;
+        run("layout.resize", { id: "ocq-panel", px: size.width });
+        if (size.width === target) {
+          if (!current.shown) run("layout.hide", { id: "ocq-panel" });
+          setShared("ocq.panel.transition", { ...current, moving: false });
+        }
+      })
+      .child(this.renderContents(cx).w(moving ? transition.width : target).flex_none()));
+  }
+  renderContents(cx) {
     const t = theme(), signature = JSON.stringify(machines());
     if (signature !== this.catalogSignature) {
       this.catalogSignature = signature;
