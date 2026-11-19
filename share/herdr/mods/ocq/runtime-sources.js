@@ -177,7 +177,7 @@ export class RuntimeSources extends View {
       const probe = async () => {
         while (queue.length && !this.closed) {
           const m = queue.shift(), expectedCore = m.name === null ? local?.id : remote.find(r => r.name === m.name)?.id;
-          const entry = { machine: m.name, state: "unavailable" }; this.catalog.set(m.name, entry);
+          const entry = { machine: m.name, expectedCore, state: "unavailable" }; this.catalog.set(m.name, entry);
           if (!expectedCore || m.layout !== "ready") { this.offline(m.name, "Herdr machine unavailable"); continue; }
           try {
             const result = await exec("ocq-herdr", ["runtime-discover", "--json"], { on: m.name, timeout: 5000 });
@@ -316,9 +316,27 @@ export class RuntimeSources extends View {
       this.button("ocq-all-"+name, text, task => { this.view = name; task.notify(); }, t).when(this.view === name, e => e.bg(t.hover).font_semibold()))));
     if (this.details) {
       const info = v_flex().px(12).max_h(180).overflow_y_scroll();
-      for (const entry of this.catalog.values()) info.child(div().text_size(12).child(`${title(entry.machine)} · ${entry.state}`));
-      for (const source of this.sources.values()) if (!source.online())
-        info.child(div().text_size(12).child(`${title(source.machine)} · connection unavailable; retained observations are stale`));
+      const groups = new Map();
+      const group = (core, machine) => {
+        const key = JSON.stringify(core ? ["core", core] : ["machine", machine]);
+        if (!groups.has(key)) groups.set(key, { core, names: new Set(), entries: [], sources: [] });
+        const value = groups.get(key);
+        value.names.add(title(machine));
+        return value;
+      };
+      for (const entry of this.catalog.values()) group(entry.expectedCore, entry.machine).entries.push(entry);
+      for (const source of this.sources.values()) group(source.runtime.core_id, source.machine).sources.push(source);
+      for (const value of groups.values()) {
+        info.child(div().text_size(12).font_semibold().child(
+          `${[...value.names].join(" / ")}${value.core ? ` · core ${value.core}` : ""}`));
+        for (const entry of value.entries) {
+          if (entry.state === "available" && value.sources.some(source => source.key === entry.key)) continue;
+          info.child(div().pl(12).text_size(12).child(`${title(entry.machine)} · ${entry.state}`));
+        }
+        for (const source of value.sources)
+          info.child(div().pl(12).text_size(12).child(
+            `Queue ${source.runtime.queue_identity} · ${source.online() ? "connected" : "connection unavailable; retained observations are stale"}`));
+      }
       if (this.catalogFault) info.child(div().text_color(t.blocked).child(this.catalogFault));
       root.child(info);
     }
