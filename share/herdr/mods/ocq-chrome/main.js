@@ -67,7 +67,9 @@ export default class OCQChrome extends View {
     this.ocqShown = shown;
     const panel = find(layout(), "ocq-panel");
     const prior = shared("ocq.panel.transition");
-    const width = prior?.space === this.ocqSpace && prior.width > 0 ? prior.width : panel?.size?.px > 0 ? panel.size.px : 360;
+    const reopening = prior?.space === this.ocqSpace && !prior.shown;
+    const width = reopening && prior.width > 0 ? prior.width : panel?.size?.px > 0 ? panel.size.px :
+      prior?.space === this.ocqSpace && prior.width > 0 ? prior.width : 360;
     setShared("ocq.panel.transition", { space: this.ocqSpace, shown, width, moving: shown || !panel?.hidden, revision: shared("ocq.panel.epoch") });
     // The panel's native width transition drives the host box from measured
     // geometry. Keep it mounted until zero, including when the target reverses.
@@ -75,7 +77,7 @@ export default class OCQChrome extends View {
       // A hidden panel may mount a fresh view with no previous width to tween
       // from. Give it its destination allocation; a 1px host can constrain the
       // viewport measurement to 1px forever, preventing transition completion.
-      if (panel?.hidden || panel?.size?.px === 0) run("layout.resize", { id: "ocq-panel", px: width });
+      if (panel?.hidden || panel?.size?.px === 0 || reopening) run("layout.resize", { id: "ocq-panel", px: width });
       run("layout.show", { id: "ocq-panel" });
     }
   }

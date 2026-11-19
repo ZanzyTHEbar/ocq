@@ -199,7 +199,7 @@ export class OperatorWorkflow {
   }
   render(cx, t, button, selectedMain = null) {
     const s = this.scope();
-    const box = v_flex().id("ocq-workflow").gap(6);
+    const box = v_flex().id("ocq-workflow").w_full().min_w(0).gap(6);
     if (!s) return box.child(div().text_color(t.muted).child("Project setup needs a verified connection to the owning runtime."));
     const formContext = JSON.stringify(s);
     if (this.formContext !== formContext) {
@@ -231,7 +231,7 @@ export class OperatorWorkflow {
       box.child(div().font_semibold().child("Set up Main"))
         .child(div().text_size(12).child(`Machine: ${s.machine ?? "This computer"}\nHerdr space: ${this.host.space?.name || s.space}\nRepository: ${ready.repo}\nBranch: ${ready.branch}${s.tab ? `\nTab: ${this.host.setupContext.tabName} · Terminal: ${s.terminal}` : ""}`))
         .child(div().child("Project name"))
-        .child(Input.new(this.label).id("ocq-workflow-label").accessibility_label("Project name").h(36).px(8).border_1().border_color(t.border).bg(t.input).text_color(t.foreground))
+        .child(Input.new(this.label).id("ocq-workflow-label").accessibility_label("Project name").w_full().min_w(0).h(36).px(8).border_1().border_color(t.border).bg(t.input).text_color(t.foreground))
         .child(div().text_size(12).text_color(t.muted).child("Configured roles are selected by default. Review setup, then explicitly confirm Create Main. Nothing launches while editing."))
         .child(button("ocq-main-workflow-advanced", this.advancedRoles ? "Hide Advanced" : "Advanced · roles", cx => { this.advancedRoles = !this.advancedRoles; cx.notify(); }));
       if (this.advancedRoles) for (const role of ["main", "implementation", "review"]) {
@@ -246,7 +246,7 @@ export class OperatorWorkflow {
         : button("ocq-main-workflow-review", "Review setup", cx => this.prepare(s.project ? "adopt" : "create", cx)));
       if (reason) box.child(div().text_size(12).text_color(t.muted).child(reason));
     } else {
-      box.child(Textarea.new(this.goal).id("ocq-workflow-goal").accessibility_label("Goal for Main").h(110));
+      box.child(Textarea.new(this.goal).id("ocq-workflow-goal").accessibility_label("Goal for Main").w_full().min_w(0).h(110));
       if (!this.busy && this.goal.value().trim()) box.child(button("ocq-main-goal-review", "Review goal", cx => this.prepare("send", cx)));
     }
     if (this.busy) box.child(div().text_color(t.muted).child("Checking retained operation…"));

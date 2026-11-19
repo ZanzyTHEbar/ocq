@@ -99,6 +99,7 @@ export class WorkOperator {
     this.cursor = { project_id: value.project_id, fingerprint: value.journal.fingerprint };
     this.readAt = value.journal.read_at; this.sqlRevision = revision; this.dirty = false;
     this.host.mainClient.apply(capture.scope, main, clients, cx);
+    this.host.followNavigation?.(cx);
     cx.notify();
   }
   hint(capture) {
@@ -265,50 +266,93 @@ export class WorkOperator {
     };
     const control = (id, text, action, label = text) => atItem(() => button(id, text, action, label));
     const disclosure = (id, text, action) => atItem(() => this.host.panelControl(id, text, action, theme, this.host.renderTargets));
-    const box = v_flex().id("ocq-work-operator").flex_1().min_h(0).overflow_y_scroll().track_scroll(this.scroll).gap(8).p(12);
+    const box = v_flex().id("ocq-work-operator").w_full().flex_1().min_w(0).min_h(0).overflow_y_scroll().track_scroll(this.scroll).gap(12).p(12);
     if (!this.bound) return box.child(div().text_color(theme.muted).child("Choose a project to see its tasks."));
     add(atItem(() => this.host.mainClient.render(cx, theme, control)));
-    add(div().pt(10).font_semibold().child("Tasks"));
+    add(div().pt(8).font_semibold().child("Workers"));
     if (!this.readAt) add(div().text_size(12).text_color(theme.muted).child("Reading prepared tasks…"));
     if (this.storageError) add(div().text_color(theme.blocked).child("Private client attempt evidence unavailable. Confirmations disabled."));
     if (this.error) add(div().text_color(theme.blocked).child(this.error));
     if (this.readAt && !this.rows.length) add(div().text_color(theme.muted).child("Tasks appear here when Main prepares work."));
-    const kindLabel = { implementation: "Work", capture: "Snapshot", review: "Review", review_result: "Handoff" };
+    const kindLabel = { implementation: "Implementation", capture: "Capture snapshot", review: "Independent review", review_result: "Record review result" };
     const stateLabel = { preparing: "Preparing", prepared: "Needs review", armed: "Claimed", uncertain: "Unknown", recorded_observed: "Recorded", blocked: "Blocked" };
-    for (const item of this.rows) {
+    for (const item of this.rows.filter(v => ["implementation", "review"].includes(v.kind))) {
+      const related = this.rows.filter(v => v.job?.job_id && v.job.job_id === item.job?.job_id);
+      const verdict = related.find(v => v.result?.verdict)?.result.verdict;
+      const status = item.job?.terminal_proven ? "Finished" : item.job?.state === "finished" ? "Outcome unproven" :
+        ({ running: "Running", launching: "Starting", queued: "Queued", unknown: "Needs attention" }[item.job?.state] || stateLabel[item.state]);
+      const index = items.length;
+      const card = v_flex().w_full().min_w(0).gap(6).p(10).border(1).border_color(theme.border).rounded(6)
+        .child(h_flex().min_w(0).items_center().gap(8)
+          .child(div().flex_1().min_w(0).font_semibold().child(kindLabel[item.kind]))
+          .child(div().text_size(12).text_color(["uncertain", "blocked"].includes(item.state) ? theme.blocked : theme.muted).child(status)))
+        .child(div().text_size(12).text_color(theme.muted).child(
+          verdict ? `Review ${verdict.replaceAll("_", " ")} · recorded` :
+          related.some(v => v.kind === "capture" && v.state === "recorded_observed") ? "Snapshot recorded · review is separate" :
+          item.job?.session_id ? "Owned conversation available" : "A worker conversation appears after admission"));
+      if (item.job?.session_id) card.child(this.host.panelControl(`ocq-open-worker-${item.request_id}`,
+        item.job.terminal_proven ? "Open worker history" : "Open worker",
+        task => {
+          this.choose(item, task);
+          this.scroll.scroll_to_item(index);
+          this.host.mainClient.openConversation("worker", item.request_id, task);
+        }, theme, this.host.renderTargets).font_semibold().bg(theme.hover));
+      else if (item.state === "prepared" && !this.storageError) card.child(control(`ocq-work-preview-${item.request_id}`,
+        "Review prepared task", task => { this.choose(item, task); this.previewRequest(task); }));
+      else if (["armed", "uncertain", "blocked"].includes(item.state)) card.child(this.host.panelControl(`ocq-work-recover-${item.request_id}`,
+        "Check retained receipt", task => { this.choose(item, task); this.recover(task); }, theme, this.host.renderTargets));
+      for (const recorded of related.filter(v => ["capture", "review_result"].includes(v.kind) && v.state === "recorded_observed"))
+        card.child(control(`ocq-work-recorded-${recorded.request_id}`, recorded.kind === "capture" ? "View snapshot record" : "View review handoff",
+          task => { this.choose(recorded, task); this.read(recorded.kind === "capture" ? "work-status" : "work-handoff", task); }));
+      card.child(disclosure(`ocq-worker-technical-${item.request_id}`,
+        this.selectedID === item.request_id && this.requestDetails ? "Hide technical details" : "Technical details",
+        task => {
+          if (this.selectedID !== item.request_id) { this.choose(item, task); this.requestDetails = true; }
+          else this.requestDetails = !this.requestDetails;
+          task.notify();
+        }).text_size(12));
+      add(card);
+      if (this.host.mainClient.navigationTarget?.kind === "worker" && this.host.mainClient.navigationTarget.work === item.request_id) {
+        if (this.host.mainClient.revealNavigation) { this.scroll.scroll_to_item(items.length); this.host.mainClient.revealNavigation = false; }
+        add(this.host.mainClient.renderNavigation(cx, theme, control));
+      }
+      if (item.request_id === this.selectedID && (this.requestDetails || ["prepared", "armed", "uncertain", "blocked"].includes(item.state)))
+        this.renderSelected(items, theme, control, disclosure);
+      if (related.some(v => v.request_id === this.selectedID && ["capture", "review_result"].includes(v.kind) && v.state === "recorded_observed"))
+        this.renderSelected(items, theme, control, disclosure);
+    }
+    const actions = this.rows.filter(v => !["implementation", "review"].includes(v.kind) && v.state !== "recorded_observed");
+    if (actions.length) add(div().pt(6).font_semibold().child("Next steps"));
+    for (const item of actions) {
       const label = `${kindLabel[item.kind]} · ${stateLabel[item.state]}`;
-      add(control(`ocq-work-select-${item.request_id}`, label, cx => this.choose(item, cx), `${label} · ${item.request_id}`)
-        .min_w(0).child(div().truncate().text_size(12).text_color(theme.muted).child(item.request_id))
+      add(control(`ocq-work-select-${item.request_id}`, label, cx => this.choose(item, cx))
+        .min_w(0)
         .when(item.request_id === this.selectedID, e => e.bg(theme.hover)));
       if (item.request_id === this.selectedID && this.selected)
         this.renderSelected(items, theme, control, disclosure);
     }
+    if (this.rows.length) add(div().text_size(12).text_color(theme.muted).child("Tests not run · integration requires a separate decision."));
     return box.children(items);
   }
   renderSelected(items, theme, button, disclosure) {
     const add = element => items.push(element);
     const item = this.selected;
-    add(div().font_semibold().child(item.request_id));
-    if (item.state === "recorded_observed") add(div().text_size(12).text_color(theme.muted).child("Recorded. Execution and validation are separate."));
-    if (item.job) {
-      add(div().child(`${item.job.state} · ${item.job.outcome || "no terminal outcome"}`));
-      add(div().text_size(12).text_color(theme.muted).child(`${item.job.terminal_proven ? "Terminal proof recorded" : "Completion not proven"} · Tests not run`));
-    }
+    if (item.kind === "capture" && item.state === "recorded_observed")
+      add(div().child("Snapshot recorded for this implementation. The retained association links its exact checkout; tests and integration remain separate."));
     if (this.attempted()) add(div().text_color(theme.blocked).child("A client confirmation attempt is retained. Use read-only exact recovery; no resend is offered, even if no server receipt exists."));
     if (this.revealSelected) { this.scroll.scroll_to_item(items.length); this.revealSelected = false; }
     if (!this.working) {
-      add(h_flex().gap(4)
-        .child(button("ocq-work-status", "Read status", cx => this.read("work-status", cx)))
-        .child(button("ocq-work-recover", "Check receipt", cx => this.recover(cx))));
-      if (item.job?.terminal_proven) add(button("ocq-work-output", "Read final output", cx => this.read("work-output", cx)));
-      if (["implementation", "review"].includes(item.kind) && item.job?.session_id)
-        add(button("ocq-client-worker-new", "Open worker / attention", cx => this.host.mainClient.openConversation("worker", item.request_id, cx)));
-      if (item.kind === "review_result" && item.state === "recorded_observed") add(button("ocq-work-handoff", "View handoff", cx => this.read("work-handoff", cx)));
+      if (this.requestDetails || ["armed", "uncertain", "blocked"].includes(item.state))
+        add(h_flex().gap(4)
+          .child(button("ocq-work-status", "Read exact status", cx => this.read("work-status", cx)))
+          .child(button("ocq-work-recover", "Check retained receipt", cx => this.recover(cx))));
+      if (this.requestDetails && item.job?.terminal_proven) add(button("ocq-work-output", "Read final output", cx => this.read("work-output", cx)));
+      if (this.requestDetails && item.kind === "review_result" && item.state === "recorded_observed") add(button("ocq-work-handoff", "View handoff", cx => this.read("work-handoff", cx)));
       if (item.state === "prepared" && !this.attempted() && !this.storageError && !this.preview)
         add(button("ocq-work-preview", "Review prepared task", cx => this.previewRequest(cx)));
     } else add(div().child("Reading/confirming exact pointer…"));
     if (this.output) this.renderOutput(items, theme, button, disclosure);
-    add(disclosure("ocq-read-work-details", this.requestDetails ? "Hide request details" : "Request details",
+    if (!["implementation", "review"].includes(item.kind)) add(disclosure("ocq-read-work-details", this.requestDetails ? "Hide technical details" : "Technical details",
       cx => { this.requestDetails = !this.requestDetails; cx.notify(); }));
     if (this.requestDetails) {
       add(div().text_size(12).text_color(theme.muted).child(`Request: ${item.request_id}\nState: ${item.state}\nBinding: ${item.binding_revision}\nIntent: ${item.intent_sha256}\nParent: ${item.parent_request_id || "none"}\nJournal: ${this.readAt || "not read"}\nFilesystem observation, separate from the SQLite snapshot.`));

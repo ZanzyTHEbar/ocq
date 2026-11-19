@@ -15,7 +15,8 @@ export class PrivateHCBinding {
     const h = this.host, u = h.updates, b = u.binding;
     if (h.closed || !h.panelCurrent() || !u.current() || !this.compatibility.machineReady() ||
         u.connection.state !== "connected" || !b) return null;
-    return JSON.stringify([u.scope, b, u.connectionID, u.connectionGeneration, u.bindingEpoch, this.compatibility.status?.image_sha256]);
+    return JSON.stringify([u.scope, b, u.connectionID, u.connectionGeneration, u.bindingEpoch,
+      this.compatibility.panelMarker, this.compatibility.status?.image_sha256]);
   }
   approvedDigest() {
     return this.approved && this.approved === this.review && this.approved.context === this.context()
@@ -23,7 +24,8 @@ export class PrivateHCBinding {
   }
   read(cx, onApproved = null) {
     const context = this.context();
-    if (!context || this.working) return;
+    if (!context) { this.error = "Verify the owning project connection before reviewing its terminal service."; cx.notify(); return false; }
+    if (this.working) return false;
     this.approved = null; this.review = null; this.working = true; this.error = null;
     cx.spawn(async cx => {
       try {
@@ -31,7 +33,7 @@ export class PrivateHCBinding {
         review.onApproved = onApproved;
       } catch (error) { if (context === this.context()) this.error = String(error.message || error); }
       finally { this.working = false; if (context === this.context()) cx.notify(); }
-    }); cx.notify();
+    }, { owner: this.host.root || this.host }); cx.notify(); return true;
   }
   async load(context = this.context()) {
         if (!context) throw Error("Current native backend context required");
@@ -56,9 +58,9 @@ export class PrivateHCBinding {
         this.review = { context, value, pages: this.host.workOperator.pagesFor(value), page: 0 };
         return this.review;
   }
-  render(cx, theme, button, box = v_flex().gap(6)) {
+  render(cx, theme, button, box = v_flex().w_full().min_w(0).gap(6)) {
     const review = this.review, current = review && review.context === this.context();
-    box.child(button("ocq-read-hc-binding", this.working ? "Reading private HC…" : "Read private HC binding", cx => this.read(cx)));
+    if (!current) box.child(button("ocq-read-hc-binding", this.working ? "Verifying terminal service…" : "Verify terminal service", cx => this.read(cx)));
     if (this.error) box.child(div().text_color(theme.blocked).child(this.error));
     if (review && !current) box.child(div().text_color(theme.blocked).child("HC review expired. Read and review this connection again."));
     if (!current) return box;

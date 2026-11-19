@@ -80,7 +80,7 @@ export class RuntimeProject {
   async initialize(cx) {
     if (!this.spaceID || !this.folder) return;
     const generation = this.source.generation;
-    this.verifyingRepository = true;
+    this.verifyingRepository = true; this.error = null;
     try {
       if (this.setupContext) {
         const repo = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: this.setupContext.cwd, on: this.machine, timeout: 5000 });
@@ -105,6 +105,27 @@ export class RuntimeProject {
     } catch (_) { if (this.panelCurrent() && generation === this.source.generation) this.error = "Cannot verify this terminal's repository. Choose a terminal in the intended repository; the space's launch folder is not used."; }
     finally { this.verifyingRepository = false; }
     cx.notify();
+  }
+  followNavigation(cx) {
+    const target = this.pendingNavigation;
+    if (!target || !this.spaceID || !this.workOperator.bound || !this.workOperator.readAt) return;
+    this.pendingNavigation = null;
+    if (!this.panelCurrent() || target.sourceGeneration !== this.source.generation) {
+      this.navigationError = "The runtime changed before navigation. Reopen this project to verify the conversation."; return;
+    }
+    if (target.kind === "worker") {
+      const worker = this.workOperator.rows.find(v => ["implementation", "review"].includes(v.kind) && v.job?.job_id === target.job);
+      if (!worker?.job?.session_id || target.session && worker.job.session_id !== target.session) {
+        this.navigationRecord = target.record;
+        this.navigationError = "This update has no verified worker conversation yet. Open Main for the project status; no session was guessed."; return;
+      }
+      this.workOperator.choose(worker, cx);
+      this.mainClient.openConversation("worker", worker.request_id, cx);
+    } else if (this.mainClient.selectedMain) this.mainClient.openConversation("integrator", "", cx);
+    else {
+      this.navigationRecord = target.record;
+      this.navigationError = "This project has no linked Main conversation. Its stored update is shown below; nothing was created.";
+    }
   }
   dispose() { this.closed = true; this.invalidate(); this.workOperator.scroll.release(); }
   resetObservationVersions() { this.invalidate(); }
@@ -163,14 +184,19 @@ export class RuntimeProject {
   }
   panelControl(id, text, action, t, targets = this.headerTargets) {
     const scope = this.navigationScope();
-    const run = task => { if (this.navigationCurrent(scope)) action(task); };
+    const run = task => {
+      if (this.navigationCurrent(scope)) action(task);
+      else { this.navigationError = "The project context changed. Reopen it before navigating."; task.notify(); }
+    };
     targets.push({ id, run });
     return div().id(id).role("button").accessibility_label(text).px(8).py(5).rounded(5).cursor_pointer()
       .hover(e => e.bg(t.hover)).on_click((_e, cx) => run(cx)).child(text);
   }
   render(cx, t) {
     this.renderTargets = []; this.headerTargets = [];
-    const box = v_flex().flex_1().min_h(0).gap(4);
+    const box = v_flex().w_full().flex_1().min_w(0).min_h(0).gap(4);
+    if (this.navigationError) box.child(div().px(12).text_color(t.blocked).child(this.navigationError));
+    if (this.navigationRecord) box.child(this.root.recordSummary(this.navigationRecord, t).px(12).max_h(240).overflow_y_scroll());
     const scope = this.navigationScope();
     const button = (id, text, action) => {
       const allowed = () => this.navigationCurrent(scope) && enabledButton(id, this.compatibility);
@@ -183,7 +209,7 @@ export class RuntimeProject {
     if (!this.spaceID) {
       const choices = projectSpaces(this.machine);
       box.child(div().p(12).child("Choose a terminal folder to verify for this project. Space names and launch folders are not repository identity."));
-      for (const s of choices) box.child(this.panelControl(`space-${s.id}-${s.setupContext.pane}`, `${this.machine ?? "This computer"} · ${s.name} · Tab ${s.setupContext.tabName}\n${s.folder}`, task => this.root.openProject(this.source, this.project, s, task), t));
+      for (const s of choices) box.child(this.panelControl(`space-${s.id}-${s.setupContext.pane}`, `${this.machine ?? "This computer"} · ${s.name} · Tab ${s.setupContext.tabName}\n${s.folder}`, task => this.root.openProject(this.source, this.project, s, task, this.pendingNavigation), t));
       if (!choices.length) box.child(div().p(12).text_color(t.muted).child("No live terminal folder is available. Open a terminal in the intended repository, then choose it here."));
       return box;
     }

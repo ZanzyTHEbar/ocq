@@ -77,7 +77,7 @@ class RuntimeSource {
       }
       catch (_) { if (capture.generation === this.connectionGeneration) await this.connection.disconnect(); }
       if (!this.disposed && !this.owner.closed) cx.notify();
-    });
+    }, { owner: this.owner });
   }
   message(frame, cx) {
     if (frame.connection_id !== this.connectionID) throw Error("Source connection changed");
@@ -240,12 +240,45 @@ export class RuntimeSources extends View {
       if (source?.machine === machine) { source.invalidate(reason); void source.connection.disconnect(); }
     }
   }
-  openProject(source, project, space, cx) {
+  openProject(source, project, space, cx, navigation = null) {
     if (!source.current()) return;
     this.detail?.dispose(); this.inspection = null;
     const matches = projectSpaces(source.machine).filter(s => s.folder === project?.repo_root);
     this.detail = new RuntimeProject(source, project, space || (matches.length === 1 ? matches[0] : null), cx);
+    this.detail.pendingNavigation = navigation;
     source.subscribe(true); cx.notify();
+  }
+  navigate(source, kind, item, cx) {
+    if (kind === "projects") { this.openProject(source, item, null, cx); return; }
+    const projects = item.project_ids || (item.project_id ? [item.project_id] : []);
+    const job = kind === "jobs" ? item.id : item.job_id;
+    const recorded = source.pages.jobs.items.find(v => v.id === job);
+    const navigation = job ? { kind: "worker", job, session: recorded?.recorded_session_id || "",
+      sourceGeneration: source.generation } : { kind: "integrator", sourceGeneration: source.generation };
+    navigation.record = { source, kind, item, generation: source.generation };
+    if (projects.length !== 1) {
+      this.inspection = { source, kind, item, navigation, generation: source.generation,
+        explanation: projects.length ? "Choose the associated project to open its conversation." :
+          "This record has no project conversation. It is a stored queue notification, not a session." };
+      cx.notify(); return;
+    }
+    const project = source.pages.projects.items.find(v => v.project_id === projects[0]);
+    if (project) { this.openProject(source, project, null, cx, navigation); return; }
+    const view = { source, kind, item, generation: source.generation, explanation: "Reading the associated project…" };
+    this.inspection = view; cx.notify();
+    cx.spawn(async task => {
+      try {
+        const response = await source.command(["board", projects[0]]);
+        if (this.inspection !== view || !source.online() || source.generation !== view.generation) return;
+        const board = response.code === 0 && JSON.parse(response.stdout);
+        if (board?.project?.project_id !== projects[0] || !board.project.current_binding?.repo_root)
+          throw Error("The associated project is unavailable.");
+        this.openProject(source, { ...board.project, repo_root: board.project.current_binding.repo_root }, null, task, navigation);
+      } catch (_) {
+        if (this.inspection === view) view.explanation = "The associated project could not be read. Check the owning runtime in Details; no session was guessed or created.";
+      }
+      task.notify();
+    });
   }
   back(cx) { const source = this.detail?.source; this.detail?.dispose(); this.detail = null; this.inspection = null; source?.subscribe(true); cx.notify(); }
   inspect(source, kind, item, cx) {
@@ -265,23 +298,50 @@ export class RuntimeSources extends View {
     cx.notify();
   }
   button(key, text, action, t) {
-    return div().id(key).role("button").accessibility_label(text).px(8).py(5).rounded(5).cursor_pointer()
+    return div().id(key).min_w(0).role("button").accessibility_label(text).px(8).py(5).rounded(5).cursor_pointer()
       .hover(e => e.bg(t.hover)).on_click((_e, cx) => action(cx)).child(text);
+  }
+  recordSummary(view, t) {
+    const item = view.item, mail = view.kind === "inbox";
+    const projectIDs = item.project_ids || (item.project_id ? [item.project_id] : []);
+    const projectNames = projectIDs.map(project =>
+      view.source.pages.projects.items.find(v => v.project_id === project)?.label || "Associated project");
+    const box = v_flex().w_full().min_w(0).gap(6)
+      .child(div().font_semibold().child(mail ? item.subject || "Project mail" : view.kind === "jobs" ? "Worker record" : "Worker update"))
+      .child(div().text_size(12).text_color(t.muted).child(
+        `${title(view.source.machine)} · ${projectNames.join(", ") || "No project association"}`));
+    if (mail) {
+      box.child(div().text_size(12).text_color(t.muted).child(
+        `${item.kind.replaceAll(".", " ")} · ${item.archived_at ? "Archived" : item.read_at ? "Read" : "Unread"}`));
+      if (item.body) box.child(div().child(item.body));
+      if (item.manifest_digest || item.assoc_id)
+        box.child(div().text_size(12).text_color(t.muted).child("Attached retained result · historical evidence, not test validation or integration authority."));
+      if (item.fsfork_path) box.child(div().text_size(12).text_color(t.muted).child("Linked owned checkout is retained."));
+    } else {
+      box.child(div().child(`Status: ${(item.state || "Stored").replaceAll("_", " ")}`));
+      if (item.outcome) box.child(div().child(`Outcome: ${item.outcome.replaceAll("_", " ")}`));
+      if (item.reason) box.child(div().child(item.reason));
+      if (item.exit_code !== null && item.exit_code !== undefined) box.child(div().text_size(12).child(`Exit code: ${item.exit_code}`));
+      if (item.validation) box.child(div().text_size(12).text_color(t.muted).child(`Validation: ${item.validation.replaceAll("_", " ")}`));
+    }
+    return box;
   }
   row(source, kind, item, t) {
     const entity = kind === "projects" ? item.project_id : item.id;
     const projects = kind === "projects" ? [item.project_id] : item.project_ids || (item.project_id ? [item.project_id] : []);
-    const labels = projects.map(p => source.pages.projects.items.find(v => v.project_id === p)?.label || p).join(", ") || "No project association";
-    const first = kind === "projects" ? item.label || item.project_id : kind === "inbox" ? item.subject : `${item.id} · ${item.state || item.outcome}`;
-    return v_flex().id(id(source.key, kind, entity)).py(3).border_b(1).border_color(t.border)
+    const labels = projects.map(p => source.pages.projects.items.find(v => v.project_id === p)?.label || "Associated project").join(", ") || "No project association";
+    const state = { finished: "Finished", running: "Running", queued: "Queued", launching: "Starting", unknown: "Needs attention", cancelled: "Cancelled" }[item.state] || "Stored update";
+    const first = kind === "projects" ? item.label || "Project" : kind === "inbox" ?
+      ({ "work.submitted": "Implementation ready for review", "review.submitted": "Review submitted", "lane.assigned": "Worker assigned" }[item.kind] || item.subject) :
+      `${kind === "jobs" ? `Worker ${item.sequence}` : "Worker update"} · ${state}`;
+    return v_flex().id(id(source.key, kind, entity)).w_full().min_w(0).py(3).border_b(1).border_color(t.border)
       .child(this.button(id(source.key, kind, entity, "open"), first, cx => {
-        if (kind === "projects") this.openProject(source, item, null, cx);
-        else this.inspect(source, kind, item, cx);
+        this.navigate(source, kind, item, cx);
       }, t))
       .child(div().px(8).text_size(12).text_color(t.muted).child(`${title(source.machine)} · ${labels}${source.online() && !source.pages[kind].error ? "" : " · stale"}`));
   }
   region(kind, heading, t) {
-    const region = v_flex().flex_1().min_h(0).gap(4).overflow_y_scroll()
+    const region = v_flex().w_full().flex_1().min_w(0).min_h(0).gap(4).overflow_y_scroll()
       .when(kind === "jobs", e => e.track_scroll(this.jobsScroll))
       .when(kind === "events", e => e.track_scroll(this.eventsScroll))
       .when(kind === "projects", e => e.track_scroll(this.workScroll))
@@ -317,27 +377,30 @@ export class RuntimeSources extends View {
     if (!transition || !panel) return this.renderContents(cx);
     const space = spaces().find(s => s.active)?.id;
     const moving = !!transition && transition.space === space && transition.moving;
-    const target = transition.shown === false ? 0 : transition.width;
-    return v_flex().id("ocq-panel-motion").w_full().when(moving, e => e.w(target)).h_full().flex_none().min_w(0).min_h(0)
-      .overflow_hidden().transition("width", { duration: 180, easing: "ease-out" })
+    const collapsing = moving && !transition.shown;
+    return v_flex().id("ocq-panel-motion").w_full().h_full().flex_none().min_w(0).min_h(0)
+      .overflow_hidden().when(collapsing, e => e.w(0).transition("width", { duration: 180, easing: "ease-out" }))
       .child(v_flex().id(`ocq-panel-viewport-${transition?.revision ?? "open"}`).size_full().min_w(0).min_h(0)
       .on_size_change(size => {
         const current = shared("ocq.panel.transition");
         if (!current || current.revision !== transition.revision || current.space !== space ||
             spaces().find(s => s.active)?.id !== space) return;
-        if (!current.moving) {
-          if (current.shown && size.width > 0 && current.width !== size.width)
-            setShared("ocq.panel.transition", { ...current, width: size.width });
+        if (current.shown) {
+          // Opening uses the actual host allocation. Logical pixels may be
+          // fractional after display scaling; equality with a requested integer
+          // must never pin an open panel in "moving" forever.
+          if (size.width > 0 && (current.moving || current.width !== size.width))
+            setShared("ocq.panel.transition", { ...current, moving: false, width: size.width });
           return;
         }
-        if (!moving) return;
+        if (!moving || !current.moving) return;
         run("layout.resize", { id: "ocq-panel", px: size.width });
-        if (size.width === target) {
-          if (!current.shown) run("layout.hide", { id: "ocq-panel" });
+        if (size.width === 0) {
+          run("layout.hide", { id: "ocq-panel" });
           setShared("ocq.panel.transition", { ...current, moving: false });
         }
       })
-      .child(this.renderContents(cx).w_full().when(moving && !transition.shown, e => e.w(transition.width)).flex_none()));
+      .child(this.renderContents(cx).w_full().when(collapsing, e => e.w(transition.width)).flex_none()));
   }
   renderContents(cx) {
     const t = theme(), signature = JSON.stringify(machines());
@@ -345,7 +408,7 @@ export class RuntimeSources extends View {
       this.catalogSignature = signature;
       if (this.cx && !checking()) { this.catalogTimer?.cancel(); cx.spawn(async task => this.discover(task)); }
     }
-    const root = v_flex().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13).track_focus(this.handle);
+    const root = v_flex().size_full().min_w(0).min_h(0).bg(t.background).text_color(t.foreground).text_size(13).track_focus(this.handle);
     root.child(h_flex().flex_none().px(8).py(4).items_center()
       .child(div().flex_1().font_semibold().child(this.detail ? `${title(this.detail.machine)} · ${this.detail.project?.label || "New project"}` : "All machines"))
       .child(this.button("ocq-all-details", this.details ? "Done" : "Details", task => { this.details = !this.details; task.notify(); }, t)));
@@ -405,12 +468,25 @@ export class RuntimeSources extends View {
     if (this.inspection) {
       const v = this.inspection;
       const projects = v.item.project_ids || (v.item.project_id ? [v.item.project_id] : []);
-      return root.child(v_flex().flex_1().min_h(0).overflow_y_scroll().p(12).gap(6)
-        .child(div().font_semibold().child(`${title(v.source.machine)} · ${v.kind === "events" ? "Notification" : v.kind === "inbox" ? "Project mail" : "Job"}`))
-        .child(div().text_size(12).child(projects.join(", ") || "No project association"))
-        .child(div().text_color(t.muted).child(v.source.online() && v.generation === v.source.generation ? "Stored observation · opening does not acknowledge" : "Stale observation · owning source unavailable or changed"))
-        .when(!!v.error, e => e.child(div().text_color(t.blocked).child(v.error)))
-        .child(div().child(JSON.stringify(v.detail || v.item, null, 2))));
+      const box = v_flex().flex_1().min_w(0).min_h(0).overflow_y_scroll().p(12).gap(8)
+        .child(this.recordSummary(v, t))
+        .child(div().child(v.explanation || "Stored update. Opening does not acknowledge this record."))
+        .child(div().text_size(12).text_color(t.muted).child(`${v.item.state || v.item.kind || "Notification"} · ${v.source.online() ? "Stored observation" : "Stale; owning source unavailable"}`));
+      for (const projectID of projects) {
+        const project = v.source.pages.projects.items.find(p => p.project_id === projectID);
+        if (project) box.child(this.button(id("notification-project", projectID), `Open ${project.label || "project"}`,
+          task => this.openProject(v.source, project, null, task, v.navigation || null), t));
+      }
+      if (v.error) box.child(div().text_color(t.blocked).child(v.error));
+      box.child(this.button("ocq-record-technical", v.technical ? "Hide technical details" : "Technical details",
+        task => {
+          if (!v.technical && !v.detail && v.source.online()) {
+            this.inspect(v.source, v.kind, v.item, task);
+            this.inspection.technical = true; this.inspection.explanation = v.explanation;
+          } else { v.technical = !v.technical; task.notify(); }
+        }, t));
+      if (v.technical) box.child(div().max_h(240).overflow_y_scroll().text_size(12).child(JSON.stringify(v.detail || v.item, null, 2)));
+      return root.child(box);
     }
     if (!this.sources.size) {
       const states = [...this.catalog.values()].map(e => e.state);
