@@ -171,8 +171,9 @@ In Herdr, select that project and open **Projects → Operator**:
    private review evidence, but does not arm, submit or publish anything.
    The preview includes the complete original input, exact payload, execution
    profile and ordered permissions, binding, and caller context.
-3. Read every retained-byte page, then review the confirmation and confirm the
-   exact pointer once. Only nonsecret IDs, digest and scope pins travel in argv;
+3. Review the readable task confirmation; full retained bytes are optional
+   **Technical details**, not mandatory pages. Confirm the exact pointer once.
+   Only nonsecret IDs, digest and scope pins travel in argv;
    task text, profiles, permissions and credentials do not.
 4. If the response is lost or refused, use **Recover exact server record /
    receipt**. Recovery only reads the exact record. A missing receipt does not
@@ -247,9 +248,10 @@ Subsequent server-prepared operations appear in the selected project's Operator
 view without copying IDs. The new authoring capability accepts typed goals and
 selection IDs, never profile uploads or arbitrary server paths.
 
-For a prepared operation, review all retained pages, including the complete
-`MainRoleContract`, exact profile mapping, disclosed instructions, input,
-session/registration/prompt bytes and scope pins. Explicit Start uses the frozen
+For a prepared operation, review one readable action confirmation. Advanced
+shows configured agents/models; optional Technical details retains the complete
+`MainRoleContract`, instructions, input, session/registration/prompt bytes and
+scope pins. No technical page-visit gate is required. Explicit Start uses the frozen
 preview once. Instruction installation, registration and optional first prompt
 have separate durable attempt fences. An uncertain response offers exact
 GET/receipt recovery, not prompt resend, replacement session or automatic

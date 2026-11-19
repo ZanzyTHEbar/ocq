@@ -82,8 +82,10 @@ Use rows and native text controls, not nested cards or invented diagrams.
   are presentation only. Recorded is not execution success.
 - **Main/clients:** short summary, technical identity/history disclosures. A new
   client remains explicitly new; an unverified route is never presented as bound.
-- **Confirmations:** preserve exact retained-byte review, page gates, original
-  context checks, uncertainty warnings and pointer-only final confirmation.
+- **Confirmations:** one readable action summary derived from exact retained
+  bytes, with optional Technical details and Advanced roles. No mandatory JSON
+  pages. Preserve original context checks, uncertainty handling and pointer-only
+  final confirmation.
 
 ## Do's and Don'ts
 

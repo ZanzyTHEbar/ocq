@@ -72,10 +72,12 @@ In a local Herdr space pointing at the canonical primary checkout:
 
 1. Open Work and choose **Set up project**. The server inspects the current branch;
    detached or linked worker checkouts are refused without changing Git.
-2. Name the project and choose Main, implementation and independent review from
-   the owner's configured selections. Review the retained setup, role instructions,
-   profiles and exact native backend, then **Create Main once**.
-3. Write one goal, review its retained bytes and **Start goal**. This sends one
+2. Name the project; configured Main, implementation and independent review roles
+   are selected by default and editable under **Advanced**. Review one readable
+   confirmation showing the project, machine, canonical repository and branch,
+   then **Create Main**. For a legacy bound project, **Adopt Main** refers only to
+   its exact bound session, never a session discovered by title.
+3. Write one goal, review its full goal text and **Start goal**. This sends one
    distinct Main input; opening history never resends it.
 4. Main uses the existing Work prepare/wait/capture/review/handoff commands.
    Goal links are explicit retained operation/request identities, not timestamp
@@ -88,6 +90,14 @@ In a local Herdr space pointing at the canonical primary checkout:
 
 Actual blockers or unknown ownership stop progression. A lost author/start/client
 response requires exact retained-record recovery, not another goal, Main or client.
+
+Setup, goal, task and session-opening confirmations retain the complete immutable
+preview, native binding, operation/session IDs and server hash checks. They do not
+require paging through JSON. **Technical details** optionally exposes the full
+retained evidence; the explicit action confirms the semantic view of those same
+bytes. Permissions remain human-controlled in OpenCode. Ordinary OpenCode
+sessions are not automatically OCQ projects or jobs; jobs appear after admission,
+and project mail after submitted work/review. Empty lists do not prove completion.
 
 ## Owner capability boundary
 

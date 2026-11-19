@@ -5,6 +5,7 @@ import { randomBytes } from "crypto";
 import { Buffer } from "buffer";
 import { bridgeCommand, compatibility } from "./compatibility.js";
 import { decimal } from "./stored-updates.js";
+import { mainAction, mainSummary, roleSummary, technicalDetails } from "./action-review.js";
 
 const hex = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const id = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
@@ -134,7 +135,7 @@ export class MainClientControls {
     if (kind === "client" && !this.host.nativeHC.approvedDigest()) throw Error("Review exact private HC first");
     this.review = { kind, value, scope, generation, pins: authorization.pins, hc,
       epoch: authorization.epoch, serial: authorization.serial,
-      pages: this.work().pagesFor(hc ? { client: value, hc_binding: hc.value } : value), page: 0, seen: new Set(), confirming: false };
+      pages: this.work().pagesFor(hc ? { client: value, hc_binding: hc.value } : value), page: 0, confirming: false };
   }
   pinned(review) {
     const currentBinding = this.host.board?.project?.current_binding;
@@ -200,6 +201,19 @@ export class MainClientControls {
     }); cx.notify();
   }
   navigationKey(scope, kind, work) { return JSON.stringify([scope.source ?? scope.machine, scope.space, scope.queue, scope.project, kind, work]); }
+  openConversation(kind, work, cx) {
+    const scope = this.work().bound;
+    this.sync(scope);
+    const generation = this.generation;
+    if (!this.current(scope) || this.working || !this.compatibility.workReady()) return;
+    if (this.host.nativeHC.approvedDigest()) this.prepareNavigation(kind, work, cx, true);
+    else {
+      this.showClients = true;
+      this.host.nativeHC.read(cx, task => {
+        if (this.current(scope, generation)) this.prepareNavigation(kind, work, task, true);
+      });
+    }
+  }
   prepareNavigation(kind, work, cx, attention = false) {
     const scope = this.work().bound;
     this.sync(scope);
@@ -248,14 +262,14 @@ export class MainClientControls {
           if (!this.authorized(authorization, scope, generation)) return;
           this.freeze("client", value, scope, generation, authorization);
         } else this.review = { kind: "client", value, scope, generation, readOnly: true,
-          pages: this.work().pagesFor(value), page: 0, seen: new Set() };
+          pages: this.work().pagesFor(value), page: 0 };
       } catch (_) { if (this.current(scope, generation)) this.error = "Exact navigation pointer unavailable; no client launched."; }
       finally { if (this.current(scope, generation)) { this.working = false; cx.notify(); } }
     }); cx.notify();
   }
   confirm(cx) {
     const review = this.review, scope = review?.scope;
-    if (!this.pinned(review) || this.working || this.storageError || !review.confirming || review.seen.size !== review.pages.length) return;
+    if (!this.pinned(review) || this.working || this.storageError || !review.confirming) return;
     const main = review.kind === "main", action = main ? "main-start" : "client-open";
     if (!main && review.value.state !== "ready_to_open") return;
     const target = main ? review.value.status.operation_id : review.value.pointer_sha256;
@@ -378,10 +392,7 @@ export class MainClientControls {
     else {
       box.child(div().text_size(12).text_color(theme.muted).child(`Linked · ${selected.state} (stored)`));
       if (this.showDetails) box.child(div().text_size(12).child(`Session: ${selected.session_id}\nCheckout: ${selected.repo}\nBranch: ${selected.main_branch}\nAnchor: ${selected.commit_anchor}\nStored state is not live completion proof.`));
-      if (!this.working) box.child(button("ocq-main-open", "Open Main / history", cx => {
-        if (!this.host.nativeHC.approvedDigest()) { this.showClients = true; this.host.nativeHC.read(cx); }
-        else this.prepareNavigation("integrator", "", cx, true);
-      }))
+      if (!this.working) box.child(button("ocq-main-open", "Open Main / history", cx => this.openConversation("integrator", "", cx)))
         .child(button("ocq-main-observe", "Check Main", cx => this.recoverMain(selected, cx)));
     }
     if (!this.working && this.showDetails) for (const item of this.mains) box.child(button(`ocq-main-operation-${item.operation_id}`, `${item.mode} · ${item.operation_id} · ${item.state}`, cx => { this.suspend(); this.operation = item; cx.notify(); }));
@@ -415,26 +426,28 @@ export class MainClientControls {
     }
     const review = this.review;
     if (review) {
-      review.seen.add(review.page);
-      box.child(div().font_semibold().child(`${review.kind === "main" ? "Main private-byte" : "Native client pointer"} review ${review.page + 1}/${review.pages.length}`));
-      box.child(div().child(review.pages[review.page]));
-      box.child(h_flex().gap(4)
-        .when(review.page > 0, el => el.child(button("ocq-main-review-previous", "Previous retained page", cx => { review.page--; cx.notify(); })))
-        .when(review.page < review.pages.length - 1, el => el.child(button("ocq-main-review-next", "Next retained page", cx => { review.page++; cx.notify(); }))));
+      if (review.kind === "main") {
+        box.child(mainSummary(review.value, review.scope.machine))
+          .child(button("ocq-main-review-roles", review.roles ? "Hide Advanced" : "Advanced · roles", cx => { review.roles = !review.roles; cx.notify(); }));
+        if (review.roles) box.child(roleSummary(review.value));
+      } else {
+        const p = review.value.pointer;
+        box.child(div().font_semibold().child(p.target_kind === "integrator" ? "Open Main" : "Open worker"))
+          .child(div().child(`Machine: ${review.scope.machine ?? "This computer"}\nRepository: ${p.cwd}\nSession: ${p.session_id}`))
+          .child(div().text_size(12).child("Open a client for this exact existing conversation. This does not send a prompt or approve permissions."));
+      }
       const action = review.kind === "main" ? "main-start" : "client-open";
       const target = review.kind === "main" ? review.value.status.operation_id : review.value.pointer_sha256;
       const allowed = review.kind === "main" || review.value.state === "ready_to_open";
       if (!this.pinned(review)) box.child(div().text_color(theme.blocked).child(review.readOnly
         ? "Stored record only. Review the private HC binding, then read a fresh pointer review before launch."
         : "Review authority suspended; inspect and review again."));
-      if (allowed && this.pinned(review) && !this.working && !this.storageError && !this.attempted(action, this.scope, target) && review.seen.size === review.pages.length) {
-        if (!review.confirming) box.child(button("ocq-main-review-complete", "All pages seen · review explicit action", cx => { if (this.pinned(review)) review.confirming = true; cx.notify(); }));
-        else box.child(div().text_color(theme.blocked).child(review.kind === "main"
-          ? "Start only this frozen Main operation? It may create/register Main or send its retained prompt once. No worker capacity or permission approval is granted."
-          : "Launch one ordinary inspection client for this exact pointer? The plugin verifies the existing target before selecting it; it never recreates a missing target. Unknown spawn outcome is not retried."))
-          .child(button("ocq-main-confirm-back", "Back without invoking", cx => { review.confirming = false; cx.notify(); }))
-          .child(button("ocq-main-confirm-once", review.kind === "main" ? "Start exact Main operation once" : "Open this inspection client once", cx => this.confirm(cx)));
+      if (allowed && this.pinned(review) && !this.working && !this.storageError && !this.attempted(action, this.scope, target)) {
+        box.child(button("ocq-main-confirm-once", review.kind === "main" ? mainAction(review.value.status.mode) : "Open conversation", cx => {
+          if (this.pinned(review)) { review.confirming = true; this.confirm(cx); }
+        }));
       }
+      box.child(technicalDetails(review, button, "ocq-main-review"));
       if (review.kind === "client" && this.attempted(action, this.scope, target)) box.child(div().text_color(theme.blocked).child("Client launch may have been invoked. Only exact stored receipt recovery or observation is offered, never a second spawn for this pointer."));
     }
     return box;

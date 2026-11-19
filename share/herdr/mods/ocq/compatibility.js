@@ -170,8 +170,8 @@ export function enabledButton(id, context = legacyCompatibility) {
   // Reading/recovery never borrows mutation readiness, including after an
   // uncertain attempt reconnects to a default read-only endpoint.
   if (readButtons.has(id) || id.startsWith("ocq-result-check-") || id.startsWith("ocq-client-record-")) return true;
-  if (id === "ocq-main-open") return compatibility.workReady();
-  if (id === "ocq-client-worker-new" || /^ocq-(client-(open|verify|show)|dispatch-)/.test(id)) return compatibility.nativeReady();
+  if (id === "ocq-main-open" || id === "ocq-client-worker-new") return compatibility.workReady();
+  if (/^ocq-(client-(open|verify|show)|dispatch-)/.test(id)) return compatibility.nativeReady();
   if (compatibility.ready() || compatibility.workReady() && /^(ocq-work-|ocq-main-|ocq-client-prepare)/.test(id)) return true;
   return ["ocq-work-select-", "ocq-project-job-", "ocq-queue-job-", "ocq-queue-event-",
     "ocq-log-", "ocq-project-", "ocq-lane-", "ocq-read-", "ocq-attachment-", "ocq-result-manifest-", "ocq-page-"].some(p => id.startsWith(p));

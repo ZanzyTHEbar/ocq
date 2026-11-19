@@ -3,6 +3,7 @@ import { v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { randomBytes } from "crypto";
 import { Buffer } from "buffer";
 import { bridgeCommand, compatibility } from "./compatibility.js";
+import { mainAction, mainSummary, roleSummary, technicalDetails } from "./action-review.js";
 
 const protocol = "ocq-operator-workflow-v1";
 const hex = value => /^[0-9a-f]{64}$/.test(value || "");
@@ -59,7 +60,16 @@ export class OperatorWorkflow {
     this.busy = true; this.error = null;
     cx.spawn(async cx => {
       try { await action(scope, cx); }
-      catch (_) { if (this.current(scope)) this.error = "Operation unavailable or uncertain. Check the retained operation; do not resend."; }
+      catch (_) {
+        if (this.current(scope)) {
+          const record = this.saved?.[this.key(scope)];
+          this.error = record?.phase === "start_attempted"
+            ? "Start outcome uncertain. Check the saved operation; do not submit it again."
+            : record?.phase === "author_uncertain"
+              ? "Preparation outcome uncertain. Check the saved operation before continuing."
+              : "Could not verify setup. Nothing was started; check setup and review again.";
+        }
+      }
       finally { this.busy = false; cx.notify(); }
     }); cx.notify();
   }
@@ -131,7 +141,7 @@ export class OperatorWorkflow {
     const hc = await this.host.nativeHC.load();
     if (!this.current(s) || epoch !== this.compatibility.epoch || serial !== this.compatibility.serial || pin(this.compatibility.status) !== pins) throw Error("Native review context changed");
     this.review = { scope: s, record, value, epoch, serial, pins, hc,
-      pages: this.host.workOperator.pagesFor({ main: value, native_backend: hc.value }), page: 0, seen: new Set() };
+      pages: this.host.workOperator.pagesFor({ main: value, native_backend: hc.value }), page: 0 };
   }
   pinned(r) {
     return r && this.review === r && this.current(r.scope) && this.compatibility.workReady() &&
@@ -140,7 +150,7 @@ export class OperatorWorkflow {
   }
   start(cx) {
     const review = this.review;
-    if (!this.pinned(review) || review.seen.size !== review.pages.length || review.record.phase !== "prepared") return;
+    if (!this.pinned(review) || review.record.phase !== "prepared") return;
     this.run(cx, async s => {
       const record = review.record;
       // Server rechecks actual capabilities too. No stale readiness can authorize
@@ -148,8 +158,8 @@ export class OperatorWorkflow {
       const ready = await this.readiness(s);
       if (!ready.ready || !this.pinned(review)) return;
       if (review.hc !== this.host.nativeHC.review || review.hc.context !== this.host.nativeHC.context()) throw Error("Reviewed native backend changed");
-      // The explicit Create/Start confirms the backend bytes in the SAME full
-      // retained review. This approves navigation identity, never permissions.
+      // The explicit action confirms the semantic view of these SAME frozen
+      // bytes and backend identity, never permissions.
       this.host.nativeHC.approved = review.hc;
       record.phase = "start_attempted"; await this.persist();
       if (!this.pinned(review)) {
@@ -205,7 +215,10 @@ export class OperatorWorkflow {
     if (!record && !ready.ready) return box.child(div().text_color(t.blocked).child(ready.reason))
       .child(button("ocq-main-workflow-check", "Check setup", cx => this.open(cx)));
     if (record) {
-      box.child(div().child(status ? `${status.mode} · ${status.state}` : "Retained operation"));
+      box.child(div().child(status ? `${mainAction(status.mode)} · ${status.state}` : "Prepared operation saved"))
+        .child(div().text_size(12).text_color(t.muted).child(record.phase === "prepared"
+          ? "Review this saved action below. Nothing has started."
+          : "Check this saved action before continuing. Do not submit it again."));
       if (!this.busy) box.child(button("ocq-main-workflow-recover", "Check retained operation", cx => this.recover(cx)));
       if (status && ["ready", "busy", "prompt_pending"].includes(status.state) && record.phase === "start_attempted") {
         box.child(button("ocq-main-workflow-return", "Return to Main", cx => {
@@ -239,14 +252,12 @@ export class OperatorWorkflow {
     if (this.busy) box.child(div().text_color(t.muted).child("Checking retained operation…"));
     const review = this.review;
     if (review && this.pinned(review)) {
-      review.seen.add(review.page);
-      box.child(div().font_semibold().child(`Review ${review.record.mode === "send" ? "goal" : "setup"} · ${review.page + 1}/${review.pages.length}`))
-        .child(div().child(review.pages[review.page]));
-      if (!this.busy && review.page > 0) box.child(button("ocq-main-workflow-previous", "Previous", cx => { review.page--; cx.notify(); }));
-      if (!this.busy && review.page < review.pages.length - 1) box.child(button("ocq-main-workflow-next", "Next", cx => { review.page++; cx.notify(); }));
-      if (!this.busy && review.seen.size === review.pages.length && record?.phase === "prepared")
-        box.child(div().text_size(12).text_color(t.muted).child("One retained operation. Human permissions stay in OpenCode; integration is not authorized."))
-          .child(button("ocq-main-workflow-start", review.record.mode === "send" ? "Start goal" : review.record.mode === "adopt" ? "Adopt existing Main once" : "Create Main once", cx => this.start(cx)));
+      box.child(mainSummary(review.value, s.machine))
+        .child(button("ocq-main-workflow-roles", review.roles ? "Hide Advanced" : "Advanced · roles", cx => { review.roles = !review.roles; cx.notify(); }));
+      if (review.roles) box.child(roleSummary(review.value));
+      if (!this.busy && record?.phase === "prepared")
+        box.child(button("ocq-main-workflow-start", mainAction(review.record.mode), cx => this.start(cx)));
+      box.child(technicalDetails(review, button, "ocq-main-workflow"));
     }
     return box;
   }

@@ -4,6 +4,7 @@ import { Buffer } from "buffer";
 import { createHash } from "crypto";
 import { bridgeCommand, compatibility } from "./compatibility.js";
 import { decimal } from "./stored-updates.js";
+import { technicalDetails } from "./action-review.js";
 
 const protocol = "ocq-work-v1";
 const hex = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
@@ -159,7 +160,11 @@ export class WorkOperator {
           c.queue_identity !== scope.queue || c.store_context !== scope.store || c.image_sha256 !== bridge.image_sha256 || c.image_role !== "bridge" || c.action !== "confirm" ||
           value.binding?.project_id !== scope.project || value.binding.repo_root !== scope.folder ||
           String(value.binding.revision) !== value.status.binding_revision) throw Error("Preview did not match exact request/context");
-        this.preview = value; this.pages = this.pagesFor(value); this.page = 0; this.seen = new Set();
+        const input = JSON.parse(value.input_json);
+        this.summary = { input, profile: input.profile ? JSON.parse(input.profile) : null,
+          report: value.status.kind === "review_result" ? JSON.parse(JSON.parse(value.payload).manifest) : null };
+        this.preview = value; this.pages = this.pagesFor(value);
+        this.reviewDetails = { pages: this.pages, page: 0 };
         this.reviewScope = { scope, generation, serial, epoch, pins: pins(bridge) };
       } catch (_) {
         if (this.current(scope) && this.generation === generation) this.error = "Preview/context unavailable. Nothing confirmed. Private preview evidence may be retained on the server.";
@@ -202,8 +207,7 @@ export class WorkOperator {
   }
   confirm(cx) {
     const preview = this.preview, scope = this.bound;
-    if (this.working || !preview || !this.confirming || !this.pinned() || this.attempted() ||
-      this.storageError || this.seen.size !== this.pages.length) return;
+    if (this.working || !preview || !this.confirming || !this.pinned() || this.attempted() || this.storageError) return;
     // Retain only nonsecret pointers BEFORE invoking the transport. A missing
     // server receipt does not undo this client uncertainty marker.
     const key = this.attemptKey(scope, this.selected);
@@ -297,6 +301,8 @@ export class WorkOperator {
         .child(button("ocq-work-status", "Read status", cx => this.read("work-status", cx)))
         .child(button("ocq-work-recover", "Check receipt", cx => this.recover(cx))));
       if (item.job?.terminal_proven) add(button("ocq-work-output", "Read final output", cx => this.read("work-output", cx)));
+      if (["implementation", "review"].includes(item.kind) && item.job?.session_id)
+        add(button("ocq-client-worker-new", "Open worker / attention", cx => this.host.mainClient.openConversation("worker", item.request_id, cx)));
       if (item.kind === "review_result" && item.state === "recorded_observed") add(button("ocq-work-handoff", "View handoff", cx => this.read("work-handoff", cx)));
       if (item.state === "prepared" && !this.attempted() && !this.storageError && !this.preview)
         add(button("ocq-work-preview", "Review prepared task", cx => this.previewRequest(cx)));
@@ -312,26 +318,44 @@ export class WorkOperator {
         if (this.host.detailJob !== item.job.job_id) this.host.inspect(item.job.job_id, cx);
         this.host.openTarget("job", item.job.job_id, cx);
       }));
-      if (!this.working && ["implementation", "review"].includes(item.kind) && item.job?.session_id)
-        add(button("ocq-client-worker-new", "Open worker / attention", cx => this.host.mainClient.prepareNavigation("worker", item.request_id, cx, true)));
       if (item.result) add(button("ocq-work-result", "View result", cx => { this.suspend(); this.host.openTarget("manifest", item.result.manifest_digest, cx); }));
     }
     if (this.preview) {
       const valid = this.pinned();
       if (!valid) add(div().text_color(theme.blocked).child("Preview authority suspended. Read status, then review afresh."));
-      this.seen.add(this.page);
-      add(div().font_semibold().child(`Retained-byte review ${this.page + 1}/${this.pages.length}`));
-      add(div().text_size(12).child("Full escaped JSON, including original input, exact payload, profile/ordered permissions, binding and caller context. Preview retains private evidence; it does not submit."));
-      add(div().child(this.pages[this.page]));
-      add(h_flex().gap(4)
-        .when(this.page > 0, el => el.child(button("ocq-work-review-previous", "Previous page", cx => { this.page--; cx.notify(); })))
-        .when(this.page < this.pages.length - 1, el => el.child(button("ocq-work-review-next", "Next retained page", cx => { this.page++; cx.notify(); }))));
-      if (valid && !this.working && this.seen.size === this.pages.length) {
-        if (!this.confirming) add(button("ocq-work-review-complete", "All pages seen · review confirmation", cx => { if (this.pinned()) this.confirming = true; cx.notify(); }));
-        else add(div().text_color(theme.blocked).child(`Confirm ${this.preview.status.request_id} exactly once?\nPreview SHA-256: ${this.preview.preview_sha256}\nAn active dispatcher may execute an admitted job. A timeout is UNKNOWN, never permission to retry.`)
-          .child(button("ocq-work-confirm-back", "Back without confirming", cx => { this.confirming = false; cx.notify(); }))
-          .child(button("ocq-work-confirm-once", "Confirm exact pointer once", cx => this.confirm(cx))));
+      const { input, profile, report } = this.summary;
+      const action = { implementation: "Start implementation", capture: "Capture snapshot", review: "Start independent review", review_result: "Record review result" }[item.kind];
+      add(div().font_semibold().child(action));
+      add(div().child(`Project: ${this.bound.project}\nMachine: ${this.bound.machine ?? "This computer"}\nRepository: ${this.bound.folder}\nRequest: ${item.request_id}${item.parent_request_id ? `\nBased on: ${item.parent_request_id}` : ""}`));
+      if (input.brief) add(div().child(input.brief));
+      if (input.criteria) add(div().child(`Review criteria\n${input.criteria}`));
+      if (input.rules) add(div().child(`Review rules\n${input.rules}`));
+      if (report) {
+        add(div().child(`Verdict: ${report.verdict}`));
+        for (const finding of report.findings || []) add(div().child(`${finding.severity} · ${finding.location}\n${finding.message}`));
+        if (report.limitations) add(div().child(`Limitations: ${report.limitations}`));
       }
+      add(div().text_size(12).child({
+        implementation: "Run the supplied brief in an owned worktree. Snapshot, independent review, and handoff are separate steps.",
+        capture: "Capture the completed implementation's exact checkout as a retained snapshot. This does not claim tests passed.",
+        review: "Review the linked snapshot independently. This does not integrate the implementation.",
+        review_result: "Record the linked review result for handoff. Integration remains a separate decision.",
+      }[item.kind]));
+      add(div().text_size(12).child("Permissions stay in OpenCode. An uncertain result must be checked, not resent."));
+      if (profile) {
+        add(button("ocq-work-review-roles", this.reviewDetails.roles ? "Hide Advanced" : "Advanced · agent", cx => {
+          this.reviewDetails.roles = !this.reviewDetails.roles; cx.notify();
+        }));
+        if (this.reviewDetails.roles) add(div().text_size(12).child(`${profile.agent} · ${profile.provider_id}/${profile.model_id}${profile.variant ? ` · ${profile.variant}` : ""}`));
+      }
+      if (valid && !this.working) {
+        add(button("ocq-work-confirm-once", action, cx => {
+          if (this.pinned()) { this.confirming = true; this.confirm(cx); }
+        }));
+      }
+      // Keep optional detail navigation on this exact preview object; it is
+      // never an authorization flag or a substitute for the pin checks.
+      add(technicalDetails(this.reviewDetails, button, "ocq-work-review"));
     }
   }
   renderOutput(items, theme, button, disclosure) {

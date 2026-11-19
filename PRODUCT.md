@@ -26,8 +26,11 @@ item narration or a Review paused strip.
 SQLite owns queue history; OpenCode owns execution and human permissions.
 Observations are not liveness, validation, completion or mutation authority.
 Unknown ownership holds capacity. Never replay uncertain actions.
-Keep full exact retained-byte/page review, context/image/generation fences,
+Keep full exact retained bytes, context/image/generation fences,
 durable arm, one attempt, exact receipt recovery and pointer-only confirmations.
+Normal setup, goal, task and session-opening confirmations show a concise semantic
+summary of those frozen bytes. Raw JSON and identity pins are optional Technical
+details, never mandatory pages. Configured roles are defaults under Advanced.
 No fabricated data or design approval.
 
 ## Authority

@@ -286,8 +286,8 @@ export class RuntimeSources extends View {
       if (!page.error && !page.items.length) {
         const first = page.cursor === "0";
         const empty = kind === "projects" ? (first ? "No projects registered. Use Set up project to review a Main." : "No projects on this page.") :
-          kind === "jobs" ? (first ? "No submitted jobs recorded in this queue." : "No jobs on this page.") :
-          kind === "inbox" ? "No project mail on this page. An empty inbox does not mean work is complete." :
+          kind === "jobs" ? (first ? "No OCQ jobs submitted. In Work, create Main and give it a goal; other OpenCode sessions are not tracked automatically." : "No jobs on this page.") :
+          kind === "inbox" ? "No project mail on this page. Submitted work and reviews produce mail; an empty inbox is not completion." :
           "No pending notifications on this page.";
         region.child(div().px(8).text_color(t.muted).child(`${title(source.machine)} · ${!source.online() ? "Source unavailable; no current observation. Retained data may be stale." : !page.loaded ? "Reading stored data…" : empty}`));
       }
@@ -352,8 +352,12 @@ export class RuntimeSources extends View {
         }
         root.child(this.button(id(source.key, "new"), `Set up project · ${title(source.machine)}`, task => { this.newOn = this.newOn === source.key ? null : source.key; task.notify(); }, t));
       }
-    } else if (this.view === "queue") root.child(v_flex().flex_1().min_h(0).gap(8).child(this.region("jobs", "Jobs", t)).child(this.region("events", "Notifications", t)));
-    else root.child(v_flex().flex_1().min_h(0).gap(8).child(this.region("inbox", "Project mail", t)).child(this.region("events", "Notifications", t)));
+    } else {
+      root.child(v_flex().flex_1().min_h(0).gap(8)
+        .child(this.region(this.view === "queue" ? "jobs" : "inbox", this.view === "queue" ? "Jobs" : "Project mail", t))
+        .child(this.region("events", "Notifications", t)));
+      root.child(this.button("ocq-all-go-work", "Go to Work", task => { this.view = "work"; task.notify(); }, t));
+    }
     const unavailable = new Set([...this.catalog.values()].filter(e => !["available", "absent"].includes(e.state)).map(e => e.machine));
     for (const source of this.sources.values()) if (!source.online()) unavailable.add(source.machine);
     if (unavailable.size) root.child(this.button("ocq-all-unavailable", `${unavailable.size} machine${unavailable.size === 1 ? "" : "s"} unavailable · Details`,
