@@ -72,7 +72,10 @@ export default class OCQChrome extends View {
     // The panel's native width transition drives the host box from measured
     // geometry. Keep it mounted until zero, including when the target reverses.
     if (shown) {
-      if (panel?.hidden || panel?.size?.px === 0) run("layout.resize", { id: "ocq-panel", px: 1 });
+      // A hidden panel may mount a fresh view with no previous width to tween
+      // from. Give it its destination allocation; a 1px host can constrain the
+      // viewport measurement to 1px forever, preventing transition completion.
+      if (panel?.hidden || panel?.size?.px === 0) run("layout.resize", { id: "ocq-panel", px: width });
       run("layout.show", { id: "ocq-panel" });
     }
   }
