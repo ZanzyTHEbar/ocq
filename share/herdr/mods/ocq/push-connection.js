@@ -43,8 +43,11 @@ export class PushConnection {
     const draining = this.disconnect();
     if (checking()) return;
     cx.spawn(async cx => {
+      this.transportCX = cx;
       await draining;
       // No grace-period reset: an orphaned owner holds this slot indefinitely.
+      if (physical.owner && physical.owner !== this)
+        this.updates.publish("unavailable", "A previous panel connection is still finishing. Actions remain unavailable.");
       await physical.settled;
       if (!this.active(scope, lifecycle)) return;
       let phase = "bootstrap";
@@ -76,15 +79,19 @@ export class PushConnection {
         return;
       }
       this.connect(scope, lifecycle, cx);
-    });
+    }, { owner: null });
   }
   active(scope, lifecycle) {
     return lifecycle === this.lifecycle && this.updates.scope === scope && this.updates.current();
   }
   cancelRetry() { this.retry?.cancel(); this.retry = null; }
+  notify() {
+    if (!this.updates.disposed && !this.updates.owner.closed)
+      (this.updates.cx ?? this.updates.owner.cx)?.notify();
+  }
   stopWithFault(reason, cx) {
     this.cancelRetry(); this.fault = reason; this.association = null;
-    this.updates.publish("unavailable", reason); cx.notify();
+    this.updates.publish("unavailable", reason); this.notify();
   }
   connect(scope, lifecycle, cx) {
     const physical = this.physical;
@@ -127,7 +134,7 @@ export class PushConnection {
         } catch (_) { throw contractError("Check OCQ endpoint identity or version."); }
         this.state = "connected";
         this.updates.kick();
-        cx.notify();
+        this.notify();
         while (this.current(scope, generation)) {
           const frame = await this.read(socket);
           if (this.current(scope, generation)) {
@@ -140,7 +147,7 @@ export class PushConnection {
                 if (!this.pending.has(frame.id) || frame.connection_id !== this.updates.connectionID) throw Error("Unexpected command receipt");
                 const pending = this.pending.get(frame.id); this.pending.delete(frame.id);
                 pending.resolve(frame.result);
-              } else this.updates.message(frame, cx);
+              } else this.updates.message(frame, this.updates.cx ?? this.updates.owner.cx);
             } catch (_) { throw contractError("Check OCQ endpoint contract."); }
           }
         }
@@ -179,9 +186,9 @@ export class PushConnection {
             if (this.active(scope, lifecycle)) this.connect(scope, lifecycle, cx);
           });
         }
-        if (!this.updates.disposed) cx.notify();
+        this.notify();
       }
-    });
+    }, { owner: null });
   }
   current(scope, generation) {
     return this.updates.current() && this.updates.scope === scope && this.updates.connectionGeneration === generation;
@@ -194,14 +201,26 @@ export class PushConnection {
     if (!frame || frame.protocol !== pushProtocol) throw contractError("Unsupported push protocol");
     return frame;
   }
-  async write(value) {
+  write(value) {
     if (!this.socket || this.state !== "connected") throw Error("No authenticated push connection");
     const raw = JSON.stringify(value);
     if (Buffer.from(raw).length > (value.type === "command" ? 1048576 : 16384)) throw Error("Frame exceeds transport bound");
-    const operation = this.socket.write(raw);
-    this.writes.add(operation);
-    try { await operation; }
-    finally { this.writes.delete(operation); }
+    const socket = this.socket;
+    return new Promise((resolve, reject) => {
+      // Both the native write AND its accounting belong to this task. A view
+      // caller may disappear while awaiting the result; it must not own the
+      // finally that removes the original native promise from the drain set.
+      this.transportCX.spawn(async () => {
+        try {
+          if (this.state !== "connected" || this.socket !== socket) throw Error("Connection changed before write");
+          const operation = socket.write(raw);
+          this.writes.add(operation);
+          try { await operation; }
+          finally { this.writes.delete(operation); }
+          resolve();
+        } catch (error) { reject(error); }
+      }, { owner: null });
+    });
   }
   rejectPending() {
     for (const pending of this.pending.values()) {
@@ -225,14 +244,16 @@ export class PushConnection {
     return result;
   }
   closeSocket(socket) {
-    if (!this.closing) this.closing = (async () => {
-      try { await socket.close(); }
-      catch (error) {
-        if (error?.message !== nativeClosed) throw error;
-        // The native resource explicitly reports terminal closure. This is not
-        // enough by itself: the owner finally also drains reads and writes.
-      }
-    })();
+    if (!this.closing) this.closing = new Promise((resolve, reject) => {
+      this.transportCX.spawn(async () => {
+        try { await socket.close(); resolve(); }
+        catch (error) {
+          // Close alone is not settlement: the read owner also drains writes.
+          if (error?.message === nativeClosed) resolve();
+          else reject(error);
+        }
+      }, { owner: null });
+    });
     return this.closing;
   }
   async disconnect() {
@@ -246,7 +267,10 @@ export class PushConnection {
     if (physical.owner === this) await physical.settled;
     if (physical.owner !== this) this.state = "disconnected";
   }
-  async dispose() {
+  async dispose(cx) {
+    // close(cx) supplies the live cleanup context; the connect task's context
+    // belongs to the build being retired and cannot spawn after its reload.
+    if (cx) this.transportCX = cx;
     ++this.lifecycle; this.association = null;
     await this.disconnect();
   }

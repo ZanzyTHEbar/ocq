@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { h_flex, v_flex, ScrollHandle } from "gpui-base";
+import { h_flex, v_flex, ScrollHandle, Scrollbar } from "gpui-base";
 import { machines, spaces, exec, hc, theme, checking, nextCommand, shared, setShared, run, layout } from "herdr";
 import { createHash } from "crypto";
 import { Buffer } from "buffer";
@@ -11,6 +11,7 @@ const hex = s => typeof s === "string" && /^[0-9a-f]{64}$/.test(s);
 const id = (...parts) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const title = machine => machine ?? "This computer";
 const kinds = { projects: "projects", jobs: "runtime-jobs", events: "runtime-notifications", inbox: "all-inbox" };
+const activePanel = "__ocq_runtime_panel_v1";
 
 // One source owns one stream, cursors and last observed pages. No queue data,
 // credentials or authority is kept in localStorage or routed by a display label.
@@ -32,7 +33,7 @@ class RuntimeSource {
     return !this.owner.closed && !this.disposed && route?.key === this.key && route.available;
   }
   online() { return this.current() && this.connection.state === "connected" && !!this.binding && this.health?.state === "current"; }
-  publish(state, reason = null) { this.health = { state, reason }; this.owner.cx?.notify(); }
+  publish(state, reason = null) { this.health = { state, reason }; if (!this.owner.closed) this.owner.cx?.notify(); }
   invalidate(reason) {
     this.binding = null; this.lastRequest = null;
     if (this.owner.detail?.source === this) this.owner.detail.invalidate();
@@ -75,7 +76,7 @@ class RuntimeSource {
         await this.connection.write({ type: "subscribe", id: capture.id, request });
       }
       catch (_) { if (capture.generation === this.connectionGeneration) await this.connection.disconnect(); }
-      cx.notify();
+      if (!this.disposed && !this.owner.closed) cx.notify();
     });
   }
   message(frame, cx) {
@@ -154,6 +155,14 @@ export class RuntimeSources extends View {
     this.jobsScroll = ScrollHandle.new(); this.eventsScroll = ScrollHandle.new();
     this.workScroll = ScrollHandle.new(); this.mailScroll = ScrollHandle.new();
     this.catalogSignature = null;
+    if (!checking()) {
+      // Native layouts can retain a previous imported view across replacement.
+      // The installed all-machine panel has one owner. Retire that exact view,
+      // but let its transport drain normally before a successor can connect.
+      const previous = globalThis[activePanel];
+      globalThis[activePanel] = this;
+      if (previous && previous !== this) cx.spawn(task => previous.close(task), { owner: null });
+    }
     cx.spawn(async task => { this.cx = task; if (!checking()) await this.discover(task); });
     cx.spawn(async () => { for (;;) { if (await nextCommand() === "focus") this.handle.focus(); } });
   }
@@ -308,21 +317,27 @@ export class RuntimeSources extends View {
     if (!transition || !panel) return this.renderContents(cx);
     const space = spaces().find(s => s.active)?.id;
     const moving = !!transition && transition.space === space && transition.moving;
-    const target = transition.shown === false ? 0 : moving ? transition.width : panel.size?.px ?? transition.width;
-    return v_flex().id("ocq-panel-motion").w(target).h_full().flex_none().min_w(0).min_h(0)
+    const target = transition.shown === false ? 0 : transition.width;
+    return v_flex().id("ocq-panel-motion").w_full().when(moving, e => e.w(target)).h_full().flex_none().min_w(0).min_h(0)
       .overflow_hidden().transition("width", { duration: 180, easing: "ease-out" })
       .child(v_flex().id(`ocq-panel-viewport-${transition?.revision ?? "open"}`).size_full().min_w(0).min_h(0)
       .on_size_change(size => {
         const current = shared("ocq.panel.transition");
-        if (!moving || !current?.moving || current.revision !== transition.revision || current.space !== space ||
+        if (!current || current.revision !== transition.revision || current.space !== space ||
             spaces().find(s => s.active)?.id !== space) return;
+        if (!current.moving) {
+          if (current.shown && size.width > 0 && current.width !== size.width)
+            setShared("ocq.panel.transition", { ...current, width: size.width });
+          return;
+        }
+        if (!moving) return;
         run("layout.resize", { id: "ocq-panel", px: size.width });
         if (size.width === target) {
           if (!current.shown) run("layout.hide", { id: "ocq-panel" });
           setShared("ocq.panel.transition", { ...current, moving: false });
         }
       })
-      .child(this.renderContents(cx).w(moving ? transition.width : target).flex_none()));
+      .child(this.renderContents(cx).w_full().when(moving && !transition.shown, e => e.w(transition.width)).flex_none()));
   }
   renderContents(cx) {
     const t = theme(), signature = JSON.stringify(machines());
@@ -350,15 +365,38 @@ export class RuntimeSources extends View {
       for (const entry of this.catalog.values()) group(entry.expectedCore, entry.machine).entries.push(entry);
       for (const source of this.sources.values()) group(source.runtime.core_id, source.machine).sources.push(source);
       for (const value of groups.values()) {
-        info.child(div().text_size(12).font_semibold().child(
-          `${[...value.names].join(" / ")}${value.core ? ` · core ${value.core}` : ""}`));
+        info.child(div().text_size(12).font_semibold().child([...value.names].join(" / ")));
         for (const entry of value.entries) {
           if (entry.state === "available" && value.sources.some(source => source.key === entry.key)) continue;
-          info.child(div().pl(12).text_size(12).child(`${title(entry.machine)} · ${entry.state}`));
+          const status = { available: "Runtime found", absent: "No OCQ runtime registered",
+            unavailable: "Discovery unavailable", unsupported: "Runtime version unsupported",
+            runtimeDetectedConnectionUnavailable: "Runtime found; no display connection" }[entry.state];
+          info.child(div().pl(12).text_size(12).child(`${title(entry.machine)} · ${status || "Checking runtime"}`));
         }
-        for (const source of value.sources)
+        for (const source of value.sources) {
+          let length = 8;
+          while (length < 64 && value.sources.some(other => other !== source &&
+            other.runtime.queue_identity.slice(0, length) === source.runtime.queue_identity.slice(0, length))) length += 4;
+          const label = value.sources.length > 1 ? `Queue ${source.runtime.queue_identity.slice(0, length)}` : "Project queue";
           info.child(div().pl(12).text_size(12).child(
-            `Queue ${source.runtime.queue_identity} · ${source.online() ? "connected" : "connection unavailable; retained observations are stale"}`));
+            `${label} · ${source.online() ? "Connected" : "Connection unavailable; stored views are stale"}`));
+          if (!source.online() && source.health?.reason)
+            info.child(div().pl(12).text_size(12).text_color(t.muted).child(source.health.reason));
+        }
+        const technicalKey = JSON.stringify([value.core, [...value.names]]);
+        info.child(this.button(id("source-technical", technicalKey), this.sourceTechnical === technicalKey ? "Hide technical details" : "Technical details",
+          task => { this.sourceTechnical = this.sourceTechnical === technicalKey ? null : technicalKey; task.notify(); }, t).text_size(12));
+        if (this.sourceTechnical === technicalKey) {
+          const scrollID = id("source-identifiers", technicalKey);
+          const identifiers = v_flex().id(scrollID).size_full().min_w(0).overflow_scroll()
+            .font_family("monospace").text_size(12).whitespace_nowrap();
+          if (value.core) identifiers.child(div().min_w(560).flex_none().child(`Core: ${value.core}`));
+          for (const source of value.sources) identifiers.child(div().min_w(560).flex_none().child(`Queue: ${source.runtime.queue_identity}`));
+          info.child(v_flex().relative().h(64).flex_none().min_w(0)
+            .child(identifiers).child(Scrollbar.new(scrollID).mode("always").absolute().inset_0()));
+          info.child(this.button(id("source-copy", technicalKey), "Copy identifiers", task => task.write_to_clipboard(
+            [value.core && `Core: ${value.core}`, ...value.sources.map(source => `Queue: ${source.runtime.queue_identity}`)].filter(Boolean).join("\n")), t).text_size(12));
+        }
       }
       if (this.catalogFault) info.child(div().text_color(t.blocked).child(this.catalogFault));
       root.child(info);
@@ -401,14 +439,15 @@ export class RuntimeSources extends View {
     }
     const unavailable = new Set([...this.catalog.values()].filter(e => !["available", "absent"].includes(e.state)).map(e => e.machine));
     for (const source of this.sources.values()) if (!source.online()) unavailable.add(source.machine);
-    if (unavailable.size) root.child(this.button("ocq-all-unavailable", `${unavailable.size} machine${unavailable.size === 1 ? "" : "s"} unavailable · Details`,
+    if (unavailable.size) root.child(this.button("ocq-all-unavailable", `${unavailable.size} runtime connection${unavailable.size === 1 ? "" : "s"} unavailable · Details`,
       task => { this.details = true; task.notify(); }, t).flex_none().text_size(12));
     return root;
   }
-  async close() {
+  async close(cx) {
+    if (this.closed) return;
     this.closed = true; this.catalogTimer?.cancel(); this.detail?.dispose();
     this.jobsScroll.release(); this.eventsScroll.release();
     this.workScroll.release(); this.mailScroll.release();
-    await Promise.allSettled([...this.sources.values()].map(s => { s.disposed = true; return s.connection.dispose(); }));
+    await Promise.allSettled([...this.sources.values()].map(s => { s.disposed = true; return s.connection.dispose(cx); }));
   }
 }

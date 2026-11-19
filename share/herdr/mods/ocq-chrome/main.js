@@ -67,7 +67,7 @@ export default class OCQChrome extends View {
     this.ocqShown = shown;
     const panel = find(layout(), "ocq-panel");
     const prior = shared("ocq.panel.transition");
-    const width = prior && (prior.moving || !prior.shown) ? prior.width : panel?.size?.px > 0 ? panel.size.px : 360;
+    const width = prior?.space === this.ocqSpace && prior.width > 0 ? prior.width : panel?.size?.px > 0 ? panel.size.px : 360;
     setShared("ocq.panel.transition", { space: this.ocqSpace, shown, width, moving: shown || !panel?.hidden, revision: shared("ocq.panel.epoch") });
     // The panel's native width transition drives the host box from measured
     // geometry. Keep it mounted until zero, including when the target reverses.
