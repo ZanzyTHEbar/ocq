@@ -10,10 +10,11 @@ import { PrivateHCBinding } from "./hc-binding.js";
 
 // Space.folder is a launch default, not its current project. Pick an exact
 // terminal in an exact tab; never substitute the active unrelated space.
-export function projectSpaces(machine) {
+export function projectSpaces(machine, repo = null) {
   const live = panes();
   return spaces().filter(s => s.machine === machine).flatMap(s => s.tabs.flatMap(tab =>
-    live.filter(p => p.tab === tab.id && p.terminal && p.cwd).map(p => ({
+    live.filter(p => p.tab === tab.id && p.terminal && p.cwd &&
+      (!repo || p.cwd === repo || p.cwd.startsWith(repo.endsWith("/") ? repo : `${repo}/`))).map(p => ({
       ...s, folder: p.cwd,
       setupContext: { tab: tab.id, tabName: tab.name, pane: p.pane, terminal: p.terminal, cwd: p.cwd, branch: p.branch },
     }))));
@@ -78,31 +79,53 @@ export class RuntimeProject {
     this.nativeHC.review = null; this.workflow.review = null;
   }
   async initialize(cx) {
-    if (!this.spaceID || !this.folder) return;
+    if (!this.spaceID || !this.folder || this.verifyingRepository) return;
     const generation = this.source.generation;
-    this.verifyingRepository = true; this.error = null;
+    this.verifyingRepository = true; this.error = null; this.errorStage = null;
+    let phase = "repository";
     try {
       if (this.setupContext) {
         const repo = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: this.setupContext.cwd, on: this.machine, timeout: 5000 });
         if (!this.panelCurrent() || generation !== this.source.generation) return;
         const folder = repo.stdout?.replace(/\r?\n$/, "");
-        if (repo.code !== 0 || !folder || /[\r\n\0]/.test(folder) || this.project && this.project.repo_root !== folder)
+        if (repo.code !== 0 || !folder || /[\r\n\0]/.test(folder))
           throw Error("Selected terminal repository unavailable");
+        if (this.project && this.project.repo_root !== folder) {
+          phase = "repository-root"; throw Error("Selected terminal belongs to another checkout");
+        }
         this.folder = folder; this.updates.scope.folder = folder;
       }
+      phase = "compatibility";
       const response = await this.updates.connection.command(["compatibility", this.localSpace(), this.folder]);
       if (!this.panelCurrent() || generation !== this.source.generation) return;
       if (response.code !== 0) throw Error("Repository compatibility unavailable");
+      phase = "compatibility-contract";
       const status = this.compatibility.validate(JSON.parse(response.stdout), { id: this.spaceID, machine: this.machine, folder: this.folder });
+      phase = "source-pins";
       if (status.queue_identity !== this.source.runtime.queue_identity || status.image_sha256 !== this.source.runtime.image_sha256 ||
            status.observation_store_context !== this.source.binding?.store_context || ![6, 7].includes(status.observation_schema) ||
           !/^[a-f0-9]{64}$/.test(status.observation_context)) throw Error("Project/source pins changed");
       this.compatibility.observe();
       this.compatibility.status = status; this.compatibility.allowActions = this.source.mutations;
       this.updates.binding = { queue_identity: status.queue_identity, store_context: status.observation_store_context, bridge_context: status.observation_context };
+      phase = "work-binding";
       this.workOperator.sync();
+      phase = "work-observation";
       this.source.subscribe(true);
-    } catch (_) { if (this.panelCurrent() && generation === this.source.generation) this.error = "Cannot verify this terminal's repository. Choose a terminal in the intended repository; the space's launch folder is not used."; }
+    } catch (_) {
+      if (this.panelCurrent() && generation === this.source.generation) {
+        this.errorStage = phase;
+        this.error = {
+          repository: "The selected terminal's Git repository could not be read. Retry verification or choose a project terminal.",
+          "repository-root": "This terminal belongs to a different Git checkout from this project. Choose a project terminal; no work or history was started.",
+          compatibility: "The owning runtime could not read project compatibility. Retry read-only verification; no work was started.",
+          "compatibility-contract": "The runtime compatibility response did not match this project context. Retry verification or return to Work.",
+          "source-pins": "The runtime queue, image or observation context changed. Reopen the project to verify its current source.",
+          "work-binding": "The project's stored work context could not be bound. Retry read-only verification.",
+          "work-observation": "The project's stored work observation could not be requested. Retry read-only verification.",
+        }[phase];
+      }
+    }
     finally { this.verifyingRepository = false; }
     cx.notify();
   }
@@ -207,13 +230,28 @@ export class RuntimeProject {
     };
     if (!this.source.online() || !this.panelCurrent()) return box.child(div().p(12).child("Owning runtime or project context changed. Retained details are stale; return to Work and reopen the project."));
     if (!this.spaceID) {
-      const choices = projectSpaces(this.machine);
-      box.child(div().p(12).child("Choose a terminal folder to verify for this project. Space names and launch folders are not repository identity."));
-      for (const s of choices) box.child(this.panelControl(`space-${s.id}-${s.setupContext.pane}`, `${this.machine ?? "This computer"} · ${s.name} · Tab ${s.setupContext.tabName}\n${s.folder}`, task => this.root.openProject(this.source, this.project, s, task, this.pendingNavigation), t));
-      if (!choices.length) box.child(div().p(12).text_color(t.muted).child("No live terminal folder is available. Open a terminal in the intended repository, then choose it here."));
+      box.overflow_y_scroll();
+      const choices = projectSpaces(this.machine, this.project?.repo_root);
+      box.child(div().p(12).child(this.project ? "Choose a terminal in this project's checkout. Its Git root will be verified; unrelated terminal folders are not offered." :
+        "Choose a terminal folder to verify for this project. Space names and launch folders are not repository identity."));
+      for (const s of choices) box.child(this.panelControl(`space-${s.id}-${s.setupContext.pane}`, `${this.machine ?? "This computer"} · ${s.name} · Tab ${s.setupContext.tabName}\n${s.folder}`, task => this.root.openProject(this.source, this.project, s, task, this.pendingNavigation), t).flex_none());
+      if (!choices.length) box.child(div().p(12).text_color(t.muted).child(this.project ?
+        "No live terminal is currently in this project's checkout. Return to Work to keep reading its stored updates; no session was guessed." :
+        "No live terminal folder is available. Open a terminal in the intended repository, then choose it here."));
       return box;
     }
-    if (this.error) return box.child(div().p(12).text_color(t.blocked).child(this.error));
+    if (this.error) {
+      const record = this.pendingNavigation?.record;
+      if (record && record !== this.navigationRecord) box.child(this.root.recordSummary(record, t).px(12).max_h(240).overflow_y_scroll());
+      box.child(div().p(12).text_color(t.blocked).child(this.error));
+      box.child(this.panelControl("ocq-project-verify-retry", "Retry read-only verification", task => {
+        this.invalidate(); this.updates.binding = null;
+        task.spawn(next => this.initialize(next));
+      }, t));
+      if (this.project) box.child(this.panelControl("ocq-project-verify-context", "Choose a project terminal", task =>
+        this.root.openProject(this.source, this.project, null, task, this.pendingNavigation), t));
+      return box;
+    }
     if (this.verifyingRepository) return box.child(div().p(12).child("Verifying the selected terminal's repository…"));
     if (this.navigation) {
       const v = this.navigation, current = this.navigationCurrent(v.scope);
