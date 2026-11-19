@@ -101,7 +101,7 @@ export class RuntimeProject {
       this.compatibility.status = status; this.compatibility.allowActions = this.source.mutations;
       this.updates.binding = { queue_identity: status.queue_identity, store_context: status.observation_store_context, bridge_context: status.observation_context };
       this.workOperator.sync();
-      this.source.subscribe();
+      this.source.subscribe(true);
     } catch (_) { if (this.panelCurrent() && generation === this.source.generation) this.error = "Cannot verify this terminal's repository. Choose a terminal in the intended repository; the space's launch folder is not used."; }
     finally { this.verifyingRepository = false; }
     cx.notify();
