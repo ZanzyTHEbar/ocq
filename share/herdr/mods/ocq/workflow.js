@@ -206,7 +206,11 @@ export class OperatorWorkflow {
       this.formContext = formContext; this.capability = null; this.review = null; this.status = null;
       // Keep draft inputs and role choices, but never carry authorization or a
       // retained-action preview across an observation generation.
-      if (this.opened && !this.saved?.[this.key(s)]) this.open(cx);
+      if (this.opened && !this.saved?.[this.key(s)]) {
+        cx.spawn(task => {
+          if (this.formContext === formContext && this.current(s)) this.open(task);
+        });
+      }
     }
     const record = this.saved?.[this.key(s)];
     const status = record && this.status?.project_id === record.project && this.status?.operation_id === record.operation ? this.status : null;

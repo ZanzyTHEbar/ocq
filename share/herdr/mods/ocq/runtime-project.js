@@ -79,11 +79,14 @@ export class RuntimeProject {
     this.workOperator.suspend(); this.nativeHC.approved = null;
     this.nativeHC.review = null; this.nativeHC.error = null; this.workflow.review = null;
   }
-  renewObservation(cx) {
+  invalidateObservation() {
     this.invalidate(); this.updates.binding = null;
     this.pendingNavigation = null; this.navigation = null;
     this.navigationError = null;
     this.error = null; this.errorStage = null; this.observationPending = true;
+  }
+  renewObservation(cx) {
+    this.invalidateObservation();
     cx.notify();
   }
   observeContext(cx) {
@@ -94,7 +97,8 @@ export class RuntimeProject {
       this.observationContext = context;
       this.observationPanelEpoch = panelEpoch();
       this.panelEpoch = this.source.generation;
-      this.renewObservation(cx);
+      // Rendering may invalidate stale authority, but must not notify itself.
+      this.invalidateObservation();
       this.pendingNavigation = navigation;
     }
     // Refresh observations only. Never restore a review, recover an uncertain
