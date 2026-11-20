@@ -203,8 +203,10 @@ export class OperatorWorkflow {
     if (!s) return box.child(div().text_color(t.muted).child("Project setup needs a verified connection to the owning runtime."));
     const formContext = JSON.stringify(s);
     if (this.formContext !== formContext) {
-      this.formContext = formContext; this.opened = false; this.capability = null; this.review = null;
-      this.choices = {}; this.status = null;
+      this.formContext = formContext; this.capability = null; this.review = null; this.status = null;
+      // Keep draft inputs and role choices, but never carry authorization or a
+      // retained-action preview across an observation generation.
+      if (this.opened && !this.saved?.[this.key(s)]) this.open(cx);
     }
     const record = this.saved?.[this.key(s)];
     const status = record && this.status?.project_id === record.project && this.status?.operation_id === record.operation ? this.status : null;
@@ -215,11 +217,13 @@ export class OperatorWorkflow {
     if (!record && !ready.ready) return box.child(div().text_color(t.blocked).child(ready.reason))
       .child(button("ocq-main-workflow-check", "Check setup", cx => this.open(cx)));
     if (record) {
-      box.child(div().child(status ? `${mainAction(status.mode)} · ${status.state}` : "Prepared operation saved"))
+      box.child(div().child(status ? `${mainAction(status.mode)} · ${status.state}` : record.mode === "send" ? "Saved goal · confirmation required" : "Saved Main setup"))
         .child(div().text_size(12).text_color(t.muted).child(record.phase === "prepared"
           ? "Review this saved action below. Nothing has started."
           : "Check this saved action before continuing. Do not submit it again."));
-      if (!this.busy) box.child(button("ocq-main-workflow-recover", "Check retained operation", cx => this.recover(cx)));
+      if (record.mode === "send") box.child(div().text_size(12).text_color(t.muted).child("A goal is already saved for this Main. Review it before sending; switching spaces or tabs never sends it."));
+      if (!this.busy) box.child(button("ocq-main-workflow-recover",
+        record.phase === "prepared" ? record.mode === "send" ? "Review saved goal" : "Resume saved setup" : "Check saved operation", cx => this.recover(cx)));
       if (status && ["ready", "busy", "prompt_pending"].includes(status.state) && record.phase === "start_attempted") {
         box.child(button("ocq-main-workflow-return", "Return to Main", cx => {
           delete this.saved[this.key(s)]; this.persist().catch(() => { this.storageError = true; });

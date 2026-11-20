@@ -1,11 +1,12 @@
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex, ScrollHandle, Scrollbar } from "gpui-base";
-import { machines, spaces, exec, hc, theme, checking, nextCommand, shared, setShared, run, layout } from "herdr";
+import { machines, spaces, panes, exec, hc, theme, checking, nextCommand, shared, setShared, run, layout } from "herdr";
 import { createHash } from "crypto";
 import { Buffer } from "buffer";
 import { PushConnection } from "./push-connection.js";
 import { decimal, compareRevision } from "./stored-updates.js";
 import { RuntimeProject, projectSpaces } from "./runtime-project.js";
+import { panelEpoch, panelVisible } from "./panel-state.js";
 
 const hex = s => typeof s === "string" && /^[0-9a-f]{64}$/.test(s);
 const id = (...parts) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
@@ -93,6 +94,7 @@ class RuntimeSource {
         s.store_context !== this.binding.store_context || s.bridge_context !== this.binding.bridge_context ||
         !decimal(s.revision) || this.revision && compareRevision(s.revision, this.revision) < 0) throw Error("Source snapshot pins changed");
     this.revision = s.revision;
+    this.snapshotReadAt = new Date().toISOString();
     for (const slot of s.slots) {
       if (slot.slot === "board") {
         if (capture.detail === this.owner.detail && slot.status === "ready") capture.detail.board = slot.data;
@@ -240,11 +242,30 @@ export class RuntimeSources extends View {
       if (source?.machine === machine) { source.invalidate(reason); void source.connection.disconnect(); }
     }
   }
+  rememberDraft() {
+    const d = this.detail;
+    if (d) this.projectDraft = {
+      source: d.source, project: d.selected, folder: d.folder,
+      goal: d.workflow.goal.value(), label: d.workflow.label.value(),
+      choices: { ...d.workflow.choices }, opened: d.workflow.opened,
+      labelTouched: d.workflow.labelTouched, labelSeeded: d.workflow.labelSeeded,
+    };
+  }
   openProject(source, project, space, cx, navigation = null) {
     if (!source.current()) return;
+    this.rememberDraft();
+    const draft = this.projectDraft;
+    const sameProject = draft?.source === source && draft.project === (project?.project_id || null) &&
+      draft.folder === (project?.repo_root || space?.setupContext?.cwd);
     this.detail?.dispose(); this.inspection = null;
     const matches = projectSpaces(source.machine).filter(s => s.folder === project?.repo_root);
     this.detail = new RuntimeProject(source, project, space || (matches.length === 1 ? matches[0] : null), cx);
+    if (sameProject) {
+      const workflow = this.detail.workflow;
+      workflow.goal.set_value(draft.goal); workflow.label.set_value(draft.label);
+      workflow.choices = draft.choices; workflow.opened = draft.opened;
+      workflow.labelTouched = draft.labelTouched; workflow.labelSeeded = draft.labelSeeded;
+    }
     this.detail.pendingNavigation = navigation;
     source.subscribe(true); cx.notify();
   }
@@ -255,6 +276,7 @@ export class RuntimeSources extends View {
     const recorded = source.pages.jobs.items.find(v => v.id === job);
     const navigation = job ? { kind: "worker", job, session: recorded?.recorded_session_id || "",
       sourceGeneration: source.generation } : { kind: "integrator", sourceGeneration: source.generation };
+    navigation.panelMarker = panelEpoch();
     navigation.record = { source, kind, item, generation: source.generation };
     if (projects.length !== 1) {
       this.inspection = { source, kind, item, navigation, generation: source.generation,
@@ -269,7 +291,7 @@ export class RuntimeSources extends View {
     cx.spawn(async task => {
       try {
         const response = await source.command(["board", projects[0]]);
-        if (this.inspection !== view || !source.online() || source.generation !== view.generation) return;
+        if (this.inspection !== view || !source.online() || source.generation !== view.generation || navigation.panelMarker !== panelEpoch()) return;
         const board = response.code === 0 && JSON.parse(response.stdout);
         if (board?.project?.project_id !== projects[0] || !board.project.current_binding?.repo_root)
           throw Error("The associated project is unavailable.");
@@ -280,7 +302,7 @@ export class RuntimeSources extends View {
       task.notify();
     });
   }
-  back(cx) { const source = this.detail?.source; this.detail?.dispose(); this.detail = null; this.inspection = null; source?.subscribe(true); cx.notify(); }
+  back(cx) { const source = this.detail?.source; this.rememberDraft(); this.detail?.dispose(); this.detail = null; this.inspection = null; source?.subscribe(true); cx.notify(); }
   inspect(source, kind, item, cx) {
     const view = { source, kind, item, generation: source.generation };
     this.inspection = view;
@@ -402,6 +424,58 @@ export class RuntimeSources extends View {
       })
       .child(this.renderContents(cx).w_full().when(collapsing, e => e.w(transition.width)).flex_none()));
   }
+  uiState() {
+    const line = value => String(value ?? "not observed").replace(/[\r\n\0]/g, " ").slice(0, 512);
+    const active = spaces().find(s => s.active), tab = active?.tabs.find(t => t.active);
+    const terminals = panes().filter(p => p.tab === tab?.id && p.terminal);
+    const d = this.detail, main = d?.mainClient, hcContext = d?.nativeHC.context();
+    const source = d?.source || this.inspection?.source;
+    const failures = d && [
+      d.closed && "project closed", !d.panelCurrent() && "project context changed",
+      !panelVisible() && "panel hidden", d.compatibility.panelMarker !== panelEpoch() && "panel verification expired",
+      !d.compatibility.status && "compatibility not observed", !d.compatibility.allowActions && "actions unavailable",
+      d.updates.connection.state !== "connected" && "socket disconnected", !d.updates.binding && "binding not observed",
+    ].filter(Boolean);
+    const current = source?.online() && (!d || failures.length === 0);
+    const lines = [
+      "OCQ UI state", `Copied at: ${new Date().toISOString()}`,
+      `View: ${d ? d.navigation?.kind || "Work / Main" : this.inspection?.kind || this.view}`,
+      `Selected card: ${line(this.inspection?.item.id || this.inspection?.item.job_id || d?.workOperator.selectedID)}`,
+      `Observations: ${current ? "current stored snapshot (not proof of live Main activity)" : "STALE / unverified; retained observations only"}`,
+      `Herdr space: ${line(active?.name)} (${line(active?.id)})`,
+      `Herdr tab: ${line(tab?.name)} (${line(tab?.id)})`,
+      ...terminals.map(p => `Herdr terminal: ${line(p.terminal)} · cwd ${line(p.cwd)}`),
+      `OCQ project: ${line(d?.project?.label)} (${line(d?.selected)})`,
+      `Project repository: ${line(d?.folder)}`,
+      `Project context: ${line(d?.spaceID)} / ${line(d?.setupContext?.terminal)}`,
+      "Herdr navigation does not retarget the selected OCQ project or its Main.",
+    ];
+    for (const s of source ? [source] : this.sources.values()) {
+      lines.push(`Source: ${line(s.machine ?? "this computer")} · ${s.online() ? "connected" : "STALE / unavailable"} · ${line(s.health?.state)}`,
+        `Core: ${line(s.runtime.core_id)}`, `Queue: ${line(s.runtime.queue_identity)}`,
+        `Connection: ${line(s.connectionID)} · generation ${s.generation}`,
+        `Snapshot received: ${line(s.snapshotReadAt)} · revision ${line(s.revision)}`,
+        ...Object.entries(s.pages).map(([kind, page]) => `Source ${kind}: ${page.items.length}${page.more ? "+" : ""} stored records`),
+        `Source job states: ${[...new Set(s.pages.jobs.items.map(j => j.state))].map(state =>
+          `${line(state)}=${s.pages.jobs.items.filter(j => j.state === state).length}`).join(", ") || "none observed"}`);
+    }
+    if (d) {
+      lines.push(`Project verification: ${failures.length ? failures.join("; ") : "current"}`,
+        `Terminal service: ${!hcContext ? "project verification required" : d.nativeHC.approvedDigest() ? "reviewed for this connection" : "human review required (prior approval is not inherited)"}`,
+        `Last project read: ${line(d.workOperator.readAt)}`,
+        `Main session: ${line(main?.selectedMain?.session_id)}`,
+        `Main activity: ${main?.live ? `${line(main.live.state)} · checked ${line(main.live.read_at)}` : "not live-observed; Open Main or check exact goal status"}`,
+        `Project requests: ${d.workOperator.rows.length}`,
+        ...d.workOperator.rows.map(r => `Request ${line(r.request_id)}: ${line(r.state)} · job ${line(r.job?.job_id)} ${line(r.job?.state)}`),
+        ...(main?.goals || []).map((g, i) => `Goal ${i + 1}: ${line(g.main.operation_id)} · ${line(g.main.state)} · ${main.goalSummary(g)}`),
+        ...Object.values(d.workflow.saved || {}).filter(r => !d.selected || r.project === d.selected)
+          .map(r => `Saved operation ${line(r.operation)}: ${line(r.mode)} / ${line(r.phase)} · ${r.phase === "start_attempted" ? "local start attempt recorded; never resend" : "no local start-attempt marker; exact server status is authoritative"}`),
+        `UI error stage: ${line(d.errorStage || "none")}${d.error ? " · project verification failed" : ""}`,
+        `Other UI attention: ${[main?.error && "Main", d.workflow.error && "saved workflow", d.nativeHC.error && "terminal service", d.navigationError && "navigation"].filter(Boolean).join(", ") || "none"}`);
+    }
+    lines.push("Excluded: goal/draft text, transcripts, credentials, tokens, environment and private HC binding bytes.");
+    return lines.join("\n");
+  }
   renderContents(cx) {
     const t = theme(), signature = JSON.stringify(machines());
     if (signature !== this.catalogSignature) {
@@ -410,8 +484,12 @@ export class RuntimeSources extends View {
     }
     const root = v_flex().size_full().min_w(0).min_h(0).bg(t.background).text_color(t.foreground).text_size(13).track_focus(this.handle);
     root.child(h_flex().flex_none().px(8).py(4).items_center()
-      .child(div().flex_1().font_semibold().child(this.detail ? `${title(this.detail.machine)} · ${this.detail.project?.label || "New project"}` : "All machines"))
-      .child(this.button("ocq-all-details", this.details ? "Done" : "Details", task => { this.details = !this.details; task.notify(); }, t)));
+      .child(div().flex_1().min_w(0).truncate().font_semibold().child(this.detail ? `${title(this.detail.machine)} · ${this.detail.project?.label || "New project"}` : "All machines"))
+      .child(this.button("ocq-copy-ui-state", "Copy UI state", task => {
+        task.write_to_clipboard(this.uiState()); this.uiStateCopied = true; task.notify();
+      }, t).flex_none())
+      .child(this.button("ocq-all-details", this.details ? "Done" : "Details", task => { this.details = !this.details; task.notify(); }, t).flex_none()));
+    if (this.uiStateCopied) root.child(div().px(8).text_size(12).text_color(t.muted).child("Copied UI state · drafts and credentials excluded."));
     if (this.detail || this.inspection) root.child(this.button("ocq-all-back", "Back to all machines", task => this.back(task), t));
     else root.child(h_flex().flex_none().px(4).gap(2).children([["work", "Work"], ["queue", "Queue"], ["inbox", "Inbox"]].map(([name, text]) =>
       this.button("ocq-all-"+name, text, task => { this.view = name; task.notify(); }, t).when(this.view === name, e => e.bg(t.hover).font_semibold()))));

@@ -471,6 +471,20 @@ export class MainClientControls {
       finally { if (this.current(scope, generation)) { this.working = false; cx.notify(); } }
     }, { owner: this.host.root || this.host }); cx.notify();
   }
+  goalSummary(goal) {
+    const observed = this.live?.operation_id === goal.main.operation_id ? this.live : goal.main;
+    if (observed.state === "prepared") return "Awaiting your confirmation · goal not sent";
+    if (observed.state === "prompt_pending") return "Goal received · waiting for Main to consume it";
+    const workers = goal.work.filter(v => ["implementation", "review"].includes(v.kind));
+    const review = goal.work.find(v => v.kind === "review_result")?.result?.verdict;
+    if (review) return `Review ${review.replaceAll("_", " ")} · recorded`;
+    if (workers.some(v => v.job)) return `${workers.filter(v => v.job?.terminal_proven).length} of ${workers.length} workers finished`;
+    if (workers.length) return "Work prepared · not yet assigned to a worker";
+    if (["blocked", "unknown", "missing_or_unknown", "mismatch", "role_unverified", "prompt_attempted_unknown"].includes(observed.state))
+      return "Goal needs attention · check its exact saved status; do not resend";
+    return observed.state === "busy" ? "Main last checked working · no owned workers assigned yet" :
+      "No owned workers assigned · open Main to check progress";
+  }
   render(cx, theme, button) {
     this.sync(this.work().bound);
     const box = v_flex().id("ocq-main-client").w_full().min_w(0).gap(8);
@@ -485,12 +499,13 @@ export class MainClientControls {
     }, theme, this.host.renderTargets).font_semibold().bg(theme.hover));
     box.child(this.host.workflow.render(cx, theme, button, selected));
     for (const [index, goal] of (this.goals || []).entries()) {
-      const workers = goal.work.filter(v => ["implementation", "review"].includes(v.kind));
-      const review = goal.work.find(v => v.kind === "review_result")?.result?.verdict;
       box.child(v_flex().min_w(0).gap(3).pt(8)
         .child(div().font_semibold().child(`Goal ${index + 1}`))
-        .child(div().text_size(12).text_color(theme.muted).child(review ? `Review ${review.replaceAll("_", " ")} · recorded` :
-          workers.length ? `${workers.filter(v => v.job?.terminal_proven).length} of ${workers.length} workers finished` : "Awaiting worker assignment")));
+        .child(div().text_size(12).text_color(theme.muted).child(this.goalSummary(goal)))
+        .when(this.showDetails, e => e.child(div().text_size(12).text_color(theme.muted).child(
+          `Last checked: ${this.live?.operation_id === goal.main.operation_id ? this.live.read_at : goal.main.read_at}`)))
+        .when(!goal.work.some(v => v.job) && goal.main.state !== "prepared", e =>
+          e.child(button(`ocq-main-goal-check-${goal.main.operation_id}`, "Check exact goal status", cx => this.recoverMain(goal.main, cx)))));
     }
     if (!selected) box.child(div().text_color(theme.muted).child("Main will stay linked to this project."));
     else {

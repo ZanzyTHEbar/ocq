@@ -59,10 +59,15 @@ export class PrivateHCBinding {
         return this.review;
   }
   render(cx, theme, button, box = v_flex().w_full().min_w(0).gap(6)) {
-    const review = this.review, current = review && review.context === this.context();
-    if (!current) box.child(button("ocq-read-hc-binding", this.working ? "Verifying terminal service…" : "Verify terminal service", cx => this.read(cx)));
+    const context = this.context(), review = this.review, current = review && review.context === context;
+    if (!context) {
+      box.child(div().text_color(theme.muted).child("Verify this project's connection before reviewing its terminal service. Saved work and drafts are retained."));
+      if (this.host.renewObservation) box.child(button("ocq-read-project-connection", "Verify project connection", cx => this.host.renewObservation(cx)));
+      return box;
+    }
+    if (!current) box.child(button("ocq-read-hc-binding", this.working ? "Verifying terminal service…" : "Review terminal service", cx => this.read(cx)));
     if (this.error) box.child(div().text_color(theme.blocked).child(this.error));
-    if (review && !current) box.child(div().text_color(theme.blocked).child("HC review expired. Read and review this connection again."));
+    if (review && !current) box.child(div().text_color(theme.muted).child("Review the terminal service for this connection again. Prior navigation approval is no longer valid."));
     if (!current) return box;
     const b = review.value.binding;
     box.child(div().text_size(12).child(`Open conversations on ${this.host.machine ?? "this computer"}\nRepository: ${b.folder}`));

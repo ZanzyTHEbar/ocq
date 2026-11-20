@@ -7,6 +7,7 @@ import { WorkOperator } from "./work-operator.js";
 import { MainClientControls } from "./main-client.js";
 import { OperatorWorkflow } from "./workflow.js";
 import { PrivateHCBinding } from "./hc-binding.js";
+import { panelEpoch, panelVisible } from "./panel-state.js";
 
 // Space.folder is a launch default, not its current project. Pick an exact
 // terminal in an exact tab; never substitute the active unrelated space.
@@ -63,11 +64,11 @@ export class RuntimeProject {
     this.mainClient = new MainClientControls(this);
     this.workflow = new OperatorWorkflow(this);
     this.nativeHC = new PrivateHCBinding(this);
-    this.initialize(cx);
   }
   localSpace() { return this.spaceID?.startsWith(`${this.machine}/`) && this.machine !== null ? this.spaceID.slice(this.machine.length + 1) : this.spaceID; }
   panelCurrent() {
     return !this.closed && this.root.detail === this && this.source.current() && this.source.generation === this.panelEpoch &&
+      (this.observationPanelEpoch === undefined || this.observationPanelEpoch === panelEpoch()) &&
       (!this.spaceID || spaces().some(s => s.id === this.spaceID && s.machine === this.machine &&
         s.tabs.some(tab => tab.id === this.setupContext?.tab))) &&
       (!this.setupContext || panes().some(p => p.pane === this.setupContext.pane && p.tab === this.setupContext.tab &&
@@ -76,17 +77,45 @@ export class RuntimeProject {
   invalidate() {
     this.generation++; this.compatibility.invalidateObservation("Owning runtime/route changed; review again.");
     this.workOperator.suspend(); this.nativeHC.approved = null;
-    this.nativeHC.review = null; this.workflow.review = null;
+    this.nativeHC.review = null; this.nativeHC.error = null; this.workflow.review = null;
+  }
+  renewObservation(cx) {
+    this.invalidate(); this.updates.binding = null;
+    this.pendingNavigation = null; this.navigation = null;
+    this.navigationError = null;
+    this.error = null; this.errorStage = null; this.observationPending = true;
+    cx.notify();
+  }
+  observeContext(cx) {
+    const context = JSON.stringify([this.source.generation, panelEpoch(), this.setupContext]);
+    if (context !== this.observationContext) {
+      const initial = this.observationContext === undefined;
+      const navigation = initial ? this.pendingNavigation : null;
+      this.observationContext = context;
+      this.observationPanelEpoch = panelEpoch();
+      this.panelEpoch = this.source.generation;
+      this.renewObservation(cx);
+      this.pendingNavigation = navigation;
+    }
+    // Refresh observations only. Never restore a review, recover an uncertain
+    // operation, open a terminal or send input as a consequence of navigation.
+    if (this.observationPending && !this.verifyingRepository && this.spaceID &&
+        this.source.online() && this.panelCurrent() && panelVisible()) {
+      this.observationPending = false;
+      cx.spawn(task => this.initialize(task));
+    }
   }
   async initialize(cx) {
     if (!this.spaceID || !this.folder || this.verifyingRepository) return;
-    const generation = this.source.generation;
-    this.verifyingRepository = true; this.error = null; this.errorStage = null;
+    const request = { generation: this.generation, source: this.source.generation, panel: panelEpoch() };
+    const current = () => this.panelCurrent() && request.generation === this.generation &&
+      request.source === this.source.generation && request.panel === panelEpoch() && panelVisible();
+    this.verifyingRepository = request; this.error = null; this.errorStage = null;
     let phase = "repository";
     try {
       if (this.setupContext) {
         const repo = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: this.setupContext.cwd, on: this.machine, timeout: 5000 });
-        if (!this.panelCurrent() || generation !== this.source.generation) return;
+        if (!current()) return;
         const folder = repo.stdout?.replace(/\r?\n$/, "");
         if (repo.code !== 0 || !folder || /[\r\n\0]/.test(folder))
           throw Error("Selected terminal repository unavailable");
@@ -97,7 +126,7 @@ export class RuntimeProject {
       }
       phase = "compatibility";
       const response = await this.updates.connection.command(["compatibility", this.localSpace(), this.folder]);
-      if (!this.panelCurrent() || generation !== this.source.generation) return;
+      if (!current()) return;
       if (response.code !== 0) throw Error("Repository compatibility unavailable");
       phase = "compatibility-contract";
       const status = this.compatibility.validate(JSON.parse(response.stdout), { id: this.spaceID, machine: this.machine, folder: this.folder });
@@ -113,7 +142,7 @@ export class RuntimeProject {
       phase = "work-observation";
       this.source.subscribe(true);
     } catch (_) {
-      if (this.panelCurrent() && generation === this.source.generation) {
+      if (current()) {
         this.errorStage = phase;
         this.error = {
           repository: "The selected terminal's Git repository could not be read. Retry verification or choose a project terminal.",
@@ -126,14 +155,17 @@ export class RuntimeProject {
         }[phase];
       }
     }
-    finally { this.verifyingRepository = false; }
-    cx.notify();
+    finally {
+      if (this.verifyingRepository === request) this.verifyingRepository = false;
+      // A superseded read must wake the queued current-context read too.
+      cx.notify();
+    }
   }
   followNavigation(cx) {
     const target = this.pendingNavigation;
     if (!target || !this.spaceID || !this.workOperator.bound || !this.workOperator.readAt) return;
     this.pendingNavigation = null;
-    if (!this.panelCurrent() || target.sourceGeneration !== this.source.generation) {
+    if (!this.panelCurrent() || target.sourceGeneration !== this.source.generation || target.panelMarker !== panelEpoch()) {
       this.navigationError = "The runtime changed before navigation. Reopen this project to verify the conversation."; return;
     }
     if (target.kind === "worker") {
@@ -216,6 +248,7 @@ export class RuntimeProject {
       .hover(e => e.bg(t.hover)).on_click((_e, cx) => run(cx)).child(text);
   }
   render(cx, t) {
+    this.observeContext(cx);
     this.renderTargets = []; this.headerTargets = [];
     const box = v_flex().w_full().flex_1().min_w(0).min_h(0).gap(4);
     if (this.navigationError) box.child(div().px(12).text_color(t.blocked).child(this.navigationError));
@@ -228,7 +261,12 @@ export class RuntimeProject {
         .when(!allowed(), e => e.opacity(0.4)).hover(e => e.bg(t.hover))
         .on_click((_e, task) => { if (allowed()) action(task); }).child(text);
     };
-    if (!this.source.online() || !this.panelCurrent()) return box.child(div().p(12).child("Owning runtime or project context changed. Retained details are stale; return to Work and reopen the project."));
+    if (!this.source.online()) return box.child(div().p(12).child("The owning runtime is unavailable. Stored project details are retained; no work or conversation was redirected."));
+    if (!this.panelCurrent()) return box
+      .child(div().p(12).child("The selected project terminal changed or closed. Choose another terminal in this checkout; your draft and saved operations are retained."))
+      .child(this.root.button("ocq-project-choose-context", "Choose a project terminal", task => {
+        if (!this.closed && this.root.detail === this) this.root.openProject(this.source, this.project, null, task);
+      }, t));
     if (!this.spaceID) {
       box.overflow_y_scroll();
       const choices = projectSpaces(this.machine, this.project?.repo_root);
@@ -252,7 +290,7 @@ export class RuntimeProject {
         this.root.openProject(this.source, this.project, null, task, this.pendingNavigation), t));
       return box;
     }
-    if (this.verifyingRepository) return box.child(div().p(12).child("Verifying the selected terminal's repository…"));
+    if (this.verifyingRepository || this.observationPending) return box.child(div().p(12).child("Refreshing this project's connection and stored Main…"));
     if (this.navigation) {
       const v = this.navigation, current = this.navigationCurrent(v.scope);
       return box.child(v_flex().flex_1().min_h(0).p(12).gap(6).overflow_y_scroll()

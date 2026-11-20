@@ -169,7 +169,7 @@ export function enabledButton(id, context = legacyCompatibility) {
   const compatibility = context;
   // Reading/recovery never borrows mutation readiness, including after an
   // uncertain attempt reconnects to a default read-only endpoint.
-  if (readButtons.has(id) || id.startsWith("ocq-result-check-") || id.startsWith("ocq-client-record-")) return true;
+  if (readButtons.has(id) || id.startsWith("ocq-main-goal-check-") || id.startsWith("ocq-result-check-") || id.startsWith("ocq-client-record-")) return true;
   if (id === "ocq-main-open" || id === "ocq-client-worker-new") return compatibility.workReady();
   if (/^ocq-(client-(open|verify|show)|dispatch-)/.test(id)) return compatibility.nativeReady();
   if (compatibility.ready() || compatibility.workReady() && /^(ocq-work-|ocq-main-|ocq-client-prepare)/.test(id)) return true;
