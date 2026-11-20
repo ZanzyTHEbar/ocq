@@ -483,13 +483,14 @@ export class RuntimeSources extends View {
       if (this.cx && !checking()) { this.catalogTimer?.cancel(); cx.spawn(async task => this.discover(task)); }
     }
     const root = v_flex().size_full().min_w(0).min_h(0).bg(t.background).text_color(t.foreground).text_size(13).track_focus(this.handle);
-    root.child(h_flex().flex_none().px(8).py(4).items_center()
-      .child(div().flex_1().min_w(0).truncate().font_semibold().child(this.detail ? `${title(this.detail.machine)} · ${this.detail.project?.label || "New project"}` : "All machines"))
+    root.child(div().w_full().min_w(0).flex_none().px(8).py(4).truncate().font_semibold()
+      .child(this.detail ? `${title(this.detail.machine)} · ${this.detail.project?.label || "New project"}` : "All machines"));
+    root.child(h_flex().w_full().min_w(0).flex_none().px(4).items_center()
       .child(this.button("ocq-copy-ui-state", "Copy UI state", task => {
         task.write_to_clipboard(this.uiState()); this.uiStateCopied = true; task.notify();
       }, t).flex_none())
       .child(this.button("ocq-all-details", this.details ? "Done" : "Details", task => { this.details = !this.details; task.notify(); }, t).flex_none()));
-    if (this.uiStateCopied) root.child(div().px(8).text_size(12).text_color(t.muted).child("Copied UI state · drafts and credentials excluded."));
+    if (this.uiStateCopied) root.child(div().w_full().min_w(0).flex_none().px(8).truncate().text_size(12).text_color(t.muted).child("Copied UI state · drafts and credentials excluded."));
     if (this.detail || this.inspection) root.child(this.button("ocq-all-back", "Back to all machines", task => this.back(task), t));
     else root.child(h_flex().flex_none().px(4).gap(2).children([["work", "Work"], ["queue", "Queue"], ["inbox", "Inbox"]].map(([name, text]) =>
       this.button("ocq-all-"+name, text, task => { this.view = name; task.notify(); }, t).when(this.view === name, e => e.bg(t.hover).font_semibold()))));
