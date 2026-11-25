@@ -109,8 +109,8 @@
 - Do not whitelist synthetic input by text, disable global injections, or switch
   agents as a workaround. Keep tool support to the documented cooperative native
   tools/runtime-tracked shells. PTY/delegation/plugins/escaped daemons and resource
-  loss/restart recovery are not broadly validated. 
-  - Project reviews verify the exact agent and supported OpenCode policy version
+  loss/restart recovery are not broadly validated.
+- Project reviews verify the exact agent and supported OpenCode policy version
   at intake and again in the owned checkout before prompting. Preserve the
   ordered session rules, cooperative boundaries, and conservative uncertainty;
   do not claim filesystem sandboxing or silently substitute agents.
