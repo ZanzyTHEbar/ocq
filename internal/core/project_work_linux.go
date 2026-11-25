@@ -141,7 +141,8 @@ func workReadDir(r *Reader, project string) (*os.File, error) {
 }
 
 func workRead(dir *os.File, name string) ([]byte, error) {
-	f, err := composePrivateAt(dir, name, syscall.O_RDONLY)
+	// Reject a nonregular journal entry without blocking on a FIFO open.
+	f, err := composePrivateAt(dir, name, syscall.O_RDONLY|syscall.O_NONBLOCK)
 	if err != nil {
 		return nil, err
 	}

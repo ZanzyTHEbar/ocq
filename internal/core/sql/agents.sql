@@ -11,7 +11,7 @@ UPDATE agent_ownership SET phase=? WHERE job_id=?;
 UPDATE agent_operations SET response_path=? WHERE job_id=? AND kind=?;
 
 -- name: MarkAgentUnknown :exec
-UPDATE jobs SET state='unknown',outcome=?,reason=? WHERE id=? AND state IN ('launching','running','unknown','finished');
+UPDATE jobs SET state='unknown',outcome=?,reason=? WHERE id=? AND state IN ('launching','running','unknown');
 
 -- name: AgentPromptIntent :one
 SELECT intent FROM agent_operations WHERE job_id=? AND kind='prompt';
@@ -49,8 +49,8 @@ UPDATE jobs SET state='running',outcome='agent_pending',reason='prompt accepted;
 -- name: MarkSessionInterference :exec
 UPDATE agent_ownership SET phase='session_interference' WHERE job_id=?;
 
--- name: MarkInterferenceUnknown :exec
-UPDATE jobs SET state='unknown',outcome='uncertain',reason=? WHERE id=?;
+-- name: MarkInterferenceUnknown :execrows
+UPDATE jobs SET state='unknown',outcome='uncertain',reason=? WHERE id=? AND state IN ('launching','running','unknown');
 
 -- name: ObservableAgentJobs :many
 SELECT j.id FROM jobs j JOIN agent_ownership a ON j.id=a.job_id

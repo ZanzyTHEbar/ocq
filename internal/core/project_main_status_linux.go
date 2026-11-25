@@ -13,23 +13,27 @@ import (
 	"time"
 )
 
-func mainAttempt(j *os.File, id, stage string) (workClaim, bool) {
-	b, e := workRead(j, mainFile(id, stage+".attempt"))
-	if errors.Is(e, syscall.ENOENT) {
-		return workClaim{}, false
-	}
-	var claim workClaim
-	if e != nil || json.Unmarshal(b, &claim) != nil {
-		return workClaim{}, true
-	}
-	return claim, true
-}
-
 func inspectMainRecord(r *Reader, j *os.File, project, id string, live bool) (MainStatus, error) {
 	rec, in, err := mainLoad(r, j, project, id)
 	if err != nil {
 		return MainStatus{}, err
 	}
+	return inspectMainIntent(r, j, rec, in, live, nil)
+}
+
+type mainSelection struct {
+	setup   mainRecord
+	binding ProjectBinding
+	err     error
+}
+
+func loadMainSelection(r *Reader, j *os.File, project string) mainSelection {
+	setup, _, binding, err := selectedMain(r, j, project)
+	return mainSelection{setup, binding, err}
+}
+
+func inspectMainIntent(r *Reader, j *os.File, rec mainRecord, in MainPrepareRequest, live bool, selection *mainSelection) (MainStatus, error) {
+	project, id := in.ProjectID, in.OperationID
 	out := MainStatus{Protocol: MainProtocol, ProjectID: project, OperationID: id, Mode: in.Mode, State: "prepared", Reason: "stored_only; no live session lookup", IntentSHA256: rec.Digest, SetupID: rec.SetupID, SessionID: rec.SessionID, PromptID: rec.PromptID, Repo: rec.Repo, MainBranch: rec.Branch, Head: rec.Head, CommitAnchor: rec.Head, BindingRevision: in.ExpectedRevision, OpenCodeProjectID: rec.ProjectID, OwnershipSHA256: nativeHash(json.RawMessage(rec.Metadata)), OwnershipMode: rec.OwnershipMode, ProfileSHA256: rec.ProfileSHA, ReadAt: now()}
 	if out.BindingRevision == "" && rec.Binding.Revision > 0 {
 		// Historical operations without an explicit CAS retain the binding
@@ -43,15 +47,23 @@ func inspectMainRecord(r *Reader, j *os.File, project, id string, live bool) (Ma
 		out.Reason = "explicit create operation superseded this provably unattempted setup; history retained, start forbidden"
 		return out, nil
 	}
+	promptAttempted, roleAttempted := false, false
 	for _, stage := range []string{"session", "role", "registration", "prompt"} {
-		claim, present := mainAttempt(j, id, stage)
-		if present {
-			if claim.Intent != rec.Digest || claim.Payload != rec.Digest || !isValidHexLen(claim.Preview, 64) {
-				out.State = "blocked"
-				out.Reason = "Main stage evidence malformed; retain and inspect"
-				return out, nil
-			}
+		var state mainAttemptState
+		if stage == "prompt" && live {
+			state, _ = readMainPromptAttempt(j, id, rec)
+		} else {
+			_, state, _ = readMainAttempt(j, id, stage, rec.Digest, nil)
+		}
+		switch state {
+		case mainAttemptUntrusted:
+			out.State = "blocked"
+			out.Reason = "Main " + stage + " attempt evidence malformed or unreadable; outcome unknown, never replay"
+			return out, nil
+		case mainAttemptValid:
 			out.State = stage + "_attempted_unknown"
+			promptAttempted = promptAttempted || stage == "prompt"
+			roleAttempted = roleAttempted || stage == "role"
 		}
 	}
 	regObserved := rec.RegistrationJSON == ""
@@ -62,9 +74,12 @@ func inspectMainRecord(r *Reader, j *os.File, project, id string, live bool) (Ma
 			out.BindingRevision = strconv.Itoa(receipt.Revision)
 		}
 	}
-	setup, _, binding, selectedErr := selectedMain(r, j, project)
-	selectedOK := selectedErr == nil && setup.SessionID == rec.SessionID && setup.SetupID == rec.SetupID
-	_, promptAttempted := mainAttempt(j, id, "prompt")
+	if selection == nil {
+		s := loadMainSelection(r, j, project)
+		selection = &s
+	}
+	setup, binding := selection.setup, selection.binding
+	selectedOK := selection.err == nil && setup.SessionID == rec.SessionID && setup.SetupID == rec.SetupID
 	if selectedOK {
 		out.BindingRevision = strconv.Itoa(binding.Revision)
 		out.CommitAnchor = binding.CommitAnchor
@@ -87,12 +102,12 @@ func inspectMainRecord(r *Reader, j *os.File, project, id string, live bool) (Ma
 	}
 	if !live {
 		if in.Mode == "role-refresh" {
-			return inspectMainRoleRefresh(j, rec, in, out)
+			return inspectMainRoleRefresh(j, rec, in, out, roleAttempted)
 		}
 		return out, workOutputBound(out)
 	}
 	if in.Mode == "role-refresh" {
-		return inspectMainRoleRefresh(j, rec, in, out)
+		return inspectMainRoleRefresh(j, rec, in, out, roleAttempted)
 	}
 	common, head, dirty, e := inspectCanonicalMain(rec.Repo, rec.Branch)
 	if e != nil || common != rec.Common {
@@ -248,6 +263,12 @@ func RecoverProjectMain(dir, project, id string) (MainStatus, error) {
 }
 
 func ListProjectMain(dir, project string) (MainList, error) {
+	return listProjectMain(dir, project, nil)
+}
+
+// sampledWork is the filesystem projection already read for the observation
+// response. A standalone Main list reads Work only when there are send goals.
+func listProjectMain(dir, project string, sampledWork *WorkList) (MainList, error) {
 	out := MainList{Protocol: MainProtocol, ProjectID: project, Items: []MainStatus{}}
 	if !isValidProjectID(project) {
 		return out, errors.New("invalid Main project")
@@ -283,24 +304,54 @@ func ListProjectMain(dir, project string) (MainList, error) {
 		return out, errors.New("Main listing bound reached")
 	}
 	sort.Strings(ids)
+	selection := loadMainSelection(r, j, project)
 	for _, id := range ids {
-		s, e := inspectMainRecord(r, j, project, id, false)
+		rec, in, e := mainLoad(r, j, project, id)
+		if e != nil {
+			return out, e
+		}
+		s, e := inspectMainIntent(r, j, rec, in, false, &selection)
 		if e != nil {
 			return out, e
 		}
 		out.Items = append(out.Items, s)
+		if selection.err == nil && id == selection.setup.SetupID {
+			out.Selected = &s
+		}
 		if s.Mode == "send" {
-			goal, e := InspectProjectGoal(dir, project, id)
-			if e != nil {
-				return out, e
-			}
-			out.Goals = append(out.Goals, goal)
+			out.Goals = append(out.Goals, newGoalView(s, in))
 		}
 	}
-	if setup, _, _, e := selectedMain(r, j, project); e == nil {
-		selected, e := inspectMainRecord(r, j, project, setup.SetupID, false)
-		if e == nil {
-			out.Selected = &selected
+	if len(out.Goals) > 0 {
+		if sampledWork == nil {
+			work, err := ListProjectWork(dir, project)
+			if err != nil {
+				return out, err
+			}
+			sampledWork = &work
+		}
+		lineage, err := readGoalLineage(j, project, sampledWork.Items)
+		if err != nil {
+			return out, err
+		}
+		for i := range out.Goals {
+			goal := &out.Goals[i]
+			if err := goal.addLineage(lineage[goal.Main.OperationID]); err != nil {
+				return out, err
+			}
+		}
+	}
+	if selection.err == nil {
+		if out.Selected == nil {
+			// The journal and the SQL binding are not sampled atomically: an
+			// exact selected setup may have appeared after directory listing.
+			id := selection.setup.SetupID
+			rec, in, e := mainLoad(r, j, project, id)
+			if e == nil {
+				if selected, e := inspectMainIntent(r, j, rec, in, false, &selection); e == nil {
+					out.Selected = &selected
+				}
+			}
 		}
 	} else if rec, _, _, e := selectedMainRecord(r, j, project); e == nil {
 		out.Retirement = mainDeletionState(j, project, rec)

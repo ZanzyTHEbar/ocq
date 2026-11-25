@@ -139,7 +139,7 @@ func (q *Queries) MarkAgentRunning(ctx context.Context, id string) (int64, error
 }
 
 const markAgentUnknown = `-- name: MarkAgentUnknown :exec
-UPDATE jobs SET state='unknown',outcome=?,reason=? WHERE id=? AND state IN ('launching','running','unknown','finished')
+UPDATE jobs SET state='unknown',outcome=?,reason=? WHERE id=? AND state IN ('launching','running','unknown')
 `
 
 type MarkAgentUnknownParams struct {
@@ -153,8 +153,8 @@ func (q *Queries) MarkAgentUnknown(ctx context.Context, arg MarkAgentUnknownPara
 	return err
 }
 
-const markInterferenceUnknown = `-- name: MarkInterferenceUnknown :exec
-UPDATE jobs SET state='unknown',outcome='uncertain',reason=? WHERE id=?
+const markInterferenceUnknown = `-- name: MarkInterferenceUnknown :execrows
+UPDATE jobs SET state='unknown',outcome='uncertain',reason=? WHERE id=? AND state IN ('launching','running','unknown')
 `
 
 type MarkInterferenceUnknownParams struct {
@@ -162,9 +162,12 @@ type MarkInterferenceUnknownParams struct {
 	ID     string
 }
 
-func (q *Queries) MarkInterferenceUnknown(ctx context.Context, arg MarkInterferenceUnknownParams) error {
-	_, err := q.db.ExecContext(ctx, markInterferenceUnknown, arg.Reason, arg.ID)
-	return err
+func (q *Queries) MarkInterferenceUnknown(ctx context.Context, arg MarkInterferenceUnknownParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markInterferenceUnknown, arg.Reason, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const markSessionInterference = `-- name: MarkSessionInterference :exec

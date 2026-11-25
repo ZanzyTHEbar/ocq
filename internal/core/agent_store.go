@@ -121,7 +121,7 @@ func (s *store) agentUnknown(id, reason string, blocked bool) error {
 		if j.State == "unknown" && j.Outcome == outcome && j.Reason == reason {
 			return nil
 		}
-		if j.State != "launching" && j.State != "running" && j.State != "unknown" && j.State != "finished" {
+		if j.State != "launching" && j.State != "running" && j.State != "unknown" {
 			return nil
 		}
 		if err := dbquery.New(c).MarkAgentUnknown(context.Background(), dbquery.MarkAgentUnknownParams{Outcome: outcome, Reason: reason, ID: id}); err != nil {

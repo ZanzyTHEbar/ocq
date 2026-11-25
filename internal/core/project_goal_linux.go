@@ -67,8 +67,13 @@ func LinkProjectGoalWork(dir, project, operation, request string) (GoalWorkLink,
 	if err != nil || selected.SetupID != rec.SetupID {
 		return link, errors.New("goal is not owned by selected Main")
 	}
-	if _, attempted := mainAttempt(j.dir, operation, "prompt"); !attempted {
-		return link, errors.New("goal has not been sent")
+	// A valid attempt is required to associate the explicit lineage, but
+	// neither the attempt nor the sidecar proves send or handling.
+	switch state, err := readMainPromptAttempt(j.dir, operation, rec); state {
+	case mainAttemptAbsent:
+		return link, errors.New("goal has no retained input attempt")
+	case mainAttemptUntrusted:
+		return link, errors.Join(err, errors.New("goal input attempt untrusted; outcome unknown"))
 	}
 	if err = nativeJournalRoom(j.dir, 1); err != nil {
 		return link, err
@@ -86,54 +91,83 @@ type GoalView struct {
 }
 
 func InspectProjectGoal(dir, project, operation string) (GoalView, error) {
-	out := GoalView{Protocol: GoalProtocol, Links: []GoalWorkLink{}, Work: []WorkStatus{}}
-	main, err := InspectProjectMain(dir, project, operation)
-	if err != nil || main.Mode != "send" {
-		return out, errors.New("exact retained Main goal required")
+	out := newGoalView(MainStatus{}, MainPrepareRequest{})
+	notGoal := errors.New("exact retained Main goal required")
+	if !isValidProjectID(project) || !workID(operation) {
+		return out, notGoal
 	}
-	out.Main = main
 	r, err := OpenReader(dir)
 	if err != nil {
-		return out, err
+		return out, notGoal
 	}
 	defer r.Close()
 	j, err := workReadDir(r, project)
 	if err != nil {
-		return out, err
+		return out, notGoal
 	}
 	defer j.Close()
 	rec, input, err := mainLoad(r, j, project, operation)
-	if err != nil || rec.Digest != main.IntentSHA256 {
-		return out, errors.New("goal title input identity changed")
+	if err != nil || input.Mode != "send" {
+		return out, notGoal
 	}
-	out.Title = goalTitle(input.Prompt, operation)
+	main, err := inspectMainIntent(r, j, rec, input, false, nil)
+	if err != nil {
+		return out, notGoal
+	}
+	out = newGoalView(main, input)
 	work, err := ListProjectWork(dir, project)
 	if err != nil {
 		return out, err
 	}
-	for _, w := range work.Items {
+	lineage, err := readGoalLineage(j, project, work.Items)
+	if err != nil {
+		return out, err
+	}
+	err = out.addLineage(lineage[operation])
+	return out, err
+}
+
+func newGoalView(main MainStatus, in MainPrepareRequest) GoalView {
+	return GoalView{Protocol: GoalProtocol, Main: main, Links: []GoalWorkLink{}, Work: []WorkStatus{}, Title: goalTitle(in.Prompt, in.OperationID)}
+}
+
+type linkedGoalWork struct {
+	link GoalWorkLink
+	work *WorkStatus
+}
+
+// Each Work row supplies the exact request/intent identity and ordering. Read
+// its journal link once, then group by the explicitly retained operation ID.
+func readGoalLineage(j *os.File, project string, work []WorkStatus) (map[string][]linkedGoalWork, error) {
+	lineage := make(map[string][]linkedGoalWork)
+	for i := range work {
+		w := &work[i]
 		raw, e := workRead(j, ".goal-"+w.RequestID+".json")
 		if errors.Is(e, os.ErrNotExist) {
 			continue
 		}
 		if e != nil {
-			return out, e
+			return nil, e
 		}
 		var link GoalWorkLink
 		if json.Unmarshal(raw, &link) != nil || link.Protocol != GoalProtocol || link.ProjectID != project ||
 			link.RequestID != w.RequestID || link.WorkIntent != w.IntentSHA256 {
-			return out, errors.New("goal lineage integrity mismatch")
+			return nil, errors.New("goal lineage integrity mismatch")
 		}
-		if link.OperationID != operation {
-			continue
-		}
-		if link.MainIntent != main.IntentSHA256 || link.PromptID != main.PromptID {
-			return out, errors.New("goal input identity changed")
-		}
-		out.Links = append(out.Links, link)
-		out.Work = append(out.Work, w)
+		lineage[link.OperationID] = append(lineage[link.OperationID], linkedGoalWork{link, w})
 	}
-	return out, workOutputBound(out)
+	return lineage, nil
+}
+
+func (out *GoalView) addLineage(lineage []linkedGoalWork) error {
+	for _, row := range lineage {
+		if row.link.MainIntent != out.Main.IntentSHA256 || row.link.PromptID != out.Main.PromptID {
+			return errors.New("goal input identity changed")
+		}
+		out.Links = append(out.Links, row.link)
+		out.Work = append(out.Work, *row.work)
+	}
+	return workOutputBound(out)
 }
 
 func goalTitle(prompt, operation string) string {

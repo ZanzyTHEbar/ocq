@@ -61,13 +61,13 @@ func roleRefreshEdge(rec mainRecord, in MainPrepareRequest) mainRoleSuccessor {
 	return mainRoleSuccessor{Version: 1, OperationID: in.OperationID, Intent: rec.Digest, Role: rec.Role.SHA256}
 }
 
-func inspectMainRoleRefresh(j *os.File, rec mainRecord, in MainPrepareRequest, out MainStatus) (MainStatus, error) {
+func inspectMainRoleRefresh(j *os.File, rec mainRecord, in MainPrepareRequest, out MainStatus, attempted bool) (MainStatus, error) {
 	edge, present, err := readMainRoleSuccessor(j, in.ExpectedRoleSHA256)
 	if err != nil {
 		return out, err
 	}
 	out.State, out.Reason = "prepared", "operating-contract replacement prepared only; no active instructions, profile, branch, binding or input changed"
-	if _, attempted := mainAttempt(j, in.OperationID, "role"); attempted {
+	if attempted {
 		out.State, out.Reason = "role_attempted_unknown", "one instructions attempt retained; exact GET recovery only, never repeat PUT"
 	}
 	if present {
@@ -94,6 +94,10 @@ func startMainRoleRefresh(r *Reader, j *composeJournal, rec mainRecord, in MainP
 			return MainStatus{}, err
 		}
 		return inspectMainRecord(r, j.dir, in.ProjectID, in.OperationID, false)
+	}
+	_, state, err := readMainAttempt(j.dir, in.OperationID, "role", rec.Digest, &claim.Context)
+	if err != nil {
+		return MainStatus{}, err
 	}
 	selected, _, binding, err := selectedMain(r, j.dir, in.ProjectID)
 	if err != nil || binding != rec.Binding || selected.Role.SHA256 != in.ExpectedRoleSHA256 ||
@@ -137,16 +141,15 @@ func startMainRoleRefresh(r *Reader, j *composeJournal, rec mainRecord, in MainP
 	if err != nil || !present {
 		return MainStatus{}, errors.Join(err, errors.New("active contract unavailable; no repair or overwrite"))
 	}
-	_, attempted := mainAttempt(j.dir, in.OperationID, "role")
 	if jsonEqual(seen, rec.Role) {
-		if !attempted {
+		if state != mainAttemptValid {
 			return MainStatus{}, errors.New("successor appeared without this operation's attempt; never adopt another writer's change")
 		}
 	} else {
 		if !jsonEqual(seen, selected.Role) {
 			return MainStatus{}, errors.New("exact predecessor value changed; no instructions overwrite")
 		}
-		if recoveryOnly || attempted {
+		if recoveryOnly || state != mainAttemptAbsent {
 			return MainStatus{}, errors.New("successor not proven by exact GET; never repeat PUT")
 		}
 		fresh, err := mainStage(j, in.OperationID, "role", claim)
@@ -242,8 +245,8 @@ func mainContractIdle(r *Reader, j *os.File, rec mainRecord, before map[string]a
 			return err
 		}
 		if history.SessionID == rec.SessionID {
-			if _, attempted := mainAttempt(j, id, "prompt"); attempted {
-				return errors.New("empty Main has a retained input attempt; no pristine exception")
+			if _, state, err := readMainAttempt(j, id, "prompt", history.Digest, nil); state != mainAttemptAbsent {
+				return errors.Join(err, errors.New("empty Main input attempt retained or untrusted; no pristine exception"))
 			}
 		}
 	}
@@ -295,13 +298,13 @@ func recoverMainRoleRefresh(dir, project, id string) (MainStatus, bool, error) {
 	if err = j.acquire(); err != nil {
 		return MainStatus{}, true, err
 	}
-	claim, attempted := mainAttempt(j.dir, id, "role")
-	if !attempted {
+	claim, state, err := readMainAttempt(j.dir, id, "role", rec.Digest, nil)
+	if err != nil {
+		return MainStatus{}, true, err
+	}
+	if state == mainAttemptAbsent {
 		out, err := inspectMainRecord(r, j.dir, project, id, false)
 		return out, true, err
-	}
-	if claim.Intent != rec.Digest || claim.Payload != rec.Digest || !isValidHexLen(claim.Preview, 64) {
-		return MainStatus{}, true, errors.New("contract refresh attempt evidence mismatch")
 	}
 	out, err := startMainRoleRefresh(r, j, rec, in, claim, true)
 	return out, true, err

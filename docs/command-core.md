@@ -51,10 +51,14 @@ observation revisions (6). Goose migration 1 retains the historical schema 1–5
 steps; separate migration 2 upgrades 5→6 under the initialization lock with
 dispatch stopped. Explicit `activate-scheduling` applies migration 3 / schema **7**
 and persists the project-round-robin cutoff; ordinary opens do not activate it.
-Versions above 7 are rejected; there is no downgrade command.
-Non-initializing existing-store readers/writers explicitly support schemas 5, 6
-and 7. Project projection reads never initialize or migrate. Herdr's automatic
-observation supports 6 and 7; schema 5 reports `upgrade_required`.
+The explicit [`project main-handled upgrade`](goals-and-sessions.md#opt-in-to-one-inbox-main-handling)
+applies migration 4 / schema **8** for standalone task handoffs and Main
+acknowledgements. Upgrading from schema 6 installs the schema 7 tables without
+activating scheduling. Ordinary opens do not opt in to schema 8. Versions above
+8 are rejected; there is no downgrade command.
+Non-initializing existing-store readers/writers support schemas 5–8. Project
+projection reads never initialize or migrate. Herdr's automatic observation
+supports 6–8; schema 5 reports `upgrade_required`.
 See [scheduling cutover](scheduling.md) for activation and exact dependencies.
 
 For an existing queue, coordinate the upgrade before any newer writable open:
