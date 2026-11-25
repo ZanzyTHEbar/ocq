@@ -17,6 +17,7 @@ type WorkPrepareRequest struct {
 	ParentRequestID string `json:"parent_request_id,omitempty"`
 	Profile         string `json:"profile,omitempty"`
 	Brief           string `json:"brief,omitempty"`
+	BaseRef         string `json:"base_ref,omitempty"`
 	Criteria        string `json:"criteria,omitempty"`
 	Rules           string `json:"rules,omitempty"`
 	ReviewResult    string `json:"review_result,omitempty"`

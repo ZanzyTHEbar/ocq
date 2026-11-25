@@ -14,13 +14,17 @@ const pin = b => JSON.stringify([b?.image_sha256, b?.bridge_context, b?.queue_id
 // not require the binding it is about to create. Core journals remain authority.
 export class OperatorWorkflow {
   constructor(host) {
-    this.host = host; this.choices = {};
+    this.host = host; this.choices = {}; this.draftText = { goal: "", label: "" };
     this.compatibility = host.compatibility || compatibility;
     this.command = (args, options) => bridgeCommand(args, { ...options, compatibility: this.compatibility });
     this.label = InputState.new({ placeholder: "Project name" });
     this.label.on("change", () => { this.labelTouched = true; });
     this.goal = TextareaState.new({ placeholder: "What should Main accomplish?", rows: 4 });
-    for (const field of [this.label, this.goal]) field.on("change", (_e, cx) => { this.review = null; cx.notify(); });
+    // Retain text while its native input is live; leaving a project must not
+    // need to dereference an input whose owning view has already gone away.
+    for (const key of ["label", "goal"]) this[key].on("change", (_e, cx) => {
+      this.draftText[key] = this[key].value(); this.review = null; cx.notify();
+    });
     for (const field of [this.label, this.goal]) {
       field.on("focus", (_e, cx) => { this.focused = true; cx.notify(); });
       field.on("blur", (_e, cx) => { this.focused = false; cx.notify(); });
@@ -85,7 +89,10 @@ export class OperatorWorkflow {
       }
       if (!this.labelSeeded) {
         this.labelSeeded = true;
-        if (!this.labelTouched && !this.label.value()) this.label.set_value(value.repo.split(/[\\/]/).filter(Boolean).pop() || "");
+        if (!this.labelTouched && !this.label.value()) {
+          this.draftText.label = value.repo.split(/[\\/]/).filter(Boolean).pop() || "";
+          this.label.set_value(this.draftText.label);
+        }
       }
     }
     return value;
@@ -207,7 +214,8 @@ export class OperatorWorkflow {
       // Keep draft inputs and role choices, but never carry authorization or a
       // retained-action preview across an observation generation.
       if (this.opened && !this.saved?.[this.key(s)]) {
-        cx.spawn(task => {
+        cx.spawn(async task => {
+          await task.sleep(0);
           if (this.formContext === formContext && this.current(s)) this.open(task);
         });
       }

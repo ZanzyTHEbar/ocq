@@ -1,19 +1,20 @@
 import { div } from "gpui-kit";
+import { readableValue } from "./readable-record.js";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { spaces } from "herdr";
 import { bridgeCommand, compatibility } from "./compatibility.js";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
-import { composeDecode } from "./private-frames.js";
+import { composeDecode, readInputFile } from "./private-frames.js";
 
 const hash = (s) => createHash("sha256").update(s).digest("hex");
 const hex = (s) => /^[0-9a-f]{64}$/.test(s || "");
-const visible = (s) => Array.from(JSON.stringify(s), (c) => /[\p{Cc}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]/u.test(c) ? Array.from({ length: c.length }, (_, i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`).join("") : c).join("");
+const visible = readableValue;
 const same = (a, b) => a && b && ["machine", "space_id", "queue_identity", "project_id", "job_id", "sequence"].every((k) => a[k] === b[k]);
 
 // The real core has validated these retained bytes. Do not summarize aliases,
 // unknown shapes or lossy Unicode. Every field, array item and map key appears;
-// raw view preserves original whitespace/encoding as an exact JSON string.
+// Exact bytes remain internal; presentation never offers a raw-data fallback.
 function reviewPages(raw, status) {
   const m = JSON.parse(raw);
   const object = (o, keys) => { if (!o || typeof o !== "object" || Array.isArray(o) || Object.keys(o).some((k) => !keys.includes(k))) throw new Error("Unsupported representation"); };
@@ -36,19 +37,17 @@ function reviewPages(raw, status) {
     if (typeof value === "string") { if (composeDecode(Buffer.from(value)) !== value) throw new Error("Unsupported Unicode"); add(title, visible(value)); }
     else if (value === null || typeof value === "boolean") add(title, String(value));
     else if (typeof value === "number") { if (!Number.isSafeInteger(value) || Object.is(value, -0)) throw new Error("Unsupported number"); add(title, String(value)); }
-    else if (Array.isArray(value)) { if (!value.length) add(title, "[]"); value.forEach((v, n) => walk(v, `${title} [${n + 1}]`)); }
-    else if (value && typeof value === "object") { if (!Object.keys(value).length) add(title, "{}"); for (const k of Object.keys(value)) walk(value[k], `${title} · ${visible(k)}`); }
+    else if (Array.isArray(value)) { if (!value.length) add(title, "None"); value.forEach((v, n) => walk(v, `${title} · ${n + 1}`)); }
+    else if (value && typeof value === "object") { if (!Object.keys(value).length) add(title, "None"); for (const k of Object.keys(value)) walk(value[k], `${title} · ${k.replaceAll("_", " ")}`); }
     else throw new Error("Unsupported field");
   };
   walk(m, "Manifest");
-  const fields = pages.slice(); pages.length = 0;
-  add("Exact retained manifest · JSON string", visible(raw));
-  return { fields, raw: pages };
+  return { fields: pages };
 }
 
 export class ResultPublication {
   constructor() {
-    this.input = TextareaState.new({ placeholder: "Paste the exact imported result or review_result JSON (16 KiB maximum)", rows: 7 });
+    this.input = TextareaState.new({ placeholder: "Absolute path to a retained result manifest; for capture, one exclusion per line", rows: 4 });
     this.supersedes = InputState.new({ placeholder: "Supersedes association ID (optional, exact lineage)" });
     for (const input of [this.input, this.supersedes]) {
       input.on("change", (_e, cx) => cx.notify());
@@ -65,7 +64,6 @@ export class ResultPublication {
   open(owner, job, cx, capture = false) {
     this.reset(); this.context = Object.freeze({ project: owner.selected, job, space: owner.spaceID, machine: owner.machine, folder: owner.folder, generation: this.generation, capture }); this.screen = true; owner.handle.focus();
     this.boundCurrent = () => this.current(owner);
-    if (capture) this.input.set_value("[]");
     if (owner.machine === null) this.load(owner, cx); else cx.notify();
   }
   args(t) { return [t.space_id, t.queue_identity, t.project_id, t.job_id, t.sequence]; }
@@ -112,7 +110,7 @@ export class ResultPublication {
     const t = Object.freeze({ ...this.scope.target }), launch = randomBytes(32).toString("hex"), captureID = this.captureID, prefix = c.capture ? "capture" : "result-publish";
     if (mode === "receive") {
       const b = Buffer.from(raw);
-      if (!b.length || b.length > 131072 || composeDecode(b) !== raw) throw Error("Unsupported encoding");
+      if (!b.length || b.length > (c.capture && mode === "receive" ? 131072 : 1048576) || composeDecode(b) !== raw) throw Error("Unsupported encoding");
     }
     const out = await compatibility.exchange(`${prefix}-${c.capture && mode === "receive" ? "prepare" : mode}`,
       [...this.args(t), ...(mode === "preview" ? [c.capture ? captureID : digest, payloadDigest] : c.capture ? [captureID] : []), launch], raw, current);
@@ -125,24 +123,26 @@ export class ResultPublication {
     const c = this.context;
     if (this.working || this.uncertain || this.digest || !this.scope || !this.current(owner, c) || c.machine !== null) return;
     if (c.capture) { this.prepareCapture(owner, cx); return; }
-    const manifest = this.input.value(), supersedes = this.supersedes.value();
-    if (!manifest || Buffer.from(manifest).length > 16384 || composeDecode(Buffer.from(manifest)) !== manifest || supersedes && !/^assoc-[0-9a-f]{32}$/.test(supersedes)) { this.error = "Enter exact UTF-8 manifest JSON up to 16 KiB and an optional exact association ID. Nothing prepared."; cx.notify(); return; }
-    const digest = hash(manifest), raw = JSON.stringify({ target: this.scope.target, ownership_sha256: this.scope.ownership_sha256, manifest, supersedes_id: supersedes });
-    this.digest = digest; this.working = true; this.error = null; this.uncertain = true;
+    const path = this.input.value(), supersedes = this.supersedes.value(), scope = this.scope;
+    if (supersedes && !/^assoc-[0-9a-f]{32}$/.test(supersedes)) { this.error = "Enter an exact association ID, or leave it empty."; cx.notify(); return; }
+    this.working = true; this.error = null;
     cx.spawn(async (cx) => {
       try {
-        if (!this.current(owner, c)) return;
+        const manifest = await readInputFile(path, 262144);
+        if (!this.current(owner, c) || this.scope !== scope || this.input.value() !== path || this.supersedes.value() !== supersedes) return;
+        const digest = hash(manifest), raw = JSON.stringify({ target: scope.target, ownership_sha256: scope.ownership_sha256, manifest, supersedes_id: supersedes });
+        this.digest = digest; this.uncertain = true;
         const out = await this.exchange(owner, c, "receive", digest, null, raw, cx);
         if (this.current(owner, c)) { this.status = out.status; this.uncertain = false; this.input.set_value(""); this.supersedes.set_value(""); }
-      } catch (_e) { if (this.current(owner, c)) this.error = "Preparation unavailable or uncertain. Check retained intents only; do not resend. No publication is implied."; }
+      } catch (_e) { if (this.current(owner, c)) this.error = this.uncertain ? "Preparation unavailable or uncertain. Check retained intents only; do not resend. No publication is implied." : "Could not read the selected local manifest file (16 KiB maximum). Nothing was prepared."; }
       finally { if (this.current(owner, c)) { this.working = false; cx.notify(); } }
     }); cx.notify();
   }
   prepareCapture(owner, cx) {
     const c = this.context, scope = this.scope, supersedes = this.supersedes.value();
     let exclusions;
-    try { exclusions = JSON.parse(this.input.value()); if (!Array.isArray(exclusions) || exclusions.some((s) => typeof s !== "string" || !s.trim() || s.includes("\0")) || supersedes && !/^assoc-[0-9a-f]{32}$/.test(supersedes)) throw new Error(); }
-    catch (_e) { this.error = "Enter an exact JSON array of exclusion descriptions and optional supersedes ID. No snapshot captured."; cx.notify(); return; }
+    try { exclusions = this.input.value() === "" ? [] : this.input.value().split("\n"); if (exclusions.some((s) => !s.trim() || s.includes("\0")) || supersedes && !/^assoc-[0-9a-f]{32}$/.test(supersedes)) throw new Error(); }
+    catch (_e) { this.error = "Enter one exclusion description per line and an optional supersedes ID. No snapshot captured."; cx.notify(); return; }
     const raw = JSON.stringify({ context: scope, ignored_exclusions: exclusions, supersedes_id: supersedes });
     this.captureID = randomBytes(32).toString("hex"); this.working = true; this.uncertain = true; this.error = null;
     cx.spawn(async (cx) => {
@@ -214,14 +214,12 @@ export class ResultPublication {
   render(owner, cx, t, button) {
     const c = this.context, s = this.status, p = this.preview;
     const move = (delta, cx) => { p.page = Math.max(0, Math.min(p[p.mode].length - 1, p.page + delta)); if (p.mode === "fields") p.openedThrough = Math.max(p.openedThrough, p.page); cx.notify(); };
-    const toggle = (cx) => { p.mode = p.mode === "fields" ? "raw" : "fields"; p.page = 0; cx.notify(); };
     const root = v_flex().id("ocq-result-publication").size_full().min_h(0).p(14).gap(8).bg(t.background).text_color(t.foreground)
       .track_focus(owner.handle).on_key_down((e, cx) => {
         if (e.modifiers.control || e.modifiers.alt || e.modifiers.platform) return;
         if (e.key === "escape") { if (this.inputFocused) owner.handle.focus(); else if (this.confirm) this.confirm = false; else if (this.preview) this.preview = null; else this.reset(); cx.notify(); }
         else if (p && !this.confirm && !this.inputFocused && e.key === "left") move(-1, cx);
         else if (p && !this.confirm && !this.inputFocused && e.key === "right") move(1, cx);
-        else if (p && !this.confirm && !this.inputFocused && e.key === "r" && !e.is_held) toggle(cx);
         else return;
         cx.stop_propagation();
       });
@@ -241,7 +239,6 @@ export class ResultPublication {
         .child(v_flex().id(`ocq-result-page-${p.mode}-${p.page}`).flex_1().min_h(0).overflow_y_scroll().gap(10)
           .child(div().text_size(12).text_color(t.muted).child(c.capture ? "Controls/invisible Unicode are escaped. Retained cooperative point-in-time snapshot, NOT a current-tree match or test validation. Exclusions describe ignored/external inputs, not newly applied filesystem filters." : "Controls and invisible Unicode are escaped. All fields are untrusted imported claims, not verified tests or machine state."))
           .child(div().font_semibold().child(page.title)).child(div().child(page.text)))
-        .child(button("ocq-result-review-toggle", p.mode === "fields" ? "View exact raw JSON string · R" : "View structured fields · R", toggle))
         .child(h_flex().gap(8)
           .child(button("ocq-result-review-previous", "Previous · Left", (cx) => move(-1, cx)))
           .child(button("ocq-result-review-next", "Next · Right", (cx) => move(1, cx))))
@@ -261,10 +258,10 @@ export class ResultPublication {
         .when(Boolean(s), (e) => e.child(div().child(labels[s?.state] || "No retained intent observed. This is not proof that a delayed preparation cannot finish.")))
         .when(Boolean(s?.association), (e) => e.child(div().text_size(12).child(`Association: ${s?.association?.association_id}\nManifest SHA-256: ${s?.association?.manifest_sha256}\nSupersedes: ${s?.association?.supersedes_id || "none"}\nRecorded: ${s?.association?.recorded_at}\nVerification: ${s?.association?.verification}`)))
         .when(c.machine === null && Boolean(this.scope) && !this.working && !this.digest && !this.uncertain && !this.captureID, (e) => e
-          .when(c.capture, (e) => e.child(div().child("Ignored/external exclusions: exact JSON array of descriptions (default []). These document existing capture exclusions, not filesystem filters.")))
-          .child(Textarea.new(this.input).id("ocq-result-json").accessibility_label(c.capture ? "Ignored exclusion descriptions JSON array" : "Private imported result manifest JSON").h(150).px(8).border_1().border_color(t.border))
+          .when(c.capture, (e) => e.child(div().child("Ignored/external exclusions: one description per line; empty means none. These document existing capture exclusions, not filesystem filters.")))
+          .child(Textarea.new(this.input).h(c.capture ? 150 : 60).id("ocq-result-input").accessibility_label(c.capture ? "Ignored exclusion descriptions, one per line" : "Path to retained result manifest file").px(8).border_1().border_color(t.border))
           .child(Input.new(this.supersedes).id("ocq-result-supersedes").accessibility_label("Exact supersedes association ID").px(8).border_1().border_color(t.border))
-          .child(button("ocq-result-prepare", c.capture ? "Capture once and retain for private review…" : "Retain exact JSON for private review…", (cx) => this.prepare(owner, cx))))
+          .child(button("ocq-result-prepare", c.capture ? "Capture once and retain for private review…" : "Retain selected file for private review…", (cx) => this.prepare(owner, cx))))
         .when(!this.working && hex(s?.payload_sha256), (e) => e.child(button("ocq-result-review", "Review private retained manifest…", (cx) => this.review(owner, cx))))
         .when(!this.working && Boolean(c.capture ? this.captureID : this.digest) && Boolean(this.scope), (e) => e.child(button("ocq-result-check", "Check exact stored publication (read-only)", (cx) => this.check(owner, c.capture ? this.captureID : this.digest, cx))))
         .when(!this.working && c.machine === null, (e) => e.child(button("ocq-result-list", "Read retained publication intents", (cx) => this.load(owner, cx))))

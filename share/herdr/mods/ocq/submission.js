@@ -1,5 +1,6 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
+import { readInputFile } from "./private-frames.js";
 
 // Concrete implementation/review fields only. JSON lists are form data; the
 // core alone encodes canonical v2, validates policies, and builds review prompts.
@@ -17,23 +18,23 @@ export class SubmissionForm {
       ["model_id", "Model ID", "Required explicit model ID within provider", ""],
       ["variant", "Model variant (optional)", "Empty means no variant override", ""],
       ["memory_bytes", "Memory demand in bytes", "Required nonnegative whole number; 0 explicitly declares zero demand (queue floor still applies)", ""],
-      ["permissions", "Ordered session permission rules (JSON)", "Required full JSON array of action/resource/effect objects. Original JSON text reaches Go; order matters. No profile is added or relaxed.", "", true],
+      ["permissions", "Permission rules file", "Absolute local path to the existing ordered policy file. Original bytes reach Go; no policy is added or relaxed.", ""],
     ];
     const implementation = [
       ["goal", "Implementation goal", "Required; retained operator intent, not validation", "", true],
       ["prompt", "Implementation instructions", "Required exact prompt (up to 16 KiB); no instructions are invented", "", true],
-      ["scope", "Scope (JSON string array)", "Required nonempty array", "", true, true],
-      ["exclusions", "Exclusions (JSON string array)", "Explicit empty default []; replace when needed", "[]", true, true],
-      ["acceptance_criteria", "Acceptance criteria (JSON string array)", "Required nonempty array; claimed intent only", "", true, true],
-      ["allowed_actions", "Brief allowed actions (JSON string array)", "Required nonempty documentary list. Does not grant session permissions.", "", true, true],
-      ["context_references", "Context references (JSON string array)", "Explicit empty default []; not execution authority", "[]", true, true],
+      ["scope", "Scope", "One scope entry per line; required", "", true, true],
+      ["exclusions", "Exclusions", "One exclusion per line; empty means none", "", true, true],
+      ["acceptance_criteria", "Acceptance criteria", "One criterion per line; claimed intent only", "", true, true],
+      ["allowed_actions", "Brief allowed actions", "One documentary action per line. Does not grant session permissions.", "", true, true],
+      ["context_references", "Context references", "One reference per line; empty means none", "", true, true],
     ];
     const review = [
       ["criteria", "Review criteria", "Required complete criteria, preserved verbatim", "", true],
       ["rules", "Review rules", "Required complete rules. Core additionally enforces static read/glob/grep policy.", "", true],
     ];
     this.fields = [...common, ...(this.role === "review" ? review : implementation),
-      ["referenced_manifest_digests", "Additional stored reference digests (JSON)", this.role === "review" ? "Default []; exact selected result is included automatically. Other stored manifests sorted by digest; duplicates rejected." : "Default []; full referenced stored manifests included, sorted by digest; duplicates rejected.", "[]", true, true],
+      ["referenced_manifest_digests", "Additional stored reference digests", "One digest per line; empty means none. The exact selected review result is included automatically.", "", true, true],
     ].map(([key, label, hint, value, multiline, json]) => {
       const state = multiline ? TextareaState.new({ placeholder: hint, rows: 5 }) : InputState.new({ placeholder: hint });
       state.set_value(value);
@@ -50,12 +51,13 @@ export class SubmissionForm {
     host.handle.focus(); cx.notify();
   }
 
-  values(context) {
+  async values(context) {
     const d = { project_id: context.project, binding_revision: context.revision };
     for (const f of this.fields) {
       const text = f.state.value();
-      d[f.key] = f.json ? JSON.parse(text) : text;
+      d[f.key] = f.json ? (text === "" ? [] : text.split("\n")) : text;
     }
+    d.permissions = await readInputFile(d.permissions, 16384);
     if (!/^(0|[1-9][0-9]*)$/.test(d.memory_bytes) || !Number.isSafeInteger(Number(d.memory_bytes))) throw new Error("explicit safe memory count required");
     d.memory_bytes = Number(d.memory_bytes);
     if (this.role === "review") {

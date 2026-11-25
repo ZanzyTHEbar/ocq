@@ -29,8 +29,10 @@ Unknown ownership holds capacity. Never replay uncertain actions.
 Keep full exact retained bytes, context/image/generation fences,
 durable arm, one attempt, exact receipt recovery and pointer-only confirmations.
 Normal setup, goal, task and session-opening confirmations show a concise semantic
-summary of those frozen bytes. Raw JSON and identity pins are optional Technical
-details, never mandatory pages. Configured roles are defaults under Advanced.
+summary of those frozen bytes. JSON is never displayed, including Technical
+details and Exact evidence. Use readable domain fields and labelled identity
+values; original bytes remain internal for hashing and immutable receipts.
+Use retained-file inputs rather than JSON editors. Configured roles are defaults under Advanced.
 No fabricated data or design approval.
 
 ## Authority

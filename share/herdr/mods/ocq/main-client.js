@@ -1,11 +1,12 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, terminals } from "herdr";
+import { run, terminals, spaces, panes } from "herdr";
 import { randomBytes } from "crypto";
 import { Buffer } from "buffer";
 import { bridgeCommand, compatibility } from "./compatibility.js";
 import { decimal } from "./stored-updates.js";
 import { mainAction, mainSummary, roleSummary, technicalDetails } from "./action-review.js";
+import { panelEpoch } from "./panel-state.js";
 
 const hex = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const id = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
@@ -16,7 +17,7 @@ const identity = value => JSON.stringify(value && Object.fromEntries(Object.entr
 
 function mainStatus(value, project, operation) {
   if (!object(value) || value.protocol !== "ocq-main-v1" || value.project_id !== project || !id(value.operation_id) ||
-    operation && value.operation_id !== operation || !["create", "adopt", "refresh", "send", "reopen"].includes(value.mode) ||
+    operation && value.operation_id !== operation || !["create", "adopt", "refresh", "role-refresh", "send", "reopen"].includes(value.mode) ||
     !sessionID(value.session_id) || !id(value.setup_id) || !hex(value.intent_sha256) || !decimal(value.binding_revision) ||
     !hex(value.ownership_sha256) || !hex(value.profile_sha256) ||
     ["state", "reason", "repo", "main_branch", "head", "commit_anchor", "opencode_project_id", "ownership_mode", "read_at"].some(key => typeof value[key] !== "string") ||
@@ -57,7 +58,7 @@ function clientStatus(value, scope, digest) {
 // intents and explicit native navigation pointers; no prompt/profile upload.
 export class MainClientControls {
   constructor(host) {
-    this.host = host; this.generation = 0; this.mains = []; this.clients = [];
+    this.host = host; this.generation = 0; this.mains = []; this.clients = []; this.retainedViewers = new Map();
     this.compatibility = host.compatibility || compatibility;
     this.command = (args, options) => bridgeCommand(args, { ...options, compatibility: this.compatibility });
     try {
@@ -68,11 +69,19 @@ export class MainClientControls {
   }
   work() { return this.host.workOperator; }
   current(scope, generation = this.generation) { return this.work().current(scope) && this.work().visible() && this.generation === generation; }
-  suspend() { this.generation++; this.review = null; this.verification = null; this.working = false; this.error = null; this.navigationTarget = null; this.navigationCandidates = null; this.waitingForTerminal = null; this.navigationRecovery = null; }
+  suspend() {
+    if (this.goalCheck?.state === "checking") this.goalCheck = { ...this.goalCheck, state: "canceled",
+      message: "Status check canceled because the project context changed. No prompt was resent." };
+    this.generation++; this.review = null; this.verification = null; this.working = false; this.error = null; this.navigationTarget = null; this.navigationCandidates = null; this.waitingForTerminal = null; this.navigationRecovery = null; this.openIntent = null; this.navigationProof = null;
+  }
   sync(scope) {
     const key = JSON.stringify(scope);
     if (key === this.scopeKey) return;
-    this.suspend(); this.scopeKey = key; this.scope = scope;
+    this.suspend(); this.scopeKey = key; this.scope = scope; this.goalCheck = null;
+    if (scope) {
+      const retentionScope = JSON.stringify([scope.source ?? scope.machine, scope.space, scope.queue, scope.project, scope.store, scope.folder]);
+      if (retentionScope !== this.retentionScope) { this.retainedViewers.clear(); this.retentionScope = retentionScope; }
+    }
     this.mains = []; this.clients = []; this.goals = []; this.selectedMain = null; this.operation = null; this.client = null; this.live = null;
   }
   apply(scope, main, clients, cx) {
@@ -92,6 +101,7 @@ export class MainClientControls {
     });
     this.selectedMain = main.selected ? mainStatus(main.selected, scope.project) : null;
     this.clients = clients.map(item => clientStatus(item, scope));
+    for (const item of this.clients) this.rememberClient(item);
     if (new Set(this.mains.map(item => item.operation_id)).size !== this.mains.length ||
       new Set(this.clients.map(item => item.pointer_sha256)).size !== this.clients.length) throw Error("Duplicate Main/client records");
     if (this.operation) this.operation = this.mains.find(item => item.operation_id === this.operation.operation_id) || null;
@@ -138,7 +148,7 @@ export class MainClientControls {
   freeze(kind, value, scope, generation, authorization) {
     if (!this.authorized(authorization, scope, generation)) throw Error("Review authorization changed");
     const hc = kind === "client" ? this.host.nativeHC.approved : null;
-    if (kind === "client" && !this.host.nativeHC.approvedDigest()) throw Error("Review exact private HC first");
+    if (kind === "client" && !this.host.nativeHC.approvedDigest("navigation")) throw Error("Review exact private HC first");
     this.review = { kind, value, scope, generation, pins: authorization.pins, hc,
       epoch: authorization.epoch, serial: authorization.serial,
       pages: this.work().pagesFor(hc ? { client: value, hc_binding: hc.value } : value), page: 0, confirming: false };
@@ -147,7 +157,7 @@ export class MainClientControls {
     const currentBinding = this.host.board?.project?.current_binding;
     const revision = review?.kind === "main" ? review.value.binding.revision : review?.value.pointer.binding_revision;
     return review && !review.readOnly && this.review === review && this.current(review.scope, review.generation) && this.compatibility.workReady() &&
-      (review.kind !== "client" || review.hc === this.host.nativeHC.approved && !!this.host.nativeHC.approvedDigest()) &&
+      (review.kind !== "client" || review.hc === this.host.nativeHC.approved && !!this.host.nativeHC.approvedDigest("navigation")) &&
       this.compatibility.epoch === review.epoch && this.compatibility.serial === review.serial && pins(this.compatibility.status) === review.pins &&
       currentBinding?.repo_root === review.scope.folder && String(currentBinding.revision) === String(revision);
   }
@@ -194,50 +204,113 @@ export class MainClientControls {
   }
   recoverMain(item, cx) {
     const scope = this.scope, generation = this.generation;
-    if (!this.current(scope) || this.working) return;
+    if (this.working) {
+      this.error = "Another Main check or navigation is in progress. Wait for it to finish; no prompt was resent.";
+      cx.notify(); return;
+    }
+    const check = { operation: item.operation_id, state: "checking", message: "Checking saved goal status… No prompt is being resent." };
+    this.goalCheck = check;
+    if (!this.current(scope)) {
+      check.state = "canceled"; check.message = "Project context changed. Reopen this project before checking its saved goal. No prompt was resent.";
+      cx.notify(); return;
+    }
     this.review = null; this.working = true; this.error = null;
     cx.spawn(async cx => {
       try {
-        const value = await this.call("main-recover", scope, item.operation_id);
+        const value = await this.call("main-recover", scope, item.operation_id, false, [],
+          () => this.current(scope, generation));
         if (!this.current(scope, generation)) return;
-        this.live = mainStatus(value, scope.project, item.operation_id);
+        const observed = mainStatus(value, scope.project, item.operation_id);
+        if (observed.intent_sha256 !== item.intent_sha256 || observed.session_id !== item.session_id)
+          throw Error("Different saved Main operation");
+        this.live = observed;
+        check.state = "checked"; check.readAt = observed.read_at;
+        check.message = observed.mode === "send" && observed.prompt_id && ["ready", "prompt_pending", "busy"].includes(observed.state)
+          ? "Goal received · not proof that the goal is complete. No prompt was resent."
+          : observed.state === "prompt_attempted_unknown"
+          ? "Saved goal receipt is unverified. Do not resend. Recorded work and review are unchanged."
+          : `Saved status: ${observed.state.replaceAll("_", " ")}. No prompt was resent.`;
+        if (["blocked", "unknown", "missing_or_unknown", "mismatch", "role_unverified", "prompt_attempted_unknown"].includes(observed.state))
+          check.state = "attention";
         this.work().dirty = true;
-      } catch (_) { if (this.current(scope, generation)) this.error = "Exact Main observation unavailable. No replacement, prompt resend, permission reply or continuation was attempted."; }
-      finally { if (this.current(scope, generation)) { this.working = false; cx.notify(); } }
+      } catch (_) {
+        if (this.current(scope, generation)) {
+          check.state = "error"; check.message = "Saved goal status unavailable. Check this project's connection, then try the read-only check again. No prompt was resent.";
+          this.error = check.message;
+        }
+      } finally {
+        if (this.goalCheck === check && check.state === "checking") {
+          check.state = "canceled"; check.message = "Status check canceled because the project context changed. No prompt was resent.";
+        }
+        if (this.current(scope, generation)) this.working = false;
+        cx.notify();
+      }
     }, { owner: this.host.root || this.host }); cx.notify();
   }
   navigationKey(scope, kind, work) { return JSON.stringify([scope.source ?? scope.machine, scope.space, scope.queue, scope.project, kind, work]); }
+  navigationOrigin() {
+    const active = spaces().find(s => s.active);
+    return JSON.stringify([active?.id, active?.tabs.find(t => t.active)?.id]);
+  }
+  intentCurrent(intent = this.openIntent) {
+    return !!intent && intent === this.openIntent && this.current(intent.scope, intent.generation) &&
+      panelEpoch() === intent.marker && this.navigationOrigin() === intent.origin &&
+      this.targetSession(intent.kind, intent.work) === intent.session;
+  }
+  proofCurrent(proof = this.navigationProof) {
+    return !!proof && this.intentCurrent(proof.intent) && !proof.intent.readOnly &&
+      proof.hc === this.host.nativeHC.approved && proof.context === this.host.nativeHC.context() &&
+      this.authorized(proof.authorization, proof.intent.scope, proof.intent.generation);
+  }
   openConversation(kind, work, cx) {
     const scope = this.work().bound;
     this.sync(scope);
-    if (this.working) { cx.notify(); return; }
+    if (this.working || this.tabNavigation) { cx.notify(); return; }
     this.navigationTarget = { kind, work };
     this.navigationCandidates = null; this.client = null; this.verification = null; this.review = null; this.waitingForTerminal = null; this.navigationRecovery = null;
-    this.revealNavigation = true; this.error = null;
+    this.revealNavigation = true; this.error = null; this.attachmentNotice = null;
     const generation = this.generation;
+    this.navigationProof = null;
+    this.openIntent = { scope, generation, kind, work, session: this.targetSession(kind, work), marker: panelEpoch(), origin: this.navigationOrigin() };
     if (!this.host.panelCurrent()) { this.error = "The owning project context changed. Reopen the project before opening its conversation."; cx.notify(); return; }
     if (!this.current(scope) || !this.compatibility.workReady()) {
       if (!this.host.initialize) { this.error = "Verify this project connection before opening a conversation."; cx.notify(); return; }
-      const project = this.host.selected, sourceGeneration = this.host.source?.generation;
+      const project = this.host.selected, sourceGeneration = this.host.source?.generation, intent = this.openIntent;
       this.working = true;
       cx.spawn(async task => {
         try {
           await this.host.initialize(task); // Fresh read-only repository/connection verification.
+          if (this.openIntent !== intent) return;
           this.working = false;
-          if (this.host.selected !== project || this.host.source?.generation !== sourceGeneration || !this.host.panelCurrent()) return;
+          if (this.openIntent !== intent || panelEpoch() !== intent.marker || this.host.selected !== project ||
+              this.host.source?.generation !== sourceGeneration || !this.host.panelCurrent()) return;
           if (this.compatibility.workReady()) this.openConversation(kind, work, task);
           else this.error = this.host.error || "Conversation navigation needs a verified project and native launch authority. No client was opened.";
-        } catch (error) { this.working = false; this.error = error.message || "Project verification failed; no client was opened."; }
+        } catch (error) { if (this.openIntent === intent) { this.working = false; this.error = error.message || "Project verification failed; no client was opened."; } }
         task.notify();
       }, { owner: this.host.root || this.host });
       cx.notify(); return;
     }
-    if (this.host.nativeHC.approvedDigest()) this.navigateApproved(kind, work, cx);
+    if (this.host.nativeHC.approvedDigest("navigation")) this.navigateApproved(kind, work, cx);
     else {
-      const requested = this.host.nativeHC.read(cx, task => {
-        if (this.current(scope, generation)) this.navigateApproved(kind, work, task);
+      const intent = this.openIntent, context = this.host.nativeHC.context();
+      this.working = true;
+      cx.spawn(async task => {
+        let handedOff = false;
+        try {
+          const review = await this.host.nativeHC.load(context);
+          if (!this.intentCurrent(intent) ||
+              context !== this.host.nativeHC.context() || this.targetSession(kind, work) !== intent.session) return;
+          if (!this.host.source?.runtime?.core_id || review.value.binding.core_id !== this.host.source.runtime.core_id)
+            throw Error("The verified terminal service does not match this project's authenticated core.");
+          // The explicit Open action consents to navigation on this exact
+          // current identity only. It never answers OpenCode permissions.
+          review.navigationOnly = true;
+          this.host.nativeHC.approved = review;
+          this.working = false; handedOff = true; this.navigateApproved(kind, work, task);
+        } catch (error) { if (this.openIntent === intent) this.error = error.message || "The exact terminal service could not be verified. Nothing was opened."; }
+        finally { if (this.openIntent === intent && !handedOff) { this.working = false; task.notify(); } }
       });
-      if (!requested) this.error = this.host.nativeHC.error || "Terminal service verification is already running. Complete that review, then open the conversation.";
     }
     cx.notify();
   }
@@ -246,14 +319,128 @@ export class MainClientControls {
     return this.work().rows.find(v => v.request_id === work && ["implementation", "review"].includes(v.kind))?.job?.session_id;
   }
   navigateApproved(kind, work, cx) {
-    const session = this.targetSession(kind, work);
-    if (!session) { this.error = "This worker has no recorded owned session yet. Open Main for its current status."; cx.notify(); return; }
-    const known = this.clients.filter(v => v.pointer.target_kind === kind && v.pointer.session_id === session &&
-      (v.pointer.work_request_id || "") === work && v.pointer.space === this.scope.space);
-    if (known.length > 1) { this.navigationCandidates = known; cx.notify(); return; }
-    if (known.length === 1) { this.openRetained(known[0], cx); return; }
-    const row = this.work().rows.find(v => v.request_id === work);
-    this.prepareNavigation(kind, work, cx, kind === "integrator" || !row?.job?.terminal_proven);
+    const scope = this.scope, generation = this.generation, intent = this.openIntent;
+    if (this.working || !intent || !this.current(scope, generation)) return;
+    this.working = true;
+    cx.spawn(async task => {
+      let handedOff = false;
+      try {
+        const authorization = await this.check(scope, generation);
+        const proof = await this.observeViewers(intent, authorization);
+        if (!this.intentCurrent(intent)) return;
+        this.navigationProof = proof;
+        this.working = false; handedOff = true;
+        this.navigateObserved(kind, work, task, proof);
+      } catch (error) { if (this.current(scope, generation)) this.error = `${error.message || "Saved viewer history could not be verified."} No new viewer was created.`; }
+      finally { if (!handedOff && this.current(scope, generation)) { this.working = false; task.notify(); } }
+    });
+    cx.notify();
+  }
+  async observeViewers(intent, authorization) {
+    const { scope, generation, kind, work, session } = intent;
+    const hc = this.host.nativeHC.approved, context = this.host.nativeHC.context();
+    const current = () => this.intentCurrent(intent) && this.authorized(authorization, scope, generation) &&
+      hc === this.host.nativeHC.approved && context === this.host.nativeHC.context();
+    if (!session || !current()) throw Error("Exact conversation context is unavailable.");
+    const matches = v => v.pointer.target_kind === kind && v.pointer.session_id === session &&
+      (v.pointer.work_request_id || "") === work && v.pointer.space === scope.space;
+    // Preserve previously observed pointers even when a non-atomic list omits
+    // one. Missing observations never prove a viewer closed.
+    const retained = [...this.retainedViewers.values(), ...this.clients, ...(this.client?.pointer ? [this.client] : [])].filter(matches);
+    const response = await this.command(["client-list", "--", scope.space, scope.queue, scope.project],
+      { on: scope.machine, current });
+    if (!current()) throw Error("Conversation context changed.");
+    if (response.code !== 0 || Buffer.byteLength(response.stdout || "") > 1048576) throw Error("Saved viewer list is unavailable.");
+    const values = JSON.parse(response.stdout);
+    if (!Array.isArray(values) || values.length > 128) throw Error("Saved viewer list is unsupported.");
+    const listed = values.map(v => clientStatus(v, scope));
+    if (new Set(listed.map(v => v.pointer_sha256)).size !== listed.length) throw Error("Saved viewer identities conflict.");
+    const candidates = new Map();
+    for (const v of retained) {
+      const old = candidates.get(v.pointer_sha256);
+      if (old && (identity(old.pointer) !== identity(v.pointer) ||
+          old.terminal && v.terminal && identity(old.terminal) !== identity(v.terminal)))
+        throw Error("Retained viewer identities conflict.");
+      candidates.set(v.pointer_sha256, old?.terminal ? old : v);
+    }
+    for (const v of listed.filter(matches)) {
+      const old = candidates.get(v.pointer_sha256);
+      if (old && identity(old.pointer) !== identity(v.pointer)) throw Error("A retained viewer identity changed.");
+      candidates.set(v.pointer_sha256, old?.terminal ? old : v);
+    }
+    const local = [this.navigations[this.navigationKey(scope, `attention-${kind}`, work)],
+      this.navigations[this.navigationKey(scope, kind, work)]].filter(Boolean);
+    const saved = local.flatMap(n => [n, ...(n.history || [])]);
+    for (const n of saved) if (n.pointer && !candidates.has(n.pointer))
+      candidates.set(n.pointer, null);
+    if (candidates.size > 128) throw Error("Saved viewer history exceeds the supported bound.");
+    const rows = [];
+    let targetIdentity;
+    const conflict = message => Object.assign(Error(message), { identityConflict: true });
+    for (const [digest, old] of [...candidates].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+      try {
+        const status = clientStatus(await this.call("client-status", scope, digest, false, [], current), scope, digest);
+        if (!current()) throw Error("Conversation context changed.");
+        if (!matches(status) || old && (identity(old.pointer) !== identity(status.pointer) ||
+            old.terminal && identity(old.terminal) !== identity(status.terminal)))
+          throw conflict("Conflicting retained viewer identity.");
+        const p = status.pointer;
+        const identityPin = JSON.stringify([p.cwd, p.binding_revision, p.binding_sha256, p.service_identity,
+          p.server_origin, p.opencode_project_id, p.ownership_sha256, p.profile_sha256]);
+        if (targetIdentity && targetIdentity !== identityPin) throw conflict("Conflicting conversation ownership/profile/service identities.");
+        targetIdentity = identityPin;
+        const view = await this.call("client-verify", scope, digest, true, [], current, hc.value.binding_sha256);
+        if (!current()) throw Error("Conversation context changed.");
+        let client;
+        try { client = this.checkedClientView(view, scope, digest, status); }
+        catch (_) { throw conflict("Returned viewer identity does not match its retained record."); }
+        const state = client.state === "blocked" ? "unobservable" :
+          client.terminal && view.terminal_state === "live" ? "live" :
+          client.terminal && view.terminal_state === "finished" && client.state === "terminal_recorded" ? "finished" :
+          !client.terminal && view.terminal_state === "unobserved" && client.state === "ready_to_open" &&
+            !this.attempted("client-open", scope, digest) ? "not_invoked" : "unobservable";
+        rows.push({ client, view, state });
+      } catch (error) {
+        if (!current() || error.identityConflict) throw error;
+        rows.push({ client: old, state: "unobservable", digest });
+      }
+    }
+    if (!current()) throw Error("Conversation context changed.");
+    const unresolvedLocal = saved.some(n => !n.pointer && !rows.some(r => r.client?.pointer.navigation_id === n.id));
+    this.clients = [...new Map([...retained, ...listed].map(v => [v.pointer_sha256, v])).values()];
+    for (const item of this.clients) this.rememberClient(item);
+    return { intent, authorization, hc, context, rows, unresolvedLocal, local: local.map(n => n.pointer) };
+  }
+  navigateObserved(kind, work, cx, proof) {
+    if (!this.intentCurrent(proof?.intent)) return;
+    const live = proof.rows.filter(r => r.state === "live");
+    const choose = rows => proof.local.map(d => rows.find(r => r.client.pointer_sha256 === d)).find(Boolean) || rows[0];
+    if (proof.intent.readOnly) {
+      this.error = live.length ? `${live.length} exact live viewer${live.length === 1 ? "" : "s"} observed${proof.unresolvedLocal || proof.rows.some(r => r.state === "unobservable") ? "; other saved openings remain unobservable" : ""}. Status checked only; no launch, attachment or selection was requested.` :
+        proof.unresolvedLocal || proof.rows.some(r => r.state === "unobservable") ? "Opening status remains unobservable; prior IDs are retained. No preparation, launch or keep was repeated." :
+        "Prior viewers are closed or not invoked. Status checked only; use an explicit Open conversation action to navigate.";
+      cx.notify(); return;
+    }
+    if (!this.proofCurrent(proof)) return;
+    if (live.length) {
+      const selected = choose(live);
+      this.acceptClientView(selected.view, proof.intent.scope, selected.client.pointer_sha256);
+      this.showTerminal(proof.intent.scope, this.client, cx);
+    } else if (proof.unresolvedLocal || proof.rows.some(r => r.state === "unobservable")) {
+      this.error = "A matching viewer or preparation is pending or unobservable. Check opening status; no replacement will be prepared or launched.";
+    } else {
+      const ready = choose(proof.rows.filter(r => r.state === "not_invoked"));
+      if (ready) {
+        this.selectClient(ready.client);
+        this.freeze("client", ready.client, proof.intent.scope, proof.intent.generation, proof.authorization);
+        this.review.navigateOnOpen = true;
+        this.continueOpen(cx);
+      } else {
+        const row = this.work().rows.find(v => v.request_id === work);
+        this.prepareNavigation(kind, work, cx, kind === "integrator" || !row?.job?.terminal_proven, proof);
+      }
+    }
+    cx.notify();
   }
   openRetained(item, cx) {
     this.navigationCandidates = null;
@@ -262,60 +449,50 @@ export class MainClientControls {
         (item.pointer.work_request_id || "") !== target.work)) {
       this.error = "The saved client belongs to a different conversation. Nothing was opened."; cx.notify(); return;
     }
-    if (item.terminal) this.inspectClient(item, cx, true);
+    if (item.terminal) this.inspectClient(item, cx, !this.openIntent?.readOnly);
     else {
       this.reviewClient(item, cx);
       if (["armed", "attempted_unknown"].includes(item.state))
         this.error = "A prior inspection launch is uncertain. Check its exact receipt; another client will not be spawned.";
     }
   }
-  prepareNavigation(kind, work, cx, attention = false, recoverID = null) {
+  prepareNavigation(kind, work, cx, attention = false, proof = this.navigationProof) {
     const scope = this.work().bound;
-    this.sync(scope);
     const generation = this.generation;
-    if (!this.current(scope) || this.working || this.storageError || !this.compatibility.nativeReady()) return;
+    if (!this.current(scope) || this.working || this.storageError || !this.compatibility.nativeReady("navigation") ||
+        !this.proofCurrent(proof) || proof.intent.kind !== kind || proof.intent.work !== work ||
+        proof.unresolvedLocal || proof.rows.some(r => r.state !== "finished")) return;
     const key = this.navigationKey(scope, attention ? `attention-${kind}` : kind, work);
-    const sameMode = this.navigations[key];
-    const previous = sameMode ||
-      this.navigations[this.navigationKey(scope, attention ? kind : `attention-${kind}`, work)];
-    const found = previous && this.clients.find(item => item.pointer.navigation_id === previous.id);
-    if (found) { this.openRetained(found, cx); return; }
-    if (previous?.pointer) { this.reviewClient({ pointer_sha256: previous.pointer }, cx); return; }
-    if (previous && (!sameMode || recoverID !== previous.id)) {
-      this.navigationRecovery = { kind, work, attention: sameMode ? attention : !attention, id: previous.id };
-      this.error = "An earlier inspection preparation has no returned pointer. Recover that saved preparation; no client launch is being retried.";
-      cx.notify(); return;
-    }
-    if (recoverID && (!previous || previous.id !== recoverID)) {
-      this.error = "Saved preparation changed. Reopen the conversation to inspect its exact record.";
-      cx.notify(); return;
-    }
-    // Unknown preparation reuses its saved ID. A NEW ID requires another
-    // explicit action after the original pointer is known, never an auto retry.
-    const navigation = previous || { id: `open-${randomBytes(16).toString("hex")}`, phase: "uncertain" };
+    const former = this.navigations[key];
+    const history = [...(former?.history || []), ...proof.rows.map(r => ({
+      id: r.client.pointer.navigation_id, pointer: r.client.pointer_sha256, state: "viewer_finished",
+    }))];
+    const navigation = { id: `open-${randomBytes(16).toString("hex")}`, phase: "uncertain",
+      history: [...new Map(history.map(v => [v.pointer, v])).values()] };
     this.navigations[key] = navigation;
     this.review = null; this.navigationRecovery = null; this.working = true; this.error = null;
     cx.spawn(async cx => {
       try {
         localStorage.setItem("native-navigation-v1", JSON.stringify(this.navigations));
         await localStorage.flush();
-        const authorization = await this.check(scope, generation);
-        if (!this.authorized(authorization, scope, generation)) return;
-        const value = await this.call(attention ? "client-attention-prepare-v1" : "client-prepare", scope, navigation.id, true, [kind, work], () => this.authorized(authorization, scope, generation));
-        if (!this.authorized(authorization, scope, generation)) return;
+        const authorization = proof.authorization;
+        if (!this.proofCurrent(proof)) return;
+        const value = await this.call(attention ? "client-attention-prepare-v1" : "client-prepare", scope, navigation.id, true, [kind, work], () => this.proofCurrent(proof));
+        if (!this.proofCurrent(proof)) return;
         pointer(value, scope);
-        if (value.navigation_id !== navigation.id || value.target_kind !== kind || (value.work_request_id || "") !== work || value.space !== scope.space) throw Error("Different client target");
+        if (value.navigation_id !== navigation.id || value.target_kind !== kind || (value.work_request_id || "") !== work || value.space !== scope.space ||
+            this.openIntent && value.session_id !== this.openIntent.session) throw Error("Different client target");
         navigation.phase = "prepared"; navigation.pointer = value.pointer_sha256;
         localStorage.setItem("native-navigation-v1", JSON.stringify(this.navigations));
         await localStorage.flush();
-        if (!this.authorized(authorization, scope, generation)) return;
+        if (!this.proofCurrent(proof)) return;
         this.selectClient({ protocol: "ocq-client-v1", project_id: scope.project, pointer_sha256: value.pointer_sha256,
           state: "ready_to_open", pointer: value, attempt_permitted: false, current_route: "unverified" });
         this.freeze("client", this.client, scope, generation, authorization);
         this.review.navigateOnOpen = true; this.work().dirty = true;
       } catch (error) { if (this.current(scope, generation)) this.error = `${error.message || "Navigation preparation failed"} Saved preparation ID retained; no client launch was requested.`; }
-      finally { if (this.current(scope, generation)) { this.working = false; cx.notify(); } }
-    }, { owner: this.host.root || this.host }); cx.notify();
+      finally { if (this.current(scope, generation)) { this.working = false; this.continueOpen(cx); cx.notify(); } }
+    }); cx.notify();
   }
   reviewClient(item, cx) {
     const scope = this.scope, generation = this.generation;
@@ -326,7 +503,7 @@ export class MainClientControls {
         const value = clientStatus(await this.call("client-status", scope, item.pointer_sha256), scope, item.pointer_sha256);
         if (!this.current(scope, generation)) return;
         this.selectClient(value);
-        if (this.compatibility.nativeReady() && value.pointer.space === scope.space) {
+        if (this.compatibility.nativeReady("navigation") && value.pointer.space === scope.space) {
           const authorization = await this.check(scope, generation);
           if (!this.authorized(authorization, scope, generation)) return;
           this.freeze("client", value, scope, generation, authorization);
@@ -334,7 +511,7 @@ export class MainClientControls {
         } else this.review = { kind: "client", value, scope, generation, readOnly: true,
           pages: this.work().pagesFor(value), page: 0 };
       } catch (_) { if (this.current(scope, generation)) this.error = "Exact navigation pointer unavailable; no client launched."; }
-      finally { if (this.current(scope, generation)) { this.working = false; cx.notify(); } }
+      finally { if (this.current(scope, generation)) { this.working = false; this.continueOpen(cx); cx.notify(); } }
     }, { owner: this.host.root || this.host }); cx.notify();
   }
   confirm(cx) {
@@ -342,25 +519,40 @@ export class MainClientControls {
     if (!this.pinned(review) || this.working || this.storageError || !review.confirming) return;
     const main = review.kind === "main", action = main ? "main-start" : "client-open";
     if (!main && review.value.state !== "ready_to_open") return;
+    if (!main && !this.proofCurrent()) {
+      if (!this.openIntent?.readOnly) this.openConversation(review.value.pointer.target_kind, review.value.pointer.work_request_id || "", cx);
+      return;
+    }
     const target = main ? review.value.status.operation_id : review.value.pointer_sha256;
     if (this.attempted(action, scope, target)) return;
     const key = this.markerKey(action, scope, target);
     const completionCurrent = () => {
       const binding = this.host.board?.project?.current_binding;
-      return this.authorized(review, scope, review.generation) && (main ||
-        review.hc === this.host.nativeHC.approved && !!this.host.nativeHC.approvedDigest() &&
+      return this.authorized(review, scope, review.generation) && (main || this.intentCurrent() &&
+        review.hc === this.host.nativeHC.approved && !!this.host.nativeHC.approvedDigest("navigation") &&
         binding?.repo_root === scope.folder &&
         String(binding.revision) === String(review.value.pointer.binding_revision));
     };
-    this.attempts[key] = { state: "not_invoked", digest: main ? review.value.preview_sha256 : target };
+    const attempt = { state: "not_invoked", digest: main ? review.value.preview_sha256 : target };
+    this.attempts[key] = attempt;
     this.working = true; this.error = null; review.confirming = false;
     cx.spawn(async cx => {
       let invoked = false;
       try {
         await this.saveAttempts();
         if (!this.pinned(review)) throw Error("Context changed");
-        this.attempts[key].state = "uncertain"; await this.saveAttempts();
-        if (!this.pinned(review)) throw Error("Context changed");
+        if (!main) {
+          // A prepared pointer is not a lifetime-wide launch authorization.
+          // Read/verify the entire retained set again immediately before arm.
+          const proof = await this.observeViewers(this.openIntent, review);
+          if (!this.pinned(review) || !this.intentCurrent(proof.intent) || proof.unresolvedLocal ||
+              proof.rows.some(r => r.state === "live" || r.state === "unobservable") ||
+              !proof.rows.some(r => r.client?.pointer_sha256 === target && r.state === "not_invoked"))
+            throw Error("Another viewer is live, pending or unobservable");
+          this.navigationProof = proof;
+        }
+        attempt.state = "uncertain"; await this.saveAttempts();
+        if (!this.pinned(review) || !main && !this.proofCurrent()) throw Error("Context changed");
         invoked = true;
         const value = await this.call(action, scope, target, true, main ? [review.value.preview_sha256] : [],
           () => this.pinned(review), main ? undefined : review.hc.value.binding_sha256);
@@ -378,16 +570,16 @@ export class MainClientControls {
               review.hc.value.binding_sha256);
             if (completionCurrent()) {
               this.acceptClientView(observed, scope, target);
-              if (this.verification.state === "live") this.showTerminal(scope, this.client);
+              if (this.verification.state === "live") this.showTerminal(scope, this.client, cx);
               else this.error = "The saved inspection client is not live. Its receipt is retained; no replacement was launched.";
             }
           }
         }
         this.work().dirty = true;
       } catch (_) {
-        if (!invoked) {
-          this.attempts[key].state = "not_invoked";
-          try { await this.saveAttempts(); } catch (_) { this.attempts[key].state = "uncertain"; this.storageError = true; }
+        if (!invoked && this.attempts[key] === attempt) {
+          attempt.state = "not_invoked";
+          try { await this.saveAttempts(); } catch (_) { attempt.state = "uncertain"; this.storageError = true; }
         }
         if (this.current(scope, review.generation)) this.error = invoked
           ? "Operation outcome unknown/refused. Read the exact record; no repeat Start or client spawn is offered."
@@ -397,16 +589,29 @@ export class MainClientControls {
       }
     }, { owner: this.host.root || this.host }); cx.notify();
   }
-  acceptClientView(value, scope, digest) {
-    this.verification = null;
+  continueOpen(cx) {
+    const intent = this.openIntent, review = this.review;
+    if (!intent || !this.proofCurrent() || this.working ||
+        this.targetSession(intent.kind, intent.work) !== intent.session || review?.kind !== "client" ||
+        review.value.state !== "ready_to_open" || !this.pinned(review)) return;
+    review.confirming = true;
+    this.confirm(cx);
+  }
+  checkedClientView(value, scope, digest, previous = null) {
     if (value.protocol !== "ocq-client-v1" || value.current_route !== "unverified" ||
       !["live", "finished", "unobserved"].includes(value.terminal_state)) throw Error("Invalid native terminal observation");
     const client = clientStatus(value.status, scope, digest);
-    if (this.client?.pointer_sha256 === digest && (identity(this.client.pointer) !== identity(client.pointer) ||
-        this.client.terminal && identity(this.client.terminal) !== identity(client.terminal)))
+    if (previous?.pointer_sha256 === digest && (identity(previous.pointer) !== identity(client.pointer) ||
+        previous.terminal && identity(previous.terminal) !== identity(client.terminal)))
       throw Error("Retained client identity changed; inspect afresh");
-    if (client.terminal && client.terminal.labels?.["ocq.hc_binding"] !== this.host.nativeHC.approvedDigest())
+    if (client.terminal && client.terminal.labels?.["ocq.hc_binding"] !== this.host.nativeHC.approvedDigest("navigation"))
       throw Error("Retained terminal HC binding mismatch");
+    return client;
+  }
+  acceptClientView(value, scope, digest) {
+    this.verification = null;
+    const client = this.checkedClientView(value, scope, digest, this.client);
+    this.rememberClient(client);
     this.client = client;
     this.verification = { scope, generation: this.generation, hc: this.host.nativeHC.approved,
       context: this.host.nativeHC.context(), pointer: identity(client.pointer), receipt: identity(client.terminal),
@@ -414,39 +619,140 @@ export class MainClientControls {
   }
   verifiedClient(value = this.client) {
     const v = this.verification;
-    return !!v && !!value?.terminal && this.current(v.scope, v.generation) && this.compatibility.nativeReady() &&
+    return !!v && !!value?.terminal && this.current(v.scope, v.generation) && this.compatibility.nativeReady("navigation") &&
       v.hc === this.host.nativeHC.approved && v.context === this.host.nativeHC.context() &&
       v.digest === value.pointer_sha256 && v.pointer === identity(value.pointer) && v.receipt === identity(value.terminal);
   }
   selectClient(value) {
+    if (value?.pointer) this.rememberClient(value);
     if (!this.verifiedClient(value)) this.verification = null;
     this.client = value;
   }
-  observedTerminal(scope, value) {
-    const receipt = value?.terminal;
-    if (!receipt) return null;
-    const address = scope.machine === null ? receipt.returned_terminal_id : `${scope.machine}/${receipt.returned_terminal_id}`;
-    const observed = terminals().find(item => item.address === address && item.state === "live");
-    return observed && observed.cwd === receipt.cwd && JSON.stringify(observed.argv) === JSON.stringify(receipt.argv) &&
-      observed.labels?.["ocq.handoff"] === value.pointer_sha256 &&
-      observed.labels?.["ocq.hc_binding"] === this.host.nativeHC.approvedDigest() &&
-      observed.labels?.["herdr.space"] === scope.space ? address : null;
+  rememberClient(value) {
+    const old = this.retainedViewers.get(value.pointer_sha256);
+    if (old && (identity(old.pointer) !== identity(value.pointer) ||
+        old.terminal && value.terminal && identity(old.terminal) !== identity(value.terminal)))
+      throw Error("Conflicting retained viewer identity.");
+    this.retainedViewers.set(value.pointer_sha256, old?.terminal && !value.terminal ? old : value);
   }
-  showTerminal(scope, value) {
+  showTerminal(scope, value, cx) {
     const receipt = value.terminal;
     if (!receipt || value !== this.client || !this.current(scope) || !this.verifiedClient(value) ||
-        this.verification.state !== "live" || receipt.peer !== (scope.machine ?? "local")) throw Error("Native receipt peer/binding changed");
-    const address = this.observedTerminal(scope, value);
-    if (!address) {
-      this.waitingForTerminal = { digest: value.pointer_sha256, scope, generation: this.generation };
-      return;
+        this.verification.state !== "live" || receipt.peer !== (scope.machine ?? "local") ||
+        !this.intentCurrent() || this.openIntent.readOnly) throw Error("Native navigation intent or receipt changed");
+    if (this.tabNavigation) return;
+    const address = scope.machine === null ? receipt.returned_terminal_id : `${scope.machine}/${receipt.returned_terminal_id}`;
+    const spaceID = scope.machine === null ? scope.space : `${scope.machine}/${scope.space}`;
+    const space = spaces().find(s => s.id === spaceID && s.machine === scope.machine);
+    if (!space) throw Error("The receipt's existing project space is unavailable; no replacement space was created.");
+    const ticket = { address, spaceID, scope, intent: this.openIntent,
+      sourceGeneration: this.host.source?.generation, context: JSON.stringify(this.host.setupContext),
+      marker: panelEpoch(), origin: this.navigationOrigin(), digest: value.pointer_sha256,
+      cwd: receipt.cwd, argv: JSON.stringify(receipt.argv), hc: receipt.labels["ocq.hc_binding"],
+      key: this.markerKey("terminal.keep", scope, value.pointer_sha256), phase: "observing" };
+    this.tabNavigation = ticket; this.attachmentNotice = null; this.error = null;
+    const expiry = cx.timer.after(6000, task => {
+      if (this.tabNavigation !== ticket) return;
+      this.tabNavigation = null; this.attachmentNotice = ticket;
+      this.error = "Project-tab attachment is not yet observed. Check opening status; prior attempts remain uncertain and will not be repeated.";
+      task.notify();
+    });
+    // Event/task only, implicitly owned. Native observation is bounded; expiry
+    // ends the spinner, never proves failure or permits another keep.
+    cx.spawn(async task => {
+      try {
+        for (let read = 0; read < 40; read++) {
+          if (!this.tabTicketCurrent(ticket)) {
+            ticket.message = "Navigation context changed. Further selection and attachment were cancelled; prior attempts remain retained.";
+            return;
+          }
+          const terminal = terminals().find(t => t.address === ticket.address);
+          if (terminal && (terminal.state !== "live" || terminal.cwd !== ticket.cwd ||
+              JSON.stringify(terminal.argv) !== ticket.argv || terminal.labels?.["ocq.handoff"] !== ticket.digest ||
+              terminal.labels?.["ocq.hc_binding"] !== ticket.hc || terminal.labels?.["herdr.space"] !== scope.space))
+            throw Error("The native viewer identity or state changed. No attachment was repeated.");
+          const nativePanes = panes().filter(p => p.terminal === ticket.address);
+          if (nativePanes.length > 1) throw Error("The viewer has conflicting pane identities; nothing was selected.");
+          const pane = nativePanes[0], currentSpace = spaces().find(s => s.id === ticket.spaceID && s.machine === scope.machine);
+          if (!currentSpace) throw Error("The exact existing project space is unavailable.");
+          if (terminal && pane) {
+            if (!currentSpace.tabs.some(t => t.id === pane.tab)) throw Error("The viewer is attached outside its exact project space; nothing was moved.");
+            if (this.attempted("terminal.keep", scope, ticket.digest)) {
+              this.attempts[ticket.key] = { ...this.attempts[ticket.key], state: "attached",
+                digest: ticket.digest, terminal: ticket.address, tab: pane.tab };
+              await this.saveAttempts();
+            }
+            if (!this.tabTicketCurrent(ticket)) return;
+            if (!panes().some(p => p.terminal === ticket.address && p.tab === pane.tab)) throw Error("The observed pane changed before selection.");
+            ticket.phase = "attached";
+            run("space.select", { id: currentSpace.id });
+            run("tab.select", { id: pane.tab });
+            run("pane.focus", { terminal: ticket.address });
+            return;
+          }
+          if (terminal && ticket.phase === "observing") {
+            ticket.phase = "waiting";
+            if (!this.attempted("terminal.keep", scope, ticket.digest)) {
+              if (!this.intentCurrent(ticket.intent) || !this.verifiedClient(value)) return;
+              let invoked = false;
+              const attempt = { state: "not_invoked", digest: ticket.digest };
+              try {
+                this.attempts[ticket.key] = attempt;
+                await this.saveAttempts();
+                if (!this.tabTicketCurrent(ticket) || !this.intentCurrent(ticket.intent) || !this.verifiedClient(value)) return;
+                attempt.state = "uncertain"; await this.saveAttempts();
+                if (!this.tabTicketCurrent(ticket) || !this.intentCurrent(ticket.intent) || !this.verifiedClient(value)) return;
+                invoked = true;
+                run("terminal.keep", { terminal: ticket.address, place: "tab" });
+              } finally {
+                if (!invoked && this.attempts[ticket.key] === attempt) {
+                  attempt.state = "not_invoked";
+                  try { await this.saveAttempts(); }
+                  catch (_) { attempt.state = "uncertain"; this.storageError = true; }
+                }
+              }
+            }
+          }
+          await task.sleep(125);
+        }
+        ticket.message = "Project-tab attachment is not yet observed. Check opening status; no viewer launch or keep will be repeated.";
+      } catch (error) { ticket.message = error.message || "Attachment is unconfirmed; no keep was repeated."; }
+      finally {
+        expiry.cancel();
+        if (this.tabNavigation === ticket) {
+          this.tabNavigation = null;
+          this.attachmentNotice = ticket.phase === "attached" ? null : ticket;
+          if (ticket.message) this.error = ticket.message;
+          task.notify();
+        }
+      }
+    });
+    cx.notify();
+  }
+  tabTicketCurrent(ticket) {
+    const h = this.host;
+    return this.tabNavigation === ticket && !h.closed && (!h.root || h.root.detail === h) &&
+      (!h.source || h.source.current() && h.source.generation === ticket.sourceGeneration) &&
+      h.selected === ticket.scope.project && JSON.stringify(h.setupContext) === ticket.context &&
+      h.nativeHC.approvedDigest("navigation") === ticket.hc &&
+      panelEpoch() === ticket.marker && this.navigationOrigin() === ticket.origin;
+  }
+  checkOpeningStatus(cx) {
+    if (this.working) return;
+    const previous = this.openIntent || this.attachmentNotice?.intent;
+    const scope = this.work().bound;
+    if (!previous || !this.current(scope) || this.targetSession(previous.kind, previous.work) !== previous.session ||
+        !this.host.nativeHC.approvedDigest("navigation")) {
+      this.error = "The saved opening context is no longer verified. No action was repeated."; cx.notify(); return;
     }
-    // Native peek shows even terminals that have not been kept as a tab.
-    // Original launch identity is NOT proof of its current OpenCode route.
-    run("terminal.peek", { terminal: address });
-    this.navigationTarget = null; this.navigationCandidates = null; this.waitingForTerminal = null; this.error = null;
+    this.tabNavigation = null; // Cancel any pending selection; keep evidence stays.
+    this.openIntent = { ...previous, scope, generation: this.generation, readOnly: true,
+      marker: panelEpoch(), origin: this.navigationOrigin() };
+    this.navigationProof = null;
+    this.navigateApproved(previous.kind, previous.work, cx);
   }
   inspectClient(item, cx, show = false) {
+    if (show) { this.openConversation(item.pointer.target_kind, item.pointer.work_request_id || "", cx); return; }
     const scope = this.scope, generation = this.generation;
     if (!this.current(scope) || this.working || item.pointer.space !== scope.space) return;
     this.selectClient(item); this.verification = null;
@@ -461,11 +767,9 @@ export class MainClientControls {
         const hc = this.host.nativeHC.approved;
         const value = await this.call("client-verify", scope, item.pointer_sha256, true, [],
           () => current() && this.authorized(authorization, scope, generation) && hc === this.host.nativeHC.approved,
-          this.host.nativeHC.approvedDigest());
+          this.host.nativeHC.approvedDigest("navigation"));
         if (current() && this.authorized(authorization, scope, generation) && hc === this.host.nativeHC.approved) {
           this.acceptClientView(value, scope, item.pointer_sha256);
-          if (show && this.verification.state === "live") this.showTerminal(scope, this.client);
-          else if (show) this.error = "This retained inspection terminal has finished or is unavailable. No replacement was spawned.";
         }
       } catch (error) { if (this.current(scope, generation)) this.error = `${error.message || "Exact terminal verification failed"} No client was launched or replaced.`; }
       finally { if (this.current(scope, generation)) { this.working = false; cx.notify(); } }
@@ -476,6 +780,8 @@ export class MainClientControls {
     if (observed.state === "prepared") return "Awaiting your confirmation · goal not sent";
     if (observed.state === "prompt_pending") return "Goal received · waiting for Main to consume it";
     const workers = goal.work.filter(v => ["implementation", "review"].includes(v.kind));
+    if (workers.some(v => v.job?.state === "unknown"))
+      return "Worker verification blocked · capacity held; native done is not OCQ completion proof";
     const review = goal.work.find(v => v.kind === "review_result")?.result?.verdict;
     if (review) return `Review ${review.replaceAll("_", " ")} · recorded`;
     if (workers.some(v => v.job)) return `${workers.filter(v => v.job?.terminal_proven).length} of ${workers.length} workers finished`;
@@ -490,22 +796,38 @@ export class MainClientControls {
     const box = v_flex().id("ocq-main-client").w_full().min_w(0).gap(8);
     box.child(h_flex().min_w(0).items_center().gap(6)
       .child(div().flex_1().min_w(0).font_semibold().text_size(16).child("Main"))
-      .child(this.host.panelControl("ocq-main-details", this.showDetails ? "Hide technical details" : "Technical details",
+      .child(this.host.panelControl("ocq-main-details", this.showDetails ? "Hide details" : "Details",
         cx => { this.showDetails = !this.showDetails; cx.notify(); }, theme, this.host.renderTargets)));
     if (this.storageError) box.child(div().text_color(theme.blocked).child("Private attempt evidence unavailable. Starts and client launches disabled."));
+    if (this.error) box.child(div().text_size(12).text_color(theme.blocked).child(this.error));
     const selected = this.selectedMain;
     if (selected) box.child(this.host.panelControl("ocq-main-open", "Open Main", task => {
       this.work().scroll.scroll_to_item(0); this.openConversation("integrator", "", task);
     }, theme, this.host.renderTargets).font_semibold().bg(theme.hover));
-    box.child(this.host.workflow.render(cx, theme, button, selected));
+    if (selected && !this.compatibility.workReady()) box.child(div().text_size(12).text_color(theme.blocked)
+      .child(this.compatibility.reason || "This endpoint is read-only or its project context is unverified. Conversation opening is unavailable; nothing will be launched."));
+    const workflow = this.host.workflow, scope = workflow.scope(), saved = scope && workflow.saved?.[workflow.key(scope)];
+    const currentGoal = this.goals.find(g => saved?.mode === "send" && g.main.operation_id === saved.operation) || this.goals.at(-1);
+    // Keep frozen operation recovery accessible, without presenting a second
+    // setup/send wizard over work the user has already started.
+    if (!currentGoal || currentGoal.main.state === "prepared" || this.showDetails || workflow.review)
+      box.child(workflow.render(cx, theme, button, selected));
     for (const [index, goal] of (this.goals || []).entries()) {
+      if (goal !== currentGoal && !this.showDetails) continue;
       box.child(v_flex().min_w(0).gap(3).pt(8)
-        .child(div().font_semibold().child(`Goal ${index + 1}`))
+        .child(div().font_semibold().child(goal === currentGoal ? "Current goal" : `Earlier goal ${index + 1}`))
         .child(div().text_size(12).text_color(theme.muted).child(this.goalSummary(goal)))
         .when(this.showDetails, e => e.child(div().text_size(12).text_color(theme.muted).child(
           `Last checked: ${this.live?.operation_id === goal.main.operation_id ? this.live.read_at : goal.main.read_at}`)))
-        .when(!goal.work.some(v => v.job) && goal.main.state !== "prepared", e =>
-          e.child(button(`ocq-main-goal-check-${goal.main.operation_id}`, "Check exact goal status", cx => this.recoverMain(goal.main, cx)))));
+        .when(this.goalCheck?.operation === goal.main.operation_id, e =>
+          e.child(div().text_size(12).text_color(["error", "canceled", "attention"].includes(this.goalCheck.state) ? theme.blocked : theme.muted)
+            .child(`${this.goalCheck.message}${this.goalCheck.readAt ? `\nLast checked: ${this.goalCheck.readAt}` : ""}`)))
+        .when(goal === currentGoal && goal.main.state !== "prepared", e => {
+          if (this.working) e.child(div().text_size(12).text_color(theme.muted).child(
+            this.goalCheck?.state === "checking" ? "Check in progress · read only" : "Goal check unavailable while another Main action is in progress."));
+          else e.child(button(`ocq-main-goal-check-${goal.main.operation_id}`, "Check saved goal status · no resend", cx => this.recoverMain(goal.main, cx)));
+          return e;
+        }));
     }
     if (!selected) box.child(div().text_color(theme.muted).child("Main will stay linked to this project."));
     else {
@@ -533,7 +855,7 @@ export class MainClientControls {
           box.child(button(`ocq-client-verify-${item.pointer_sha256}`, "Verify and open retained client", cx => this.inspectClient(item, cx, true)));
       }
     }
-    if (this.navigationTarget?.kind === "integrator" || this.review?.kind === "main" || this.showClients && this.navigationTarget?.kind !== "worker") {
+    if (this.tabNavigation || this.attachmentNotice || this.navigationTarget?.kind === "integrator" || this.review?.kind === "main" || this.showClients && this.navigationTarget?.kind !== "worker") {
       this.revealNavigation = false;
       box.child(this.renderNavigation(cx, theme, button));
     }
@@ -541,34 +863,25 @@ export class MainClientControls {
   }
   renderNavigation(cx, theme, button) {
     const box = v_flex().w_full().min_w(0).gap(8).p(10).border(1).border_color(theme.border).rounded(6);
-    box.child(div().font_semibold().child(this.navigationTarget?.kind === "worker" ? "Worker conversation" : "Main conversation"));
+    box.child(div().font_semibold().child((this.navigationTarget || this.attachmentNotice?.intent)?.kind === "worker" ? "Worker conversation" : "Main conversation"));
     if (this.error) box.child(div().text_color(theme.blocked).child(this.error));
     if (this.navigationRecovery && !this.working) {
       const saved = this.navigationRecovery;
-      box.child(button("ocq-client-prepare-recover", "Recover saved navigation", task =>
-        this.prepareNavigation(saved.kind, saved.work, task, saved.attention, saved.id)));
+      box.child(div().text_size(12).child(`Opening status is uncertain for saved navigation ${saved.id}. Its ID and mode remain retained; no new preparation or launch will be attempted.`));
     }
+    if (!this.working && (this.openIntent || this.attachmentNotice))
+      box.child(button("ocq-client-record-opening-status", "Check opening status", task => this.checkOpeningStatus(task)));
     if (this.working) box.child(div().text_size(12).text_color(theme.muted).child("Verifying the exact saved conversation…"));
-    if (this.waitingForTerminal) {
-      const pending = this.waitingForTerminal;
-      if (!this.current(pending.scope, pending.generation) || !this.verifiedClient() || this.client.pointer_sha256 !== pending.digest) {
-        this.waitingForTerminal = null;
-        box.child(div().text_color(theme.blocked).child("The navigation context changed. Verify the saved receipt again; no client will be respawned."));
-      } else if (this.observedTerminal(pending.scope, this.client)) {
-        this.waitingForTerminal = null;
-        cx.spawn(() => {
-          if (this.current(pending.scope, pending.generation) && this.client?.pointer_sha256 === pending.digest && this.verifiedClient())
-            this.showTerminal(pending.scope, this.client);
-        }, { owner: this.host.root || this.host });
-      } else box.child(div().text_size(12).text_color(theme.muted).child("Waiting for Herdr to observe the recorded inspection terminal. No additional client is being launched."));
-    }
-    if (this.navigationTarget && !this.host.nativeHC.approvedDigest())
+    if (this.tabNavigation) box.child(div().text_size(12).text_color(theme.muted).child("Observing the exact project tab… No client is being relaunched."));
+    if (this.attachmentNotice) box.child(div().text_size(12).text_color(theme.muted).child(
+      this.attachmentNotice.message || "Attachment is not yet observed. Prior evidence is retained; no keep will be repeated."));
+    if (this.navigationTarget && !this.host.nativeHC.approvedDigest("navigation") && !this.openIntent)
       box.child(this.host.nativeHC.render(cx, theme, button));
     for (const item of this.navigationCandidates || []) box.child(button(`ocq-client-record-${item.pointer_sha256}`,
       item.terminal ? `Open retained client ${item.terminal.returned_terminal_id}` : "Inspect saved client preparation", task => this.openRetained(item, task)));
-    if (this.client?.terminal && !this.working) {
+    if (this.client?.terminal && !this.working && !this.tabNavigation && !this.openIntent) {
       if (this.verifiedClient() && this.verification.state === "live")
-        box.child(button("ocq-client-show-returned", "Open saved conversation", () => this.showTerminal(this.scope, this.client)));
+        box.child(button("ocq-client-show-returned", "Open saved conversation", task => this.openConversation(this.client.pointer.target_kind, this.client.pointer.work_request_id || "", task)));
       else box.child(button(`ocq-client-verify-${this.client.pointer_sha256}`, "Verify and open saved conversation", task => this.inspectClient(this.client, task, true)));
     }
     const review = this.review;
@@ -587,7 +900,7 @@ export class MainClientControls {
       }
       const action = review.kind === "main" ? "main-start" : "client-open";
       const target = review.kind === "main" ? review.value.status.operation_id : review.value.pointer_sha256;
-      const allowed = review.kind === "main" || review.value.state === "ready_to_open";
+      const allowed = review.kind === "main" || !this.openIntent?.readOnly && review.value.state === "ready_to_open";
       if (!this.pinned(review)) box.child(div().text_color(theme.blocked).child(review.readOnly
         ? "Stored record only. Review the private HC binding, then read a fresh pointer review before launch."
         : "Review authority suspended; inspect and review again."));

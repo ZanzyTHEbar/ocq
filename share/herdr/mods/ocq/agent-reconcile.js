@@ -1,4 +1,5 @@
 import { div } from "gpui-kit";
+import { readableText } from "./readable-record.js";
 import { v_flex } from "gpui-base";
 import { bridgeCommand } from "./compatibility.js";
 
@@ -87,7 +88,7 @@ export class AgentReconciliation {
       .child(div().font_semibold().child("Reconcile this exact agent job via live API?"))
       .child(v_flex().flex_1().min_h(0).overflow_y_scroll().gap(10)
         .child(div().child("Makes live API observations using the core's existing completion policy. May change the stored job and release capacity ONLY if completion is proven. Does NOT prompt, resume, cancel, send input, answer permissions, create sessions or adopt worktrees. This is not command resolution or queued cancellation. The dispatcher lock must be available; it is never stopped automatically."))
-        .child(div().child(`Machine: local only\nSpace: ${t.space_id}\nQueue: ${t.queue_identity}\nAgent job: ${t.job_id}\nReceipt sequence: ${t.sequence}\nExact recorded session: ${t.recorded_session_id}\nExact recorded worktree: ${t.recorded_worktree}\nStored state/outcome: ${s.job.state} / ${s.job.outcome}\nStored reason: ${JSON.stringify(s.job.reason)}\nRequested snapshot SHA-256: ${s.snapshot_sha256}\nOperation: ${this.status.operation_id}\nIntent SHA-256: ${this.status.intent_sha256}`)))
+        .child(div().child(`Machine: local only\nSpace: ${t.space_id}\nQueue: ${t.queue_identity}\nAgent job: ${t.job_id}\nReceipt sequence: ${t.sequence}\nExact recorded session: ${t.recorded_session_id}\nExact recorded worktree: ${t.recorded_worktree}\nStored state/outcome: ${s.job.state} / ${s.job.outcome}\n${readableText(s.job.reason, "Stored reason")}\nRequested snapshot SHA-256: ${s.snapshot_sha256}\nOperation: ${this.status.operation_id}\nIntent SHA-256: ${this.status.intent_sha256}`)))
       .child(v_flex().flex_none().gap(4)
         .child(div().text_size(12).text_color(theme.muted).child("One durable claim and one attempt. An already-launched observation may finish after leaving. Recovery reads a retained operation receipt, never reruns the API observer. Recording this operation is NOT proof of agent success or deliverable validation."))
         .when(!this.working, (e) => e.child(button("ocq-agent-reconcile-once", "Observe exact agent via API once · O", (cx) => this.send(owner, cx))))

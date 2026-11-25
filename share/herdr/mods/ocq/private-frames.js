@@ -1,4 +1,15 @@
 import { Buffer } from "buffer";
+import { readFile } from "fs/promises";
+
+// Explicit local-file intake only. The original UTF-8 bytes still go through
+// the existing core decoder, duplicate-key checks and retained-byte review.
+export async function readInputFile(path, limit = 131072) {
+  if (typeof path !== "string" || !path.startsWith("/") || /[\r\n\0]/.test(path))
+    throw Error("Select an absolute local file path.");
+  const bytes = await readFile(path);
+  if (!bytes.length || bytes.length > limit) throw Error("The selected file is empty or exceeds this intake's size limit.");
+  return composeDecode(bytes);
+}
 
 // Decode exact UTF-8 bytes; reject lossy replacement without normalizing text.
 export function composeDecode(bytes) {

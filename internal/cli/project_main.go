@@ -30,7 +30,8 @@ func projectMain(state *string) *cobra.Command {
 	prepare := &cobra.Command{Use: "prepare [PROJECT]", Args: cobra.MaximumNArgs(1)}
 	file := prepare.Flags().String("file", "", "private exact ocq-main-v1 JSON; do not mix with form flags")
 	id := prepare.Flags().String("operation-id", "", "caller-known exact Main operation ID")
-	mode := prepare.Flags().String("mode", "", "create, adopt, refresh, send or reopen (explicit)")
+	mode := prepare.Flags().String("mode", "", "create, adopt, refresh (anchor), role-refresh (operating contract), send or reopen")
+	expectedRole := prepare.Flags().String("expected-role-sha256", "", "role-refresh only: exact currently selected operating contract SHA256; no profile/binding changes")
 	repo := prepare.Flags().String("repo", "", "canonical primary checkout for initial setup")
 	branch := prepare.Flags().String("main-branch", "", "full configured refs/heads/... branch; never switched by OCQ")
 	revision := prepare.Flags().String("expected-revision", "", "explicit registration CAS revision (create=0)")
@@ -54,6 +55,7 @@ func projectMain(state *string) *cobra.Command {
 				return validation("Main prepare requires PROJECT or --file")
 			}
 			in := core.MainPrepareRequest{Protocol: core.MainProtocol, ProjectID: args[0], OperationID: *id, Mode: *mode, Repo: *repo, MainBranch: *branch, ExpectedRevision: *revision, Label: *label}
+			in.ExpectedRoleSHA256 = *expectedRole
 			if *profile != "" {
 				value, err := workInput(*profile, 16<<10)
 				if err != nil {

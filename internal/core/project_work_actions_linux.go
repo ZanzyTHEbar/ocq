@@ -230,7 +230,7 @@ func ConfirmProjectWork(dir, project, id, digest string, c WorkActionContext) (W
 		err = e
 	} else {
 		var payload ResultPublicationPayload
-		_, err = decodeStrictJSONObject([]byte(p.Payload), composeLimit, &payload)
+		_, err = decodeStrictJSONObject([]byte(p.Payload), projectPayloadBytes, &payload)
 		if err == nil {
 			w, e := OpenExistingResultPublisher(dir)
 			if e == nil {

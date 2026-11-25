@@ -146,7 +146,7 @@ func captureLoad(j *os.File, t ResultPublicationTarget, id string) (CapturePubli
 	if err != nil || json.Unmarshal(b, &record) != nil || record.Version != 1 || sha256Hex(record.Raw) != record.Digest {
 		return out, p, request, prepared
 	}
-	if _, err = decodeStrictJSONObject(record.Raw, composeLimit, &p); err != nil || !p.valid() || p.Target != t || p.OwnershipDigest != request.Context.OwnershipDigest || p.Supersedes != request.Supersedes {
+	if _, err = decodeStrictJSONObject(record.Raw, projectPayloadBytes, &p); err != nil || !p.valid() || p.Target != t || p.OwnershipDigest != request.Context.OwnershipDigest || p.Supersedes != request.Supersedes {
 		return out, p, request, prepared
 	}
 	m, err := parseManifestBytes([]byte(p.Manifest), "result", t.Project)
@@ -341,7 +341,12 @@ func prepareCapturePublicationLocked(r *Reader, j *composeJournal, t ResultPubli
 	if err != nil {
 		return err
 	}
-	return j.create(id+".intent.json", publicationRecord{1, sha256Hex(payload), payload})
+	record := publicationRecord{1, sha256Hex(payload), payload}
+	encoded, err := json.Marshal(record)
+	if err != nil || len(encoded) > publicationRecordLimit {
+		return errors.New("encoded capture record exceeds 1 MiB")
+	}
+	return j.create(id+".intent.json", record)
 }
 
 func CapturePublicationRendezvous(dir string, t ResultPublicationTarget, launch string) (ComposeRendezvous, error) {

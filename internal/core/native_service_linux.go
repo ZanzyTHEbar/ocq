@@ -79,11 +79,31 @@ func nativeCallContext(parent context.Context, directory string, service nativeS
 // GET verified the discovered origin/auth. Auth is selected from the exact
 // official managed registration or explicit inherited choice before transport.
 func nativePrivateBody(ctx context.Context, service nativeService, method, path string, body any, password string) ([]byte, error) {
+	return nativePrivateBodyLimit(ctx, service, method, path, body, password, WorkRequestBytes, 256<<10)
+}
+
+// Larger project-review prompts use the same source-validated discovery/auth and
+// private HTTP transport as Main, not a second server or a large argv argument.
+func nativeInlineReviewPrompt(directory, path string, body any) ([]byte, error) {
+	service, err := discoverNativeService(directory)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	password, err := nativePassword(ctx, directory, service)
+	if err != nil {
+		return nil, err
+	}
+	return nativePrivateBodyLimit(ctx, service, "post", path+locationQuery(directory), body, password, projectPayloadBytes, projectPayloadBytes)
+}
+
+func nativePrivateBodyLimit(ctx context.Context, service nativeService, method, path string, body any, password string, limit, responseLimit int) ([]byte, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > WorkRequestBytes || !strings.HasPrefix(path, "/") {
+	if len(b) > limit || !strings.HasPrefix(path, "/") {
 		return nil, errors.New("private Main API body/path exceeds contract")
 	}
 	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), service.Origin+path, bytes.NewReader(b))
@@ -100,11 +120,11 @@ func nativePrivateBody(ctx context.Context, service nativeService, method, path 
 		return nil, errors.New("private Main API acknowledgement uncertain; never repeat the attempted mutation")
 	}
 	defer response.Body.Close()
-	out, err := io.ReadAll(io.LimitReader(response.Body, 256<<10+1))
+	out, err := io.ReadAll(io.LimitReader(response.Body, int64(responseLimit)+1))
 	if err == nil && response.StatusCode == http.StatusNoContent && len(out) == 0 {
 		return []byte("null"), nil
 	}
-	if err != nil || len(out) > 256<<10 || response.StatusCode < 200 || response.StatusCode >= 300 || !json.Valid(out) {
+	if err != nil || len(out) > responseLimit || response.StatusCode < 200 || response.StatusCode >= 300 || !json.Valid(out) {
 		return nil, errors.New("private Main API acknowledgement unavailable/uncertain; inspect exact ID only")
 	}
 	return out, nil

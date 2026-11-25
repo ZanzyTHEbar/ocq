@@ -111,6 +111,8 @@ func workWaitState(s WorkStatus) (string, string) {
 	switch s.Job.State {
 	case "queued", "launching", "running":
 		return "pending", "awaiting stored terminal proof; no dispatch or live API lookup"
+	case "unknown":
+		return "attention", "job " + s.Job.JobID + " (session " + s.Job.SessionID + ") is unknown; capacity held: " + s.Job.Reason + ". No terminal return is due; inspect this exact work pointer before any capture/review. Never resend or release on absence."
 	default:
 		return "attention", "stored execution requires attention; unknown is not completion"
 	}

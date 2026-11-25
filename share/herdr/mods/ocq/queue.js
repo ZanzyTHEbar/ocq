@@ -1,4 +1,5 @@
 import { div } from "gpui-kit";
+import { readableText } from "./readable-record.js";
 import { h_flex, v_flex, InputState, Input, TextareaState, ScrollHandle } from "gpui-base";
 import { spaces } from "herdr";
 import { bridgeCommand, enabledButton } from "./compatibility.js";
@@ -572,7 +573,7 @@ export class QueueInspection {
           action(`ocq-log-stream-${stream}`, stream, cx => this.read(owner, "log", ["queue-log", detail.job.id, stream, "0"], cx)).when(this.log.cursor?.stream === stream, e => e.bg(t.hover)))));
         if (detail.job.state === "unknown") content.child(div().text_color(t.blocked).child("Completion unknown."));
       }
-      if (this.detailTab === "fields") content.child(div().child(JSON.stringify(detail.job || detail.event, null, 2)));
+      if (this.detailTab === "fields") content.child(div().child(readableText(detail.job || detail.event)));
     }
     if (this.inspecting && this.detailTab === "logs") {
     if (this.log.loading || this.log.error) content.child(status(this.log, "logs"));
@@ -586,16 +587,9 @@ export class QueueInspection {
        const text = bytes.toString("utf8");
        const readable = Buffer.from(text, "utf8").toString("base64") === bytes.toString("base64") &&
          !/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(text.replace(/\r\n/g, "\n"));
-       content.child(div().child(readable ? text || "No output at this offset." : "Binary or mixed output. View raw bytes."));
+       content.child(div().child(readable ? readableText(text || "No output at this offset.", "Output") : "Binary or mixed output cannot be displayed as a record. Exact bytes remain retained."));
        if (!this.log.reset && !this.log.capped) content.child(action("ocq-log-follow", this.log.follow ? "Pause" : "Follow", cx => { this.log.follow = !this.log.follow; if (this.log.follow) { this.bytePage = Math.max(0, Math.ceil(bytes.length / 1024) - 1); this.log.needsRead = true; } cx.notify(); }));
        if (!this.log.reset && (this.log.capped || !log.eof)) content.child(action("ocq-log-read-next", "Load more", (cx) => this.read(owner, "log", ["queue-log", log.job_id, log.stream, log.next_offset], cx)));
-       content.child(action("ocq-log-raw", this.rawOutput ? "Hide raw bytes" : "Raw bytes", cx => { this.rawOutput = !this.rawOutput; cx.notify(); }));
-       if (this.rawOutput) {
-         const escaped = Array.from(bytes.slice(start, start + 1024), b => b >= 32 && b <= 126 && b !== 92 ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, "0")}`).join("");
-         content.child(div().text_size(12).child(`Escaped bytes · ${this.bytePage + 1}/${Math.max(1, Math.ceil(bytes.length / 1024))}`)).child(div().child(escaped || "No bytes at this offset."));
-         if (this.bytePage > 0) content.child(action("ocq-log-display-prev", "Previous bytes", cx => { this.log.follow = false; this.bytePage--; cx.notify(); }));
-         if (start + 1024 < bytes.length) content.child(action("ocq-log-display-next", "Next bytes", cx => { this.log.follow = false; this.bytePage++; cx.notify(); }));
-       }
        content.child(action("ocq-log-technical", this.logTechnical ? "Hide technical details" : "Technical details", cx => { this.logTechnical = !this.logTechnical; cx.notify(); }));
        if (this.logTechnical) content.child(status(this.detail, "detail")).child(status(this.log, "logs"))
          .child(div().text_size(12).text_color(t.muted).child(`${log.stream}\nChunk [${log.offset}, ${log.next_offset}); observed size ${log.observed_size}.\nEOF at read: ${log.eof}; not execution completion.\nDisplay limit: 64 KiB. File observation is separate from queue state.`))

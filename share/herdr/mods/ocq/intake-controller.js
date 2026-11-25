@@ -1,10 +1,11 @@
 import { TextareaState } from "gpui-base";
+import { readableValue, readablePages } from "./readable-record.js";
 import { bridgeCommand, compatibility } from "./compatibility.js";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
 import { RegistrationForm } from "./registration.js";
 import { SubmissionForm } from "./submission.js";
-import { composeDecode } from "./private-frames.js";
+import { composeDecode, readInputFile } from "./private-frames.js";
 
 // The bridge has already run the core's duplicate-key and schema validation on
 // these retained bytes. The panel supports only these exact spellings and shapes;
@@ -22,9 +23,7 @@ function intakeEmbedded(value) {
 }
 
 function visibleString(value) {
-  const invisible = /[\p{Cc}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]/u;
-  const s = JSON.stringify(value);
-  return Array.from(s, (c) => invisible.test(c) ? Array.from({ length: c.length }, (_, n) => `\\u${c.charCodeAt(n).toString(16).padStart(4, "0")}`).join("") : c).join("");
+  return readableValue(value);
 }
 
 function intakeStructured(kind, raw, exact = null) {
@@ -38,14 +37,14 @@ function intakeStructured(kind, raw, exact = null) {
       if (!Number.isSafeInteger(value) || Object.is(value, -0)) throw new Error("unsupported number");
       sections.push({ title: label, text: String(value) });
     } else if (Array.isArray(value)) {
-      if (!value.length) sections.push({ title: label, text: "[]" });
+      if (!value.length) sections.push({ title: label, text: "None" });
       else value.forEach((item, n) => walk(`${label} [${n + 1}]`, item));
     } else if (value && typeof value === "object") {
       const keys = Object.keys(value);
-      if (!keys.length) sections.push({ title: label, text: "{}" });
+      if (!keys.length) sections.push({ title: label, text: "None" });
        else for (const key of keys) {
          if (composeDecode(Buffer.from(key, "utf8")) !== key) throw new Error("unsupported Unicode key");
-         walk(`${label} · ${visibleString(key)}`, value[key]);
+         walk(`${label} · ${key.replaceAll("_", " ")}`, value[key]);
        }
     } else throw new Error("unsupported value");
   };
@@ -78,7 +77,6 @@ function intakeStructured(kind, raw, exact = null) {
   const bytes = (label, part) => {
     if (!part || typeof part.raw !== "string" || createHash("sha256").update(part.raw).digest("hex") !== part.sha256) throw new Error("exact embedded bytes unavailable");
     walk(`${label} · SHA-256 of exact bytes`, part.sha256);
-    walk(`${label} · exact embedded JSON bytes`, part.raw);
   };
   if (exact && (exact.raw !== raw || createHash("sha256").update(raw).digest("hex") !== exact.sha256)) throw new Error("retained envelope changed");
   if (kind === "registration") {
@@ -120,7 +118,7 @@ export class IntakeController {
   constructor(owner) {
     this.owner = owner;
     this.intake = { screen: false, state: "loading", id: null, kind: "registration", preview: null, page: 0, working: false, error: null, context: null, confirm: false, uncertainID: null, observation: null };
-    this.intakeInput = TextareaState.new({ placeholder: "Paste an exact registration or submission JSON envelope", rows: 8 });
+    this.intakeInput = TextareaState.new({ placeholder: "Absolute path to a retained registration or submission file", rows: 2 });
     this.intakeInputFocused = false;
     this.intakeInput.on("change", (_e, cx) => cx.notify());
     this.intakeInput.on("focus", (_e, cx) => { this.intakeInputFocused = true; cx.notify(); });
@@ -168,14 +166,7 @@ export class IntakeController {
     return Boolean(embedded && typeof embedded === "object" && !Array.isArray(embedded) && embedded.repo === context.folder);
   }
 
-  // Reversible ASCII rendering: each page is a slice of one JSON string
-  // literal, so whitespace, control characters and Unicode remain explicit.
-  intakePages(raw) {
-    const escaped = JSON.stringify(raw).replace(/[ \u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
-    const pages = [];
-    for (let i = 0; i < escaped.length; i += 120) pages.push(escaped.slice(i, i + 120).match(/.{1,40}/g).join("\n"));
-    return pages;
-  }
+  intakePages(raw) { return readablePages(raw, "Intake"); }
 
   intakeReviewPages(kind, raw, exact = null) {
     const pages = [];
@@ -243,7 +234,8 @@ export class IntakeController {
     const command = mode === "receive" ? ["intake-receive-text", kind, launch] : mode === "draft" ? [`intake-${kind}-draft`, launch] : ["intake-review-preview", id, launch];
     if (mode !== "preview") {
       const bytes = Buffer.from(raw, "utf8");
-      if (!bytes.length || bytes.length > (mode === "draft" && kind === "registration" ? 16384 : 131072) || composeDecode(bytes) !== raw) throw Error("invalid request");
+      const limit = kind === "registration" ? 16384 : kind === "implementation" ? 131072 : 1048576;
+      if (!bytes.length || bytes.length > limit || composeDecode(bytes) !== raw) throw Error("invalid request");
     }
     const value = await compatibility.exchange(command[0], command.slice(1), raw, current);
     if (mode === "receive") {
@@ -251,7 +243,7 @@ export class IntakeController {
       return value.response;
     }
     const exact = value.exact;
-    if (!["registration", "submission"].includes(value.kind) || typeof exact?.raw !== "string" || Buffer.from(exact.raw).length > 131072 ||
+    if (!["registration", "submission"].includes(value.kind) || typeof exact?.raw !== "string" || Buffer.from(exact.raw).length > (value.kind === "registration" ? 16384 : 1048576) ||
       createHash("sha256").update(exact.raw).digest("hex") !== exact.sha256) throw Error("exact preview changed");
     if (mode === "draft" && value.state !== "draft") throw Error("draft unavailable");
     if (mode === "preview" && (value.id !== id || !["prepared", "armed", "attempted", "completed", "cancelled"].includes(value.state))) throw Error("preview state changed");
@@ -277,7 +269,7 @@ export class IntakeController {
         if (request.expected_revision !== draft.expected_revision || request.project_id !== draft.project_id) throw new Error("draft identity changed");
         const review = this.intakeReviewPages("registration", result.raw, result.exact);
         context = Object.freeze({ ...context, registration: Object.freeze({ digest: result.exact.sha256 }) }); i.context = context;
-        i.preview = { draft: true, kind: "registration", raw: result.raw, exact: result.exact, review, rawPages: this.intakePages(result.raw).map((text) => ({ title: "Generated exact JSON string", text })), pages: review, view: "review", openedThrough: 0 };
+        i.preview = { draft: true, kind: "registration", raw: result.raw, exact: result.exact, review, pages: review, view: "review", openedThrough: 0 };
         i.page = 0; i.confirm = false;
       } catch (_e) { if (this.intakeCurrent(context)) i.error = "Draft unavailable. Check all required fields, exact identities, sizes and context. Nothing was prepared or registered."; }
       finally { if (this.intakeCurrent(context)) { i.working = false; this.handle.focus(); cx.notify(); } }
@@ -297,29 +289,27 @@ export class IntakeController {
     const i = this.intake, form = this.submissionForm, snapshot = form.snapshot();
     let context = i.context, input;
     if (i.working || i.state !== "idle" || i.kind !== "submission" || i.entry !== "form" || !this.intakeCurrent(context) || context.newProject) return;
-    try {
-      const draft = form.values(context);
-      if (!context.project || !Number.isSafeInteger(context.revision) || context.revision < 1 || draft.repo !== context.folder || this.owner.board?.project?.current_binding?.revision !== context.revision) throw new Error("binding changed");
-      const check = (value) => {
-        if (typeof value === "string" && composeDecode(Buffer.from(value)) !== value) throw new Error("unsupported Unicode");
-        if (typeof value === "number" && (!Number.isSafeInteger(value) || Object.is(value, -0))) throw new Error("unsafe number");
-        if (Array.isArray(value)) value.forEach(check);
-        else if (value && typeof value === "object") for (const [key, item] of Object.entries(value)) { check(key); check(item); }
-      };
-      check(draft);
-      check(JSON.parse(draft.permissions));
-      input = JSON.stringify(draft);
-    } catch (_e) { i.error = "Check required fields, JSON lists, explicit safe memory count and exact current project binding. Nothing was built."; cx.notify(); return; }
     i.working = true; i.error = null;
     cx.spawn(async (cx) => {
       try {
+        const draft = await form.values(context);
+        if (!this.intakeCurrent(context) || form.snapshot() !== snapshot || this.submissionForm !== form) return;
+        if (!context.project || !Number.isSafeInteger(context.revision) || context.revision < 1 || draft.repo !== context.folder || this.owner.board?.project?.current_binding?.revision !== context.revision) throw new Error("binding changed");
+        const check = value => {
+          if (typeof value === "string" && composeDecode(Buffer.from(value)) !== value) throw new Error("unsupported Unicode");
+          if (typeof value === "number" && (!Number.isSafeInteger(value) || Object.is(value, -0))) throw new Error("unsafe number");
+          if (Array.isArray(value)) value.forEach(check);
+          else if (value && typeof value === "object") for (const [key, item] of Object.entries(value)) { check(key); check(item); }
+        };
+        check(draft); check(JSON.parse(draft.permissions));
+        input = JSON.stringify(draft);
         const result = await this.intakeExchange("draft", form.role, null, input, context, cx);
         if (!this.intakeCurrent(context) || i.kind !== "submission" || i.entry !== "form" || this.submissionForm !== form || form.snapshot() !== snapshot || result.kind !== "submission" || !this.intakeMatches("submission", result.raw, context, true)) throw new Error("draft context changed");
         const scope = this.intakeSubmission(result.raw);
         if (scope.role !== form.role || scope.revision !== context.revision) throw new Error("draft scope changed");
         const review = this.intakeReviewPages("submission", result.raw, result.exact);
         context = Object.freeze({ ...context, submission: scope, generatedSubmission: result.exact.sha256 }); i.context = context;
-        i.preview = { draft: true, kind: "submission", raw: result.raw, review, rawPages: this.intakePages(result.raw).map((text) => ({ title: "Generated exact JSON string", text })), pages: review, view: "review", openedThrough: 0 };
+        i.preview = { draft: true, kind: "submission", raw: result.raw, review, pages: review, view: "review", openedThrough: 0 };
         i.page = 0; i.confirm = false;
       } catch (_e) { if (this.intakeCurrent(context)) i.error = "Draft unavailable. Check exact binding/target, full fields, permissions and size (review prompt ≤16 KiB). Nothing was prepared or submitted; no target content is truncated."; }
       finally { if (this.intakeCurrent(context)) { i.working = false; this.handle.focus(); cx.notify(); } }
@@ -328,13 +318,30 @@ export class IntakeController {
   }
 
   prepareIntake(cx, generated = null) {
+    if (!generated) {
+    const i = this.intake, context = i.context, path = this.intakeInput.value(), kind = i.kind;
+      if (i.working || i.state !== "idle" || i.entry === "form" || !this.intakeCurrent(context)) return;
+      i.working = true; i.error = null;
+      cx.spawn(async task => {
+        let handedOff = false;
+        try {
+          const raw = await readInputFile(path, kind === "registration" ? 16384 : 1048576);
+          if (!this.intakeCurrent(context) || i.kind !== kind || this.intakeInput.value() !== path) return;
+          i.working = false;
+          handedOff = true;
+          this.prepareIntake(task, { raw, fromFile: true });
+        } catch (_) { if (this.intakeCurrent(context)) i.error = "Could not read the selected local intake file. Nothing was prepared."; }
+        finally { if (!handedOff && this.intakeCurrent(context)) { i.working = false; task.notify(); } }
+      });
+      cx.notify(); return;
+    }
     const i = this.intake, raw = generated ? generated.raw : this.intakeInput.value(), kind = i.kind;
     let context = i.context;
     if (i.working || i.state !== "idle" || !this.intakeCurrent(context)) return;
-    if (generated ? i.preview !== generated || !generated.draft || generated.view !== "review" || generated.openedThrough !== generated.review.length - 1 || i.page !== generated.review.length - 1 : i.entry === "form") return;
+    if (generated.fromFile ? i.entry === "form" : i.preview !== generated || !generated.draft || generated.view !== "review" || generated.openedThrough !== generated.review.length - 1 || i.page !== generated.review.length - 1) return;
     try {
       const bytes = Buffer.from(raw, "utf8");
-      if (!bytes.length || bytes.length > (kind === "registration" ? 16384 : 131072) || composeDecode(bytes) !== raw || !this.intakeMatches(kind, raw, context, true)) throw new Error("invalid request or context");
+      if (!bytes.length || bytes.length > (kind === "registration" ? 16384 : 1048576) || composeDecode(bytes) !== raw || !this.intakeMatches(kind, raw, context, true)) throw new Error("invalid request or context");
       if (context.newProject && (kind !== "registration" || this.owner.projects.some((p) => p.project_id === JSON.parse(raw).project_id))) throw new Error("new project already exists");
       this.intakeReviewPages(kind, raw);
     } catch (_e) { i.error = "Request is invalid, belongs to another context, or uses an unsupported review representation. Nothing was prepared."; cx.notify(); return; }
@@ -359,12 +366,12 @@ export class IntakeController {
       try {
         const result = await this.intakeExchange("preview", null, id, null, context, cx);
         if (!this.intakeCurrent(context) || !this.intakeMatches(result.kind, result.raw, context)) throw new Error("context mismatch");
-        const rawPages = this.intakePages(result.raw).map((text) => ({ title: "Exact raw JSON string", text }));
+        const contextPages = this.intakePages(result.raw).map((text) => ({ title: "Supported intake context", text }));
         let review = null;
-        try { review = this.intakeReviewPages(result.kind, result.raw, result.exact); } catch (_e) { /* Keep exact raw view, never invent a summary. */ }
+        try { review = this.intakeReviewPages(result.kind, result.raw, result.exact); } catch (_e) { /* Unsupported records cannot be confirmed. */ }
         if (result.kind === "submission") { context = Object.freeze({ ...context, submission: this.intakeSubmission(result.raw) }); i.context = context; }
-        i.state = result.state; i.preview = { id, kind: result.kind, raw: result.raw, state: result.state, review, rawPages, pages: review || rawPages, view: review ? "review" : "raw", openedThrough: 0 }; i.page = 0; i.confirm = false;
-        if (!review) i.error = "This envelope representation is not supported for structured review. Exact raw view only; dispatch remains unavailable.";
+        i.state = result.state; i.preview = { id, kind: result.kind, raw: result.raw, state: result.state, review, pages: review || contextPages, view: review ? "review" : "unsupported", openedThrough: 0 }; i.page = 0; i.confirm = false;
+        if (!review) i.error = "Cannot display this record type. Supported context is shown; dispatch remains unavailable. Use Copy UI state for context.";
       } catch (_e) { if (this.intakeCurrent(context)) i.error = "Preview unavailable or belongs to another project or folder. Nothing was dispatched."; }
       finally { if (this.intakeCurrent(context)) { i.working = false; this.handle.focus(); cx.notify(); } }
     });

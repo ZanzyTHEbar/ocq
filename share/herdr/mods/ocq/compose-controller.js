@@ -1,13 +1,12 @@
 import { bridgeCommand, compatibility } from "./compatibility.js";
+import { readableValue } from "./readable-record.js";
 import { createHash, randomBytes } from "crypto";
 import { Buffer } from "buffer";
 import { ComposeForm } from "./compose-form.js";
 import { composeDecode } from "./private-frames.js";
 
 function visibleString(value) {
-  const invisible = /[\p{Cc}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]/u;
-  const s = JSON.stringify(value);
-  return Array.from(s, (c) => invisible.test(c) ? Array.from({ length: c.length }, (_, n) => `\\u${c.charCodeAt(n).toString(16).padStart(4, "0")}`).join("") : c).join("");
+  return readableValue(value);
 }
 
 export class ComposeController {

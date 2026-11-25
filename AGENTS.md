@@ -77,7 +77,7 @@
   (`source=machine_capture`, `verification=machine_verified_snapshot`, keeping
   test `validation=not_run`), read-only `verify-worktree` live worktree-to-snapshot
   drift detection (`matches_snapshot` vs `modified_since_snapshot`), and the
-  `<=16 KiB` deterministic inline static-review gate (`read`/`glob`/`grep` plus
+  `<=256 KiB` deterministic inline static-review gate (`read`/`glob`/`grep` plus
   catch-all `deny *`). The Herdr native mod uses a short-lived
   Go bridge for stored views, explicit inbox acknowledgements, and local-only
   `lane.blocked` compose via prepare, retained preview, and confirmation; supported

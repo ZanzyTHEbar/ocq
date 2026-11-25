@@ -59,11 +59,12 @@ func projectWork(state *string) *cobra.Command {
 		cmd := &cobra.Command{Use: name + " PROJECT", Args: cobra.ExactArgs(1)}
 		id := cmd.Flags().String("request-id", "", "caller-known nonsecret operation identity; retain for recovery")
 		revision := cmd.Flags().String("binding-revision", "", "exact selected project binding revision (decimal)")
-		var profile, brief, parent, criteria, rules, result *string
+		var profile, brief, parent, criteria, rules, result, baseRef *string
 		switch kind {
 		case "implementation":
 			profile = cmd.Flags().String("profile-file", "", "explicit immutable agent/model/memory/ordered permission profile")
 			brief = cmd.Flags().String("brief-file", "", "plain UTF-8 task brief (<=16 KiB)")
+			baseRef = cmd.Flags().String("base-ref", "", "local worker base ref/commit, frozen before preparation; default is the Main binding anchor")
 		case "capture":
 			parent = cmd.Flags().String("implementation", "", "exact implementation work request ID with proven terminal execution")
 		case "review":
@@ -77,6 +78,9 @@ func projectWork(state *string) *cobra.Command {
 		}
 		cmd.RunE = func(_ *cobra.Command, args []string) error {
 			in := core.WorkPrepareRequest{Protocol: core.WorkProtocol, ProjectID: args[0], RequestID: *id, Kind: kind, BindingRevision: *revision}
+			if baseRef != nil {
+				in.BaseRef = *baseRef
+			}
 			if parent != nil {
 				in.ParentRequestID = *parent
 			}

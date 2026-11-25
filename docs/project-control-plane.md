@@ -49,7 +49,8 @@ for multiple entries or additional handoff fields. Local implementation/review
 forms also generate drafts; Advanced raw preserves supplied envelope bytes.
 See [panel intake](herdr.md#local-compose-and-intake).
 
-Submission retains a version-1 envelope, at most 128 KiB, containing:
+Submission retains a version-1 envelope (implementation: at most 128 KiB;
+review: at most 1 MiB encoded), containing:
 
 - `version`, global job `key`, `project_id`, accepted `binding_revision`, and
   `role` (`implementation` or `review`).
@@ -243,10 +244,17 @@ compose is disabled. See [panel compose](herdr.md#local-compose-and-intake).
 ## Manifests and results
 
 Manifest bytes in SQLite are authoritative; files are import inputs only. Every
-manifest is one version-1 UTF-8 JSON object, at most 16,384 bytes, with no BOM,
+manifest is one version-1 UTF-8 JSON object, with no BOM,
 duplicate/unknown fields or trailing non-whitespace. SHA-256 hashes the exact
 bytes, so formatting changes identity. Common fields are `version`, `kind`,
 `project_id`, `source` and explicit `observed_at` (RFC3339 or null).
+
+`result` and `review_brief` manifests may occupy up to **256 KiB of encoded
+JSON each**. All other kinds, including authored `review_result`, remain capped
+at **16 KiB**. Changed files remain limited to eight UTF-8 regular files; their
+decoded contents total at most 128 KiB, and the decoded diff is at most 128 KiB.
+The encoded manifest ceiling also applies: not every combination of these maxima
+fits after escaping. Oversize fails without truncation or exclusions.
 
 | Kind | Contents |
 | --- | --- |
@@ -364,9 +372,41 @@ cryptographic attestation, test execution, live checkout verification or integra
 Values contain the full base, target digest, criteria/rules, diff and changed-file
 objects (`path`, `old_mode`, `new_mode`, `contents`) in that field order. Files are
 path-sorted. Use UTF-8 JSON with no HTML escaping or normalization. The entire
-prompt must fit **16 KiB** and exactly match the request. Oversize is rejected,
+prompt must fit **256 KiB of decoded UTF-8** and exactly match the request. Oversize is rejected,
 never truncated or replaced by attachments; a fitting result may still be too
 large for review.
+
+### Larger-inline contract (budget revision 2)
+
+The version-1 manifest/brief/envelope schemas, deterministic header/field order,
+canonical v2 request encoding and digest rules are unchanged. Existing bytes
+and receipts are never rewritten. This revision changes budgets, not reviewer
+permissions, runtime policy versions or integration authority.
+
+Only a project **review** envelope permits a prompt above 16 KiB, after exact
+deterministic-prompt, target association/base and read/glob/grep-only policy
+validation. Standalone agent requests and project implementation prompts/briefs
+retain their 16 KiB limits. Registration, mail, Main input and compose bounds
+are unchanged.
+
+Affected encoded review/publication payloads, private journal records and exact
+Work responses are each bounded at **1 MiB**. Final serialized sizes are checked;
+JSON-string and base64 wrapping count toward their enclosing record. Private
+preview projections can therefore reject a payload that fits a lower-level
+bound. Use narrower exact views when aggregate output exceeds its existing cap.
+
+Large review prompts reuse the source-validated native discovery/authenticated
+private HTTP body transport, avoiding OS `--data` argument-size limits. The sole
+durable prompt attempt and exact-ID recovery rules are unchanged; Main's smaller
+body/response limits remain unchanged. The cooperative execution policy still
+requires the pinned OpenCode 2.3.2 runtime; the older versions listed for
+permission-rule validation alone are not new larger-inline execution claims.
+
+Old binaries/clients can reject larger records. Quiesce and replace the matched
+CLI/bridge/dispatcher and affected intake/publication client assets before use;
+existing image/context/action fencing must not be bypassed. No schema migration
+or materialized snapshot mechanism is introduced. A failed preparing capture
+remains immutable: a later authorized capture needs a fresh request ID.
 
 Rules must deny `*`/`*`, then explicitly allow native read/glob/grep after the last
 catch-all deny. Other allows and `ask` are rejected. The gate checks the named
@@ -436,6 +476,14 @@ review retained bytes fully before pointer confirmation; do not put them in
 argv or public logs. CLI authorization pins the **CLI image**. A Herdr bridge
 authorization separately pins its own bridge image, peer/space/folder and the
 exact queue/store. The two image identities are not interchangeable.
+
+Implementation preparation optionally accepts `--base-ref REF_OR_COMMIT`.
+It resolves an already-local Git object once in the bound repository and
+retains the full commit before building the payload. Omission keeps the binding
+anchor. The selected display ref and resolved commit appear in the retained
+preview; moving a ref later does not change an existing request. Main remains
+on its canonical branch. Review inherits the exact captured implementation
+result base, not a newly resolved branch tip.
 
 Once ordinary execution has separately established terminal proof, prepare and
 review a machine snapshot, then submit the explicit second job:
@@ -560,6 +608,75 @@ This ordinary instruction entry persists across turns/compaction without a fake
 system event, tracked AGENTS.md change or global profile edit.
 
 `project main role PROJECT` reads the retained contract without a live API call.
+Replacing a backend does **not** update this contract or its pinned CLI.
+An explicit operating-contract update is separate from anchor `refresh`:
+
+```text
+ocq --state-dir STATE project main role PROJECT
+ocq --state-dir STATE project main prepare --operation-id main-contract-2 --mode role-refresh --expected-revision CURRENT_REV --expected-role-sha256 CURRENT_ROLE_SHA PROJECT
+ocq --state-dir STATE project main preview PROJECT main-contract-2
+ocq --state-dir STATE project main start PROJECT main-contract-2 --preview-sha256 EXACT_PREVIEW_SHA
+ocq --state-dir STATE project main recover PROJECT main-contract-2
+```
+
+Use the intended matched new CLI for preparation/preview/confirmation. Preparation
+requires a coordinated CLI/bridge/dispatcher/UI version that understands
+`role-refresh` and successor selection; older images do not. Do not stage a new
+operation into a live queue still served by an older Main decoder.
+Preparation
+retains its image and instructions, the exact predecessor contract, unchanged
+implementation/review selections and the **current human-selected** Main profile.
+It sends no input and creates no session. Confirmation requires the same idle
+session, no pending input/permission/form, unchanged canonical checkout/service,
+binding revision, profile and predecessor value. It journals one attempt to replace
+the value under the single active `ocq-main-role-v1` instruction key. Previous
+contracts remain immutable in OCQ's journal, not as competing active API contexts.
+Pinned OpenCode renders a same-key update as explicitly superseding the previous
+value; appending another key would leave both values active and is not supported.
+For a Main never prompted, empty history can prove quiescence only with unchanged
+creation/update time, zero usage, stable read-back and no retained OCQ prompt
+attempt or active/pending input. This contract-only exception does not relax
+worker or native-client terminal proof, and never sends a prepared goal.
+An append-only selector edge advances only after exact read-back, under the
+project journal lock and a short SQLite writer lock fencing binding CAS. No SQL
+rows or schema change. Original journal contracts and setup/send receipts retain
+their bytes. Future operations use the selected successor; frozen older operations
+remain historical and cannot lend authority to a new send.
+
+The native API has no conditional PUT. Local contract and binding CAS do not
+provide atomic exclusion against a different native API writer: use an explicitly
+operator-exclusive update window with no concurrent session-context edits or
+human input. Exact idle/predecessor reads fence the one PUT, and exact successor
+read-back fences selection. A mismatch or unknown result blocks completion.
+Competing active Main entries require operator review; never silently delete them.
+
+Unknown acknowledgement permits only exact GET recovery (plus durable local
+selection if proven), never another instructions PUT. `recover` on an unattempted
+contract only reports its stored preparation. A contract update does not resume
+Main, replay a goal, alter agent/model/permissions, rebind the project, move Main
+or grant integration authority. Effective tool policy still wins: an actual
+Coordinator no-write boundary is not bypassed through shell or an authoring API.
+Operator confirmation and a subsequent Main turn are separate human decisions.
+
+A release update is incomplete until **every SQL-selected registered Main** has
+been inventoried and migrated to the intended CLI digest, and both its current
+journal selector and its single active native instruction value agree. Do not
+declare success after only replacing backend/UI images. Active or pending Mains,
+changed profiles/bindings, unknown operations or unverified consumers block the
+batch; never kill, prompt, change profiles or skip a project to make it pass.
+Include runtime registrations/process images, UI pins, native-client launchers
+and frozen operation recovery dependencies in the owned-consumer inventory.
+Read-only native-client status can prove a historical viewer closed using its
+validated immutable receipt, current queue/binding/caller scope and exact HC
+terminal identity in `finished` state, without its historical executable or an
+unchanged target profile. This grants no launch authority. Live viewers still
+require the full current launch checks; missing or mismatched HC records remain
+unverified and hold retirement.
+Retire obsolete executable assets only after proving them unused and preserving
+durable receipts/history; no bulk directory cleanup or legacy-path symlink swap.
+There is no tracked backend updater: the reviewed owned rollout procedure must
+perform this gate and retain an explicit cleanup/retention decision per asset.
+
 Its instructions keep one user goal alive through prepare/preview/confirm,
 implementation wait, terminal-gated capture, independent exact-snapshot review,
 strict review-result publication and usable handoff. Normal stage progression

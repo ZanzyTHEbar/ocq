@@ -1,4 +1,5 @@
 import { div } from "gpui-kit";
+import { readablePages, readableValue } from "./readable-record.js";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
 import { Buffer } from "buffer";
 import { createHash } from "crypto";
@@ -114,6 +115,15 @@ export class WorkOperator {
     this.suspend(); this.selectedID = item.request_id; this.selected = item; this.page = 0; this.output = null;
     this.requestDetails = false; this.revealSelected = true; cx.notify();
   }
+  recordedReplacement(item) {
+    if (item.kind !== "capture" || item.state !== "preparing" || !item.parent_request_id) return null;
+    const parent = this.rows.find(v => v.request_id === item.parent_request_id && v.kind === "implementation");
+    if (!parent?.job?.job_id) return null;
+    return this.rows.find(v => v.kind === "capture" && v.state === "recorded_observed" &&
+      v.project_id === item.project_id && v.binding_revision === item.binding_revision &&
+      v.parent_request_id === parent.request_id && v.result?.association_id &&
+      v.result.job_id === parent.job.job_id && v.created_at > item.created_at) || null;
+  }
   async call(action, scope, extra = []) {
     const args = [action, ...(action === "work-preview" ? ["--work-observation-context", scope.bridge] : []),
       "--", scope.space, scope.queue, scope.project, ...(action === "work-list" ? [] : [this.selectedID]), ...extra];
@@ -132,12 +142,7 @@ export class WorkOperator {
       binding && String(binding.revision) === String(this.preview?.binding.revision) && binding.repo_root === p.scope.folder;
   }
   contextArgs(scope, bridge) { return [scope.machine ?? "local", scope.folder, scope.store, bridge.image_sha256]; }
-  pagesFor(value) {
-    const escaped = JSON.stringify(value).replace(/[\u007f-\uffff]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
-    const pages = [];
-    for (let offset = 0; offset < escaped.length; offset += 1200) pages.push(escaped.slice(offset, offset + 1200).match(/.{1,60}/g).join("\n"));
-    return pages;
-  }
+  pagesFor(value) { return readablePages(value); }
   previewRequest(cx) {
     const scope = this.bound, selected = this.selected;
     if (!this.visible() || !this.current(scope) || this.working || !selected || selected.state !== "prepared" || this.attempted() || this.storageError) return;
@@ -274,8 +279,18 @@ export class WorkOperator {
     if (this.storageError) add(div().text_color(theme.blocked).child("Private client attempt evidence unavailable. Confirmations disabled."));
     if (this.error) add(div().text_color(theme.blocked).child(this.error));
     if (this.readAt && !this.rows.length) add(div().text_color(theme.muted).child("Tasks appear here when Main prepares work."));
+    const workers = this.rows.filter(v => ["implementation", "review"].includes(v.kind));
+    if (workers.length) {
+      const held = workers.filter(v => v.job?.state === "unknown");
+      add(div().text_size(12).text_color(held.length ? theme.blocked : theme.muted).child(held.length
+        ? `${held.length} worker${held.length === 1 ? "" : "s"} held for verification · completion unproven; inspect handoff separately`
+        : `${workers.length} assigned stage${workers.length === 1 ? "" : "s"} · ${workers.filter(v => v.job?.terminal_proven).length} OCQ-verified terminal`));
+      add(disclosure("ocq-workers-expand", this.workExpanded ? "Hide worker details" : "Show workers and handoff", task => { this.workExpanded = !this.workExpanded; task.notify(); }));
+    }
+    if (!this.workExpanded && !this.host.mainClient.showDetails && !this.preview && !this.output && !this.host.mainClient.navigationTarget?.work)
+      return box.children(items);
     const kindLabel = { implementation: "Implementation", capture: "Capture snapshot", review: "Independent review", review_result: "Record review result" };
-    const stateLabel = { preparing: "Preparing", prepared: "Needs review", armed: "Claimed", uncertain: "Unknown", recorded_observed: "Recorded", blocked: "Blocked" };
+    const stateLabel = { preparing: "Preparation incomplete · needs attention", prepared: "Needs review", armed: "Claimed", uncertain: "Unknown", recorded_observed: "Recorded", blocked: "Blocked" };
     for (const item of this.rows.filter(v => ["implementation", "review"].includes(v.kind))) {
       const related = this.rows.filter(v => v.job?.job_id && v.job.job_id === item.job?.job_id);
       const verdict = related.find(v => v.result?.verdict)?.result.verdict;
@@ -290,6 +305,7 @@ export class WorkOperator {
           verdict ? `Review ${verdict.replaceAll("_", " ")} · recorded` :
           related.some(v => v.kind === "capture" && v.state === "recorded_observed") ? "Snapshot recorded · review is separate" :
           item.job?.session_id ? "Owned conversation available" : "A worker conversation appears after admission"));
+      if (item.job?.state === "unknown") card.child(div().text_size(12).text_color(theme.blocked).child(item.job.reason || "Resource verification is incomplete; capacity remains held. Do not resubmit."));
       if (item.job?.session_id) card.child(this.host.panelControl(`ocq-open-worker-${item.request_id}`,
         item.job.terminal_proven ? "Open worker history" : "Open worker",
         task => {
@@ -321,7 +337,9 @@ export class WorkOperator {
       if (related.some(v => v.request_id === this.selectedID && ["capture", "review_result"].includes(v.kind) && v.state === "recorded_observed"))
         this.renderSelected(items, theme, control, disclosure);
     }
-    const actions = this.rows.filter(v => !["implementation", "review"].includes(v.kind) && v.state !== "recorded_observed");
+    const incomplete = this.rows.filter(v => !["implementation", "review"].includes(v.kind) && v.state !== "recorded_observed");
+    const historical = incomplete.filter(v => this.recordedReplacement(v));
+    const actions = incomplete.filter(v => !historical.includes(v));
     if (actions.length) add(div().pt(6).font_semibold().child("Next steps"));
     for (const item of actions) {
       const label = `${kindLabel[item.kind]} · ${stateLabel[item.state]}`;
@@ -331,21 +349,46 @@ export class WorkOperator {
       if (item.request_id === this.selectedID && this.selected)
         this.renderSelected(items, theme, control, disclosure);
     }
+    if (historical.length) {
+      add(div().pt(6).font_semibold().child("History"));
+      for (const item of historical) {
+        add(control(`ocq-work-select-${item.request_id}`, "Earlier snapshot preparation · incomplete", task => this.choose(item, task))
+          .min_w(0).when(item.request_id === this.selectedID, e => e.bg(theme.hover)));
+        if (item.request_id === this.selectedID && this.selected) this.renderSelected(items, theme, control, disclosure);
+      }
+    }
     if (this.rows.length) add(div().text_size(12).text_color(theme.muted).child("Tests not run · integration requires a separate decision."));
     return box.children(items);
   }
   renderSelected(items, theme, button, disclosure) {
     const add = element => items.push(element);
     const item = this.selected;
+    if (this.revealSelected) { this.scroll.scroll_to_item(items.length); this.revealSelected = false; }
+    const replacement = this.recordedReplacement(item);
+    if (item.state === "preparing") {
+      // Reveal the whole explanation/action block, not just a heading at the
+      // bottom edge of the viewport. ScrollHandle indices are direct children.
+      const explanation = v_flex().w_full().min_w(0).gap(6)
+        .child(div().font_semibold().child(replacement ? "Earlier preparation incomplete" : "Preparation needs attention"))
+        .child(div().text_size(12).child(replacement
+        ? "This earlier attempt has no completed preparation. A later snapshot for the same implementation is recorded; this is history, not a next step."
+        : "No completed preparation is recorded. This stored state does not mean a process is still running. Check status; do not retry preparation automatically."));
+      if (replacement) {
+        explanation.child(div().text_size(12).text_color(theme.muted).child(`Recorded snapshot: ${replacement.result.association_id}`));
+        explanation.child(button("ocq-work-replacement", "View recorded snapshot", task => { this.choose(replacement, task); this.read("work-status", task); }));
+      }
+      if (!this.working) explanation.child(button("ocq-work-status", "Check saved status · read only", cx => this.read("work-status", cx)));
+      else explanation.child(div().text_size(12).child("Checking saved status… No preparation is being retried."));
+      add(explanation);
+    }
     if (item.kind === "capture" && item.state === "recorded_observed")
       add(div().child("Snapshot recorded for this implementation. The retained association links its exact checkout; tests and integration remain separate."));
     if (this.attempted()) add(div().text_color(theme.blocked).child("A client confirmation attempt is retained. Use read-only exact recovery; no resend is offered, even if no server receipt exists."));
-    if (this.revealSelected) { this.scroll.scroll_to_item(items.length); this.revealSelected = false; }
     if (!this.working) {
+      if (item.state !== "preparing" && (this.requestDetails || ["armed", "uncertain", "blocked"].includes(item.state)))
+        add(button("ocq-work-status", "Check saved status · read only", cx => this.read("work-status", cx)));
       if (this.requestDetails || ["armed", "uncertain", "blocked"].includes(item.state))
-        add(h_flex().gap(4)
-          .child(button("ocq-work-status", "Read exact status", cx => this.read("work-status", cx)))
-          .child(button("ocq-work-recover", "Check retained receipt", cx => this.recover(cx))));
+        add(button("ocq-work-recover", "Check retained receipt", cx => this.recover(cx)));
       if (this.requestDetails && item.job?.terminal_proven) add(button("ocq-work-output", "Read final output", cx => this.read("work-output", cx)));
       if (this.requestDetails && item.kind === "review_result" && item.state === "recorded_observed") add(button("ocq-work-handoff", "View handoff", cx => this.read("work-handoff", cx)));
       if (item.state === "prepared" && !this.attempted() && !this.storageError && !this.preview)
@@ -404,11 +447,12 @@ export class WorkOperator {
   }
   renderOutput(items, theme, button, disclosure) {
     const add = element => items.push(element), out = this.output, value = out.value;
-    add(div().font_semibold().child(`${out.title} · ${this.selectedID}`));
+    const captureRecord = out.kind === "record" && value.kind === "capture" && value.result;
+    if (!captureRecord) add(div().font_semibold().child(`${out.title} · ${this.selectedID}`));
     if (out.kind === "answer") {
       add(div().text_size(12).text_color(theme.muted).child("Terminal-evidence answer · not test validation"));
       if (this.revealOutput) this.scroll.scroll_to_item(items.length);
-      add(div().child(value.text));
+      add(div().child(readableValue(value.text)));
     } else if (out.kind === "handoff") {
       add(div().text_color(theme.blocked).child(`${value.readiness} · integration NOT authorized`));
       add(div().text_size(12).text_color(theme.muted).child("Tests not run · linked historical evidence"));
@@ -437,6 +481,16 @@ export class WorkOperator {
         add(div().child(`${kind}: ${linked.request_id}\n${linked.job?.job_id || linked.result?.association_id || linked.state}`));
       }
       if (this.revealOutput) this.scroll.scroll_to_item(items.length - 5);
+    } else if (captureRecord) {
+      // Captures record a snapshot association, not an admission receipt.
+      // Reveal its readable identity as one direct scroll child after the read.
+      if (this.revealOutput) this.scroll.scroll_to_item(items.length);
+      add(v_flex().w_full().min_w(0).gap(6)
+        .child(div().font_semibold().child("Recorded snapshot · read only"))
+        .child(div().text_size(12).child(`Capture: ${value.request_id}\nImplementation: ${value.parent_request_id}\nAssociation: ${value.result.association_id}`))
+        .child(div().text_size(12).child(`Snapshot digest: ${value.result.manifest_digest}`))
+        .child(div().text_size(12).text_color(theme.muted).child(
+          `${value.result.source.replaceAll("_", " ")} · ${value.result.verification.replaceAll("_", " ")}\nPoint-in-time snapshot; tests and integration remain separate.`)));
     } else {
       if (this.revealOutput) this.scroll.scroll_to_item(items.length);
       add(div().child(value.receipt ? `Admission recorded · ${value.receipt.job_id}` : `Stored state: ${value.state} · no admission receipt`));
@@ -447,6 +501,7 @@ export class WorkOperator {
     if (out.exact) {
       add(div().text_size(12).child(`Exact evidence page ${out.page + 1}/${out.pages.length}`));
       add(div().child(out.pages[out.page]));
+      add(button("ocq-work-copy-fields", "Copy readable evidence", cx => cx.write_to_clipboard(out.pages.join("\n\n"))));
       add(h_flex().gap(4)
         .when(out.page > 0, el => el.child(button("ocq-work-output-previous", "Previous output page", cx => { out.page--; cx.notify(); })))
         .when(out.page < out.pages.length - 1, el => el.child(button("ocq-work-output-next", "Next output page", cx => { out.page++; cx.notify(); }))));

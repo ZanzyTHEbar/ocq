@@ -229,7 +229,7 @@ export class CommandDispatcher {
       .gap(8).p(12).text_color(t.foreground).bg(t.background).track_focus(owner.handle).on_key_down((e, cx) => this.key(e, owner, cx)).children(items);
     box.child(div().font_semibold().child("Commands-only dispatcher"))
       .child(div().text_size(12).child(warning));
-    owner.nativeHC.render(cx, t, button, box);
+    owner.nativeHC.render(cx, t, button, box, "action");
     if (s) box.child(div().child(`State: ${state} · singleton ${s.busy ? "held" : "free"}`))
       .child(div().text_size(12).child(`Operation: ${s.id || "none"}${s.owner ? `\nReturned terminal: ${s.owner.terminal} · PID ${s.owner.pid}` : ""}`));
     if (this.error) box.child(div().text_color(t.blocked).child(this.error));

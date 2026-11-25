@@ -21,8 +21,8 @@ export class RegistrationForm {
       ["expected_opencode_directory", "Expected OpenCode directory", "Exact owned session location (must equal repository)", context.folder || ""],
       ["auth_ref", "Authentication reference", "Reference only, never a password or token", ""],
       ["intent", "Handoff intent", "Required; multiline text is preserved", "", true],
-      ["decision", "Handoff decision (optional)", "One optional entry; multiline preserved. Advanced raw supports multiple entries.", "", true],
-      ["risk", "Handoff risk (optional)", "One optional entry; multiline preserved. Advanced raw supports multiple entries.", "", true],
+      ["decision", "Handoff decision (optional)", "One optional entry; multiline preserved. File import supports multiple entries.", "", true],
+      ["risk", "Handoff risk (optional)", "One optional entry; multiline preserved. File import supports multiple entries.", "", true],
     ].map(([key, label, hint, value, multiline]) => {
       const state = multiline ? TextareaState.new({ placeholder: hint, rows: 5 }) : InputState.new({ placeholder: hint });
       state.set_value(value);

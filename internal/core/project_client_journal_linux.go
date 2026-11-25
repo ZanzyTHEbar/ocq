@@ -137,6 +137,19 @@ func ListProjectClients(dir, project string) ([]ClientStatus, error) {
 // current TUI route. Focus must say "Focus existing inspection terminal".
 // It never spawns, resumes or prompts.
 func VerifyProjectClient(dir, project, digest string, c ClientActionContext) (ClientStatus, error) {
+	return verifyProjectClientContext(dir, project, digest, c, false)
+}
+
+// InspectProjectClientReceipt validates stored history and current owning
+// queue/binding/context only. It grants no launch authority and deliberately
+// does not require the historical executable or current native target profile.
+// The bridge must still prove the exact HC terminal finished before using this
+// as closure evidence. All launch paths retain VerifyProjectClient's checks.
+func InspectProjectClientReceipt(dir, project, digest string, c ClientActionContext) (ClientStatus, error) {
+	return verifyProjectClientContext(dir, project, digest, c, true)
+}
+
+func verifyProjectClientContext(dir, project, digest string, c ClientActionContext, receiptOnly bool) (ClientStatus, error) {
 	r, err := OpenReader(dir)
 	if err != nil {
 		return ClientStatus{}, err
@@ -153,6 +166,12 @@ func VerifyProjectClient(dir, project, digest string, c ClientActionContext) (Cl
 	}
 	if err = clientContext(r, status.Pointer, c); err != nil {
 		return status, err
+	}
+	if receiptOnly {
+		if status.State != "terminal_recorded" || status.Terminal == nil {
+			return status, errors.New("exact recorded native-client terminal receipt required")
+		}
+		return status, nil
 	}
 	_, _, err = verifyClientPointer(r, j, status.Pointer)
 	return status, err

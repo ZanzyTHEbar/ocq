@@ -56,7 +56,7 @@ export const compatibility = {
     return this.workReady() && (s?.machine === null ||
       c?.executionPeer === s?.machine && typeof c?.executionCore === "string" && !!c.executionCore);
   },
-  nativeReady() { return this.machineReady() && !!this.hc?.approvedDigest(); },
+  nativeReady(purpose = "action") { return this.machineReady() && !!this.hc?.approvedDigest(purpose); },
   transfer(current) {
     const status = this.status, epoch = this.epoch, serial = this.serial;
     const valid = () => current() && this.ready() && this.status === status && this.epoch === epoch && this.serial === serial;
@@ -140,7 +140,8 @@ export async function bridgeCommand(args, options = {}) {
   let request = args;
   const native = args[0] === "client-open" || args[0] === "client-verify" || args[0] === "dispatcher-status" ||
     args[0].startsWith("dispatcher-") && ACTIONS[args[0]];
-  if (native && (!compatibility.nativeReady() || options.hcBinding !== compatibility.hc.approvedDigest() ||
+  const purpose = args[0] === "client-open" || args[0] === "client-verify" ? "navigation" : "action";
+  if (native && (!compatibility.nativeReady(purpose) || options.hcBinding !== compatibility.hc.approvedDigest(purpose) ||
       typeof options.current !== "function" || !options.current())) throw Error("Exact reviewed private HC binding required");
   const hc = native ? ["--hc-binding-sha256", options.hcBinding] : [];
   if (ACTIONS[args[0]]) {
@@ -171,7 +172,8 @@ export function enabledButton(id, context = legacyCompatibility) {
   // uncertain attempt reconnects to a default read-only endpoint.
   if (readButtons.has(id) || id.startsWith("ocq-main-goal-check-") || id.startsWith("ocq-result-check-") || id.startsWith("ocq-client-record-")) return true;
   if (id === "ocq-main-open" || id === "ocq-client-worker-new") return compatibility.workReady();
-  if (/^ocq-(client-(open|verify|show)|dispatch-)/.test(id)) return compatibility.nativeReady();
+  if (/^ocq-client-(open|verify|show)/.test(id)) return compatibility.nativeReady("navigation");
+  if (/^ocq-dispatch-/.test(id)) return compatibility.nativeReady();
   if (compatibility.ready() || compatibility.workReady() && /^(ocq-work-|ocq-main-|ocq-client-prepare)/.test(id)) return true;
   return ["ocq-work-select-", "ocq-project-job-", "ocq-queue-job-", "ocq-queue-event-",
     "ocq-log-", "ocq-project-", "ocq-lane-", "ocq-read-", "ocq-attachment-", "ocq-result-manifest-", "ocq-page-"].some(p => id.startsWith(p));

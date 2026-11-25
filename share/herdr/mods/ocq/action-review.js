@@ -1,7 +1,8 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
+import { readableValue } from "./readable-record.js";
 
-export const mainAction = mode => ({ create: "Create Main", adopt: "Adopt Main", send: "Start goal", refresh: "Refresh Main", reopen: "Reopen Main" }[mode] || "Start Main operation");
+export const mainAction = mode => ({ create: "Create Main", adopt: "Adopt Main", send: "Start goal", refresh: "Refresh Main", "role-refresh": "Update Main operating contract", reopen: "Reopen Main" }[mode] || "Start Main operation");
 
 export function retainedGoal(value) {
   const input = JSON.parse(value.input_json), prompt = input.prompt;
@@ -18,11 +19,13 @@ export function mainSummary(value, machine) {
     .child(div().child(`Project: ${input.label || status.project_id}\nMachine: ${machine ?? "This computer"}\nRepository: ${status.repo}\nBranch: ${status.main_branch}`))
     .when(typeof input.prompt === "string" && input.prompt.length > 0, e => e
       .child(div().font_semibold().child(status.mode === "send" ? "Goal" : "Initial message"))
-      .child(div().child(status.mode === "send" ? retainedGoal(value) : input.prompt))
+      .child(div().child(readableValue(status.mode === "send" ? retainedGoal(value) : input.prompt)))
       .when(["create", "adopt"].includes(status.mode), p => p.child(div().text_size(12)
         .child(`${mainAction(status.mode)} will also send this initial message.`))))
     .child(div().text_size(12).child(status.mode === "send"
       ? "Send this goal to this project's existing Main. Implementation runs in an owned worktree; independent review and handoff follow. Integration is not authorized."
+      : status.mode === "role-refresh"
+      ? `Select the disclosed successor CLI and operating instructions. Preserve the old entry and every goal. No prompt, profile, permissions, branch, anchor or project binding change.\nPrevious contract: ${value.role.previous_sha256}\nSuccessor CLI: ${value.role.cli}\nImage: ${value.role.cli_sha256}`
       : "Keep one Main conversation linked to this project. Goals can request implementation in an owned worktree, independent review, and handoff. Nothing is integrated automatically."))
     .child(div().text_size(12).child("Permissions requiring your approval stay in OpenCode."));
 }
@@ -48,6 +51,7 @@ export function technicalDetails(review, button, prefix) {
   }));
   if (review.details) box.child(div().text_size(12).child(`Technical details · ${review.page + 1}/${review.pages.length}`))
     .child(div().child(review.pages[review.page]))
+    .child(button(`${prefix}-copy-fields`, "Copy displayed fields", cx => cx.write_to_clipboard(review.pages.join("\n\n"))))
     .child(h_flex().gap(4)
       .when(review.page > 0, e => e.child(button(`${prefix}-previous`, "Previous details", cx => { review.page--; cx.notify(); })))
       .when(review.page < review.pages.length - 1, e => e.child(button(`${prefix}-next`, "More details", cx => { review.page++; cx.notify(); }))));

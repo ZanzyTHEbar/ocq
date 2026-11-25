@@ -1,4 +1,5 @@
 import { div } from "gpui-kit";
+import { readableText } from "./readable-record.js";
 import { v_flex, Textarea } from "gpui-base";
 import { bridgeCommand, compatibility } from "./compatibility.js";
 import { createHash, randomBytes } from "crypto";
@@ -7,7 +8,7 @@ import { composeDecode } from "./private-frames.js";
 
 const hash = (s) => createHash("sha256").update(s).digest("hex");
 const hex = (s) => /^[0-9a-f]{64}$/.test(s || "");
-const privateString = (s) => Array.from(JSON.stringify(s), (c) => /[\p{Cc}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]/u.test(c) ? Array.from({ length: c.length }, (_, n) => `\\u${c.charCodeAt(n).toString(16).padStart(4, "0")}`).join("") : c).join("");
+const privateString = s => readableText(s, "Evidence");
 
 export class CommandResolution {
   constructor(view) { this.view = view; }
@@ -118,7 +119,7 @@ export class CommandResolution {
       .child(div().font_semibold().child("Private operator assertion · resolve UNKNOWN command?"))
       .child(v_flex().flex_1().min_h(0).overflow_y_scroll().gap(10)
         .child(div().child("Records your operator assertion, resolves eligible ownership and may release capacity. NOT successful execution or a validated deliverable. Does NOT kill processes. The dispatcher must be stopped; exact process/group exit must be established by the existing core checks. No agent reconciliation."))
-        .child(div().child(`Machine: local only\nSpace: ${s.space_id}\nQueue: ${s.queue_identity}\nJob: ${s.job_id}\nReceipt: ${s.sequence}\nDisplayed kind/state: command / unknown\nFull stored reason (exact JSON string): ${privateString(p.displayed_reason)}\nEvidence (exact private JSON string): ${privateString(p.evidence)}\nEvidence SHA-256: ${hash(p.evidence)}\nPayload SHA-256: ${this.preview.digest}`)))
+        .child(div().child(`Machine: local only\nSpace: ${s.space_id}\nQueue: ${s.queue_identity}\nJob: ${s.job_id}\nReceipt: ${s.sequence}\nDisplayed kind/state: command / unknown\n${privateString(p.displayed_reason)}\n${privateString(p.evidence)}\nEvidence SHA-256: ${hash(p.evidence)}\nPayload SHA-256: ${this.preview.digest}`)))
       .child(v_flex().flex_none().gap(4)
         .child(div().text_size(12).text_color(t.muted).child("One durable claim and one attempt. Already-launched calls may finish after leaving. Unknown outcomes require read-only investigation, never automatic retry."))
         .when(!this.working && this.status?.state === "prepared", (e) => e.child(button("ocq-resolve-once", "Record assertion and resolve once · R", (cx) => this.send(owner, cx))))

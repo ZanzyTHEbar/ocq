@@ -1,4 +1,5 @@
 import { div } from "gpui-kit";
+import { readableValue } from "./readable-record.js";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { bridgeCommand, compatibility } from "./compatibility.js";
 import { createHash, randomBytes } from "crypto";
@@ -7,7 +8,7 @@ import { composeDecode } from "./private-frames.js";
 
 const hash = (s) => createHash("sha256").update(s).digest("hex");
 const hex = (s) => /^[0-9a-f]{64}$/.test(s || "");
-const quote = (s) => Array.from(JSON.stringify(s), (c) => /[\p{Cc}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]/u.test(c) ? Array.from({ length: c.length }, (_, n) => `\\u${c.charCodeAt(n).toString(16).padStart(4, "0")}`).join("") : c).join("");
+const quote = readableValue;
 
 // Concrete general COMMAND admission, independent of projects. Go owns all v1
 // canonicalization and filesystem resolution. No shell string or dispatcher.
@@ -20,11 +21,11 @@ export class CommandSubmission {
   get version() { return 1; }
   get activeFields() { return this.fields; }
   get draftRoute() { return "draft"; }
-  get formHint() { return "Every field is explicit. Arguments are a JSON string array, not shell syntax. Memory 0 means zero declared bytes (admission floor still applies). F6 leaves text unchanged; then ←/→ changes fields. G resolves a private draft; no admission."; }
+  get formHint() { return "Every field is explicit. Enter one argument per line, not shell syntax; empty means no arguments. Use a retained request file when an argument contains a newline. Memory 0 means zero declared bytes. G resolves a private draft; no admission."; }
   get warning() { return "TRUSTED EXECUTION: a dispatcher ALREADY RUNNING may execute immediately after admission. This form never starts one. No shell is inserted; /bin/sh or another interpreter runs ONLY if explicitly chosen. Paths are resolved before review, NOT executable/file-content or safety proof."; }
   newInstance() { return new this.constructor(this.view, this.fields); }
   static inputs(view) {
-    return [["key", "Immutable idempotency key", false], ["executable", "Explicit executable (bare name or path)", false], ["arguments", "Arguments: JSON array of strings, excluding executable", true], ["cwd", "Explicit working directory", false], ["memory_bytes", "Nonnegative memory bytes: exact decimal integer", false]].map(([key, label, multiline]) => {
+    return [["key", "Immutable idempotency key", false], ["executable", "Explicit executable (bare name or path)", false], ["arguments", "Arguments: one per line, excluding executable", true], ["cwd", "Explicit working directory", false], ["memory_bytes", "Nonnegative memory bytes: exact decimal integer", false]].map(([key, label, multiline]) => {
       const state = multiline ? TextareaState.new({ placeholder: label, rows: 4 }) : InputState.new({ placeholder: label });
       state.on("change", (_e, cx) => cx.notify());
       return { key, label, multiline, state };
@@ -88,7 +89,7 @@ export class CommandSubmission {
   last() { const r = this.review; return r && this.page === r.pages.length - 1 && r.openedThrough === this.page; }
   draftInput() {
     const d = Object.fromEntries(this.fields.map((f) => [f.key, f.state.value()]));
-    d.arguments = JSON.parse(d.arguments);
+    d.arguments = d.arguments === "" ? [] : d.arguments.split("\n");
     if (!Array.isArray(d.arguments) || d.arguments.some((a) => typeof a !== "string") || !/^(0|[1-9][0-9]*)$/.test(d.memory_bytes) || Object.values(d).some((v) => typeof v === "string" && composeDecode(Buffer.from(v)) !== v) || d.arguments.some((a) => composeDecode(Buffer.from(a)) !== a)) throw new Error("Invalid fields");
     return JSON.stringify(d);
   }
@@ -103,15 +104,15 @@ export class CommandSubmission {
     if (action === "reconcile" && !["attempted", "completed"].includes(state)) return;
     if (action === "retire" && !["completed", "cancelled"].includes(state)) return;
     let raw = null;
-    if (action === "draft") {
-      try {
-        raw = this.draftInput();
-      } catch (_e) { this.error = this.formHint; cx.notify(); return; }
-    }
+    const draftSnapshot = action === "draft" ? this.activeFields.map(f => f.state.value()) : null;
     if (action === "receive") raw = this.review.raw;
     this.working = true; this.error = null; this.confirm = false;
     cx.spawn(async (cx) => {
       try {
+        if (action === "draft") {
+          raw = await this.draftInput();
+          if (!this.current(owner) || this.activeFields.some((f, i) => f.state.value() !== draftSnapshot[i])) return;
+        }
         if (action === "load") {
           const r = await bridgeCommand([`${this.route}-context`, this.space], { on: null });
           if (!this.current(owner)) return;

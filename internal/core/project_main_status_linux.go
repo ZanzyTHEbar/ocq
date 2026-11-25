@@ -81,7 +81,13 @@ func inspectMainRecord(r *Reader, j *os.File, project, id string, live bool) (Ma
 		return out, nil
 	}
 	if !live {
+		if in.Mode == "role-refresh" {
+			return inspectMainRoleRefresh(j, rec, in, out)
+		}
 		return out, workOutputBound(out)
+	}
+	if in.Mode == "role-refresh" {
+		return inspectMainRoleRefresh(j, rec, in, out)
 	}
 	common, head, dirty, e := inspectCanonicalMain(rec.Repo, rec.Branch)
 	if e != nil || common != rec.Common {
@@ -109,6 +115,9 @@ func inspectMainRecord(r *Reader, j *os.File, project, id string, live bool) (Ma
 	}
 	out.ProfileSHA256 = nativeProfile(s)
 	observedRole := rec
+	if selectedOK {
+		observedRole.Role = setup.Role
+	}
 	observedRole.Server = service
 	if matches, _, err := observeMainRole(observedRole); err != nil || !matches {
 		out.State = "role_unverified"
@@ -172,44 +181,15 @@ func observeMainPrompt(rec mainRecord, in MainPrepareRequest) (bool, bool, error
 	if json.Unmarshal([]byte(rec.PromptJSON), &expected) != nil {
 		return false, false, errors.New("retained Main prompt unavailable")
 	}
-	cursor := ""
-	seen := map[string]bool{}
-	for page := 0; page < 100; page++ {
-		query := url.Values{"limit": {"100"}}
-		if cursor == "" {
-			query.Set("order", "asc")
-		} else {
-			query.Set("cursor", cursor)
+	// Main is multi-turn, not a bounded-worker completion proof. Inspect its
+	// exact reserved input, not unrelated tool output in an expanding transcript.
+	b, messageErr := nativeCallContext(ctx, rec.Repo, rec.Server, "get", "/api/session/"+url.PathEscape(rec.SessionID)+"/message/"+url.PathEscape(rec.PromptID), nil)
+	if messageErr == nil {
+		var m message
+		if err := decodeData(b, &m); err != nil || m.ID != rec.PromptID {
+			return false, false, errors.New("exact Main message identity unavailable")
 		}
-		b, e := nativeCallContext(ctx, rec.Repo, rec.Server, "get", "/api/session/"+url.PathEscape(rec.SessionID)+"/message?"+query.Encode(), nil)
-		if e != nil {
-			return false, false, e
-		}
-		var response struct {
-			Data   []message `json:"data"`
-			Cursor *struct {
-				Next *string `json:"next"`
-			} `json:"cursor"`
-		}
-		if json.Unmarshal(b, &response) != nil || response.Data == nil || response.Cursor == nil {
-			return false, false, errors.New("Main message pagination unavailable")
-		}
-		for _, m := range response.Data {
-			if m.ID == rec.PromptID {
-				return m.Type == "user" && m.Text == in.Prompt && jsonEqual(m.Metadata, expected["metadata"]) && len(m.Files)+len(m.Agents)+len(m.Skills) == 0, false, nil
-			}
-		}
-		if response.Cursor.Next == nil {
-			break
-		}
-		cursor = *response.Cursor.Next
-		if cursor == "" || seen[cursor] {
-			return false, false, errors.New("Main transcript cursor repeated")
-		}
-		seen[cursor] = true
-		if page == 99 {
-			return false, false, errors.New("Main prompt inspection bound reached")
-		}
+		return m.Type == "user" && m.Text == in.Prompt && jsonEqual(m.Metadata, expected["metadata"]) && len(m.Files)+len(m.Agents)+len(m.Skills) == 0, false, nil
 	}
 	b, e := nativeCallContext(ctx, rec.Repo, rec.Server, "get", "/api/session/"+url.PathEscape(rec.SessionID)+"/inbox", nil)
 	if e != nil {
@@ -221,10 +201,10 @@ func observeMainPrompt(rec mainRecord, in MainPrepareRequest) (bool, bool, error
 	}
 	for _, item := range inbox {
 		if item.ID == rec.PromptID {
-			return false, item.SessionID == rec.SessionID && item.Type == "user" && item.Payload.Text == in.Prompt && jsonEqual(item.Payload.Metadata, expected["metadata"]), nil
+			return false, item.SessionID == rec.SessionID && item.Type == "user" && item.Payload.Text == in.Prompt && jsonEqual(item.Payload.Metadata, expected["metadata"]) && len(item.Payload.Files)+len(item.Payload.Agents)+len(item.Payload.Skills) == 0, nil
 		}
 	}
-	return false, false, nil
+	return false, false, messageErr
 }
 
 func mainInspect(dir, project, id string, live bool) (MainStatus, error) {
@@ -254,6 +234,11 @@ func InspectProjectMain(dir, project, id string) (MainStatus, error) {
 	return mainInspect(dir, project, id, false)
 }
 func RecoverProjectMain(dir, project, id string) (MainStatus, error) {
+	if id != "" {
+		if out, handled, err := recoverMainRoleRefresh(dir, project, id); handled || err != nil {
+			return out, err
+		}
+	}
 	return mainInspect(dir, project, id, true)
 }
 

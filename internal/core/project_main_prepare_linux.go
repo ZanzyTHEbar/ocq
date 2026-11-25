@@ -143,6 +143,9 @@ func decodeMain(raw []byte) (MainPrepareRequest, error) {
 	if in.Protocol != MainProtocol || !isValidProjectID(in.ProjectID) || !workID(in.OperationID) || !utf8.Valid(raw) || len(in.Prompt) > 16<<10 {
 		return in, errors.New("invalid bounded Main operation")
 	}
+	if in.Mode != "role-refresh" && in.ExpectedRoleSHA256 != "" {
+		return in, errors.New("expected role digest is only valid for explicit role-refresh")
+	}
 	switch in.Mode {
 	case "create", "adopt":
 		if in.Repo == "" || in.MainBranch == "" || in.Label == "" || in.Profile == "" || in.Role == "" {
@@ -158,14 +161,17 @@ func decodeMain(raw []byte) (MainPrepareRequest, error) {
 		if err != nil || in.Mode == "create" && rev != 0 || in.Mode == "adopt" && rev < 1 {
 			return in, errors.New("explicit Main registration CAS revision required")
 		}
-	case "refresh", "reopen", "send":
+	case "refresh", "reopen", "send", "role-refresh":
 		if in.Repo != "" || in.MainBranch != "" || in.Label != "" || in.Profile != "" || in.Role != "" {
 			return in, errors.New("reuse the SQL-selected Main setup; do not silently change its profile/checkout")
 		}
 		if in.Mode == "send" && strings.TrimSpace(in.Prompt) == "" || in.Mode != "send" && in.Prompt != "" {
 			return in, errors.New("only a distinct explicit send may carry a subsequent prompt")
 		}
-		if in.Mode == "refresh" {
+		if in.Mode == "role-refresh" && !isValidHexLen(in.ExpectedRoleSHA256, 64) {
+			return in, errors.New("operating contract refresh requires the exact previous role SHA256")
+		}
+		if in.Mode == "refresh" || in.Mode == "role-refresh" {
 			rev, e := observationDecimal(in.ExpectedRevision)
 			if e != nil || rev < 1 {
 				return in, errors.New("Main anchor refresh requires explicit CAS revision")
@@ -232,6 +238,9 @@ func selectedMain(r *Reader, j *os.File, project string) (mainRecord, MainPrepar
 	rec, in, err := mainLoad(r, j, project, id)
 	if err == nil && (rec.SetupID != id || rec.SessionID != binding.ElephantSessionID || rec.Repo != binding.RepoRoot || rec.Common != binding.GitCommonDir || binding.OpenCodeDirectory != rec.Repo || binding.OpenCodeProjectID != rec.ProjectID) {
 		err = errors.New("SQL binding does not match selected Main ownership; no replacement")
+	}
+	if err == nil {
+		rec, err = selectedMainRole(r, j, project, rec)
 	}
 	return rec, in, binding, err
 }
@@ -325,6 +334,9 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 			rec.Repo, rec.Branch, rec.SetupID = setup.Repo, setup.Branch, setup.SetupID
 			rec.SessionID, rec.ProjectID, rec.Metadata, rec.OwnershipMode = setup.SessionID, setup.ProjectID, setup.Metadata, setup.OwnershipMode
 			rec.Role = setup.Role
+			if in.Mode == "role-refresh" && rec.Role.SHA256 != in.ExpectedRoleSHA256 {
+				return MainStatus{}, errors.New("Main operating contract CAS changed")
+			}
 		}
 	}
 	rec.Common, rec.Head, _, err = inspectCanonicalMain(rec.Repo, rec.Branch)
@@ -344,6 +356,21 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 		if err != nil {
 			return MainStatus{}, err
 		}
+	}
+	if in.Mode == "role-refresh" {
+		previous := rec.Role
+		matches, _, e := observeMainRole(rec)
+		if e != nil || !matches {
+			return MainStatus{}, errors.Join(e, errors.New("exact previous operating contract must be present; never overwrite it"))
+		}
+		selection, _ := json.Marshal(previous.Selection)
+		rec.Role, err = prepareMainRole(r, rec, in.ProjectID, string(selection))
+		if err != nil {
+			return MainStatus{}, err
+		}
+		rec.Role.PreviousSHA256 = previous.SHA256
+		rec.Role.Instructions = "Explicit operating-contract successor to SHA256 " + previous.SHA256 + ". This value replaces the previous active context under " + mainRoleKey + " and supersedes its CLI and operating instructions. Immutable previous values remain in OCQ's journal, not as additional active contexts. It changes no agent, model, permissions, worker profiles, session, project binding, branch, anchor or user input. No prompt or continuation is sent.\n\n" + rec.Role.Instructions
+		rec.Role.SHA256 = mainRoleDigest(rec.Role)
 	}
 	if in.Mode == "create" {
 		rec.SessionID, err = randomID("ses_ocqmain_")

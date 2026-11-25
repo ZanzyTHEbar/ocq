@@ -94,11 +94,50 @@ provenance. Pending auxiliary inbox input must still drain. Additional user,
 command or shell execution inputs and profile mutations latch interference and
 retain unknown ownership; a later idle response does not clear it.
 
-The `foreground-shell-v1` extension accepts terminal completed/error states for
-native read, edit, write, patch, glob, grep and shell tools. Nonterminal,
-unrecognized, provider-executed or unsupported tools hold capacity. Tool errors
-are recorded, not converted to tool success. Delegation, plugin/codemode execution
-and persistent terminals are outside this supported boundary.
+`opencode-cooperative-v1` is a lifecycle adapter for OpenCode 2.3.2, not a
+second tool-permission engine. Normal configured local foreground tools and
+awaited MCP RPCs are trusted to finish when the harness reports their terminal
+state. There is no ordinary-tool name whitelist, producer-binary attestation,
+capability declaration or extra permission profile. Static review independently
+remains read/glob/grep plus catch-all deny.
+
+Native Code Mode catalog search and foreground RPC composition are supported.
+Completed children remain completed; error/interrupted children are recorded as
+errors, never relabelled successful because the outer tool completed. Running or
+missing child lifecycle rows prevent completion. The native runtime joins its
+host-call cleanup before returning. Shared MCP connection lifetime is not an
+individual job's resource lifetime. Source: `anomalyco/opencode` commit
+`c0ad18b402eb2827fc1ee71c171b1177b3fc02d1`,
+`packages/{core/src/codemode/tool,codemode/src/language/runtime/{execute,driver}}.ts`.
+
+Concrete persistent resources remain separate: directly reported shell handles
+are retained and inspected to actual exit; pending job/task/PTY/delegation
+handles are not closed by an outer return. OpenCode 2.3.2 omits nested resource
+result handles from Code Mode rows, so native nested resource operations cannot
+claim the same support as ordinary foreground RPCs. Non-shell runtime jobs and
+live PTYs without supported exact terminal lookup retain an actionable resource
+diagnosis; their disappearance from a list is not accepted as exit. The global
+experimental job list is filtered by exact session, never adopted by Location.
+
+The policy is retained in `agent_operations` with new admission (or before a
+queued legacy receipt's first execution intent), without changing v1/v2 receipt
+bytes or schema. Runtime version is checked before provisioning/session/prompt
+and before/final completion observation; runtime identity drift holds ownership.
+Old jobs are never upgraded by polling or binary replacement. An explicit
+`reconcile JOB --lifecycle-policy opencode-cooperative-v1` on an unknown job
+retains one immutable prior-job/ownership/policy intent under the dispatcher
+lock before API observation. Policy adoption is single-attempt; subsequent
+`reconcile JOB` calls explicitly request further API-only observation under the
+retained policy, while automatic polling still skips this historical job.
+Historical terminal evidence and frozen
+completion events remain intact. New proof is `terminal-evidence-cooperative-v1`.
+This command is existing-store only and never initializes/upgrades the queue.
+
+Each new unknown/blocked transition for an attributed job atomically inserts
+`lane.blocked` to its integrator inbox with sender `observer:ocq`. This is an
+observer diagnosis, not forged worker mail or terminal proof. Content-derived
+identity deduplicates unchanged observations and recurring identical diagnoses.
+No Main prompt, acknowledgement, capture/review or capacity release follows.
 
 A completed shell tool may still own a running background shell. OCQ checks
 location-scoped shell lists before prompting and during terminal observation,

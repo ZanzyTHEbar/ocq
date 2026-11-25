@@ -20,14 +20,39 @@ const agentCompletionPolicy = "session-scoped-v1"
 // All reconciliation is observational. There is intentionally no POST, resume,
 // permission reply, cancellation or process-liveness shortcut in this function.
 func (s *store) observeAgent(j Job) error {
+	return s.observeAgentPolicy(j, false)
+}
+
+func (s *store) observeAgentPolicy(j Job, explicit bool) error {
 	if j.Agent == nil || j.agentRequest == nil {
 		return diagnostic(faults.CodeInvariantFailed, "missing exact agent ownership")
 	}
 	if j.State == "queued" || j.State == "cancelled" {
 		return diagnostic(faults.CodeValidationFailed, "agent job has not been admitted")
 	}
+	if workTerminal(j) {
+		return nil // Keep the first supported terminal evidence immutable.
+	}
+	policy, policyErr := s.lifecycleIntent(j.ID)
+	if errors.Is(policyErr, sql.ErrNoRows) || policyErr == nil && policy.Source == "explicit_reevaluation" && !explicit {
+		return nil // Replacing/polling an observer never upgrades historical jobs.
+	}
+	if policyErr != nil {
+		return policyErr
+	}
 	if j.Agent.Worktree == "" {
+		var intents int
+		if err := s.db.QueryRow("SELECT count(*) FROM agent_operations WHERE job_id=? AND kind='worktree'", j.ID).Scan(&intents); err != nil {
+			return err
+		}
+		if intents == 0 && j.State == "unknown" {
+			return nil // A pre-provision failure has nothing to reconcile/resume.
+		}
 		return s.agentUnknown(j.ID, "Workmux acknowledgment/ownership unresolved; no name/branch adoption and no mutation retry", false)
+	}
+	runtimeBefore, err := s.lifecycleRuntime(j, "lifecycle-runtime-before")
+	if err != nil {
+		return s.agentFailure(j, err)
 	}
 	// Preserve the superseded causal-provenance diagnosis before re-evaluating
 	// its entire transcript. New-policy interference remains latched separately.
@@ -145,7 +170,7 @@ func (s *store) observeAgent(j Job) error {
 					anchors++
 				case "system", "synthetic": // Auxiliary only; no causality asserted.
 				case "assistant":
-					if anchors != 1 || m.Agent != j.agentRequest.Agent || m.Model != j.agentRequest.Model {
+					if anchors != 1 || m.Agent != j.agentRequest.Agent || !sameAgentModel(m.Model, j.agentRequest.Model) {
 						return s.interference(j, "unexpected assistant execution while owned input pending")
 					}
 				case "idle":
@@ -235,7 +260,7 @@ func (s *store) observeAgent(j Job) error {
 			if anchors != 1 {
 				return s.interference(j, "assistant execution before the owned prompt anchor")
 			}
-			if m.Agent != j.agentRequest.Agent || m.Model != j.agentRequest.Model {
+			if m.Agent != j.agentRequest.Agent || !sameAgentModel(m.Model, j.agentRequest.Model) {
 				return s.interference(j, "unexpected assistant agent/model mutation")
 			}
 			last := messages[len(messages)-1]
@@ -254,15 +279,13 @@ func (s *store) observeAgent(j Job) error {
 					if isReview && part.Name != "read" && part.Name != "glob" && part.Name != "grep" {
 						return s.interference(j, fmt.Sprintf("reviewer job invoked non-read-only tool %q; capacity held", part.Name))
 					}
-					id, err := terminalTool(part)
+					id, errorsRecorded, err := terminalTool(part)
 					if err != nil {
 						return s.agentUnknown(j.ID, err.Error()+"; capacity held", false)
 					}
 					toolIDs[part.ID] = true
 					toolCount++
-					if part.State.Status == "error" {
-						toolErrors++
-					}
+					toolErrors += errorsRecorded
 					if id != "" {
 						shellReferences = append(shellReferences, id)
 					}
@@ -393,12 +416,16 @@ func (s *store) observeAgent(j Job) error {
 	if !jsonEqual(after, finalSession) {
 		return s.agentUnknown(j.ID, "session changed across final inspection; retry GET inspection only", false)
 	}
-	evidence := map[string]any{"completion_policy": agentCompletionPolicy, "session": finalSession, "prompt_id": j.Agent.PromptID, "request_digest": j.Digest, "messages": messages, "auxiliary_events": auxiliary, "auxiliary_event_count": len(auxiliary), "auxiliary_provenance": "not asserted; session context under local single-user policy", "prior_diagnostic": json.RawMessage(priorDiagnostic), "active": false, "stable_transcript": true, "pending_permissions": len(finalPermissions), "pending_forms": len(finalForms), "inbox": 0, "tool_policy": "foreground-shell-v1: known terminal tools and owned runtime shell exit; cooperative resources only", "tool_count": toolCount, "tool_error_count": toolErrors, "resources_before": resourcesBefore, "resources_final": resourcesFinal, "validation": "not_run"}
+	runtimeFinal, err := s.lifecycleRuntime(j, "lifecycle-runtime-final")
+	if err != nil || runtimeFinal != runtimeBefore {
+		return s.agentUnknown(j.ID, "lifecycle runtime changed/unavailable across observation; capacity held", false)
+	}
+	evidence := map[string]any{"completion_policy": agentCompletionPolicy, "session": finalSession, "prompt_id": j.Agent.PromptID, "request_digest": j.Digest, "messages": messages, "auxiliary_events": auxiliary, "auxiliary_event_count": len(auxiliary), "auxiliary_provenance": "not asserted; session context under local single-user policy", "prior_diagnostic": json.RawMessage(priorDiagnostic), "active": false, "stable_transcript": true, "pending_permissions": len(finalPermissions), "pending_forms": len(finalForms), "inbox": 0, "tool_policy": CooperativeLifecyclePolicy, "tool_count": toolCount, "tool_error_count": toolErrors, "resources_before": resourcesBefore, "resources_final": resourcesFinal, "validation": "not_run", "lifecycle_intent": policy, "lifecycle_runtime": runtimeFinal, "trust": "configured cooperative harness and foreground producers; not producer attestation or an execution permission"}
 	b, err := json.Marshal(evidence)
 	if err != nil {
 		return err
 	}
-	proof, err := s.agentEvidence(j.ID, "terminal-evidence-session-v1", b)
+	proof, err := s.agentEvidence(j.ID, "terminal-evidence-cooperative-v1", b)
 	if err != nil {
 		return err
 	}
@@ -413,7 +440,7 @@ func (s *store) observeAgent(j Job) error {
 		if err := q.CompleteAgentOwnership(context.Background(), dbquery.CompleteAgentOwnershipParams{ServerOutcome: terminal.Outcome, TerminalEvidence: proof, JobID: j.ID}); err != nil {
 			return err
 		}
-		reason := fmt.Sprintf("session-scoped-v1 / foreground-shell-v1: one exact prompt, stable terminal session, terminal tools (%d errors recorded), no active loop/pending input/permission/form or running owned runtime resources; validation not run", toolErrors)
+		reason := fmt.Sprintf("session-scoped-v1 / %s: one exact prompt, stable terminal session, terminal tools (%d errors recorded), no active loop/pending input/permission/form or running owned runtime resources; validation not run", CooperativeLifecyclePolicy, toolErrors)
 		n, err := q.CompleteAgentJob(context.Background(), dbquery.CompleteAgentJobParams{Outcome: "agent_" + terminal.Outcome, Reason: reason, ID: j.ID})
 		if err == nil && n != 1 {
 			return fmt.Errorf("agent terminal evidence CAS failed; ownership retained")

@@ -1,4 +1,5 @@
 import { View, div } from "gpui-kit";
+import { readableText } from "./readable-record.js";
 import { h_flex, v_flex, ScrollHandle, Scrollbar } from "gpui-base";
 import { machines, spaces, panes, exec, hc, theme, checking, nextCommand, shared, setShared, run, layout } from "herdr";
 import { createHash } from "crypto";
@@ -246,7 +247,7 @@ export class RuntimeSources extends View {
     const d = this.detail;
     if (d) this.projectDraft = {
       source: d.source, project: d.selected, folder: d.folder,
-      goal: d.workflow.goal.value(), label: d.workflow.label.value(),
+      goal: d.workflow.draftText.goal, label: d.workflow.draftText.label,
       choices: { ...d.workflow.choices }, opened: d.workflow.opened,
       labelTouched: d.workflow.labelTouched, labelSeeded: d.workflow.labelSeeded,
     };
@@ -262,6 +263,7 @@ export class RuntimeSources extends View {
     this.detail = new RuntimeProject(source, project, space || (matches.length === 1 ? matches[0] : null), cx);
     if (sameProject) {
       const workflow = this.detail.workflow;
+      workflow.draftText = { goal: draft.goal, label: draft.label };
       workflow.goal.set_value(draft.goal); workflow.label.set_value(draft.label);
       workflow.choices = draft.choices; workflow.opened = draft.opened;
       workflow.labelTouched = draft.labelTouched; workflow.labelSeeded = draft.labelSeeded;
@@ -335,7 +337,7 @@ export class RuntimeSources extends View {
     if (mail) {
       box.child(div().text_size(12).text_color(t.muted).child(
         `${item.kind.replaceAll(".", " ")} · ${item.archived_at ? "Archived" : item.read_at ? "Read" : "Unread"}`));
-      if (item.body) box.child(div().child(item.body));
+      if (item.body) box.child(div().child(readableText(item.body, "Message")));
       if (item.manifest_digest || item.assoc_id)
         box.child(div().text_size(12).text_color(t.muted).child("Attached retained result · historical evidence, not test validation or integration authority."));
       if (item.fsfork_path) box.child(div().text_size(12).text_color(t.muted).child("Linked owned checkout is retained."));
@@ -466,7 +468,7 @@ export class RuntimeSources extends View {
         `Main session: ${line(main?.selectedMain?.session_id)}`,
         `Main activity: ${main?.live ? `${line(main.live.state)} · checked ${line(main.live.read_at)}` : "not live-observed; Open Main or check exact goal status"}`,
         `Project requests: ${d.workOperator.rows.length}`,
-        ...d.workOperator.rows.map(r => `Request ${line(r.request_id)}: ${line(r.state)} · job ${line(r.job?.job_id)} ${line(r.job?.state)}`),
+        ...d.workOperator.rows.map(r => `Request ${line(r.request_id)}: ${line(r.state)} · job ${line(r.job?.job_id)} ${line(r.job?.state)}${r.job?.reason ? ` · ${line(r.job.reason)}` : ""}`),
         ...(main?.goals || []).map((g, i) => `Goal ${i + 1}: ${line(g.main.operation_id)} · ${line(g.main.state)} · ${main.goalSummary(g)}`),
         ...Object.values(d.workflow.saved || {}).filter(r => !d.selected || r.project === d.selected)
           .map(r => `Saved operation ${line(r.operation)}: ${line(r.mode)} / ${line(r.phase)} · ${r.phase === "start_attempted" ? "local start attempt recorded; never resend" : "no local start-attempt marker; exact server status is authoritative"}`),
@@ -564,7 +566,7 @@ export class RuntimeSources extends View {
             this.inspection.technical = true; this.inspection.explanation = v.explanation;
           } else { v.technical = !v.technical; task.notify(); }
         }, t));
-      if (v.technical) box.child(div().max_h(240).overflow_y_scroll().text_size(12).child(JSON.stringify(v.detail || v.item, null, 2)));
+      if (v.technical) box.child(div().max_h(240).overflow_y_scroll().text_size(12).child(readableText(v.detail || v.item)));
       return root.child(box);
     }
     if (!this.sources.size) {

@@ -43,8 +43,10 @@ func draftLocalProjectIntake(stateDir, kind, launch string) (ProjectIntakeStatus
 		// ASCII length permits native UTF-8 sockets, with a registration-sized
 		// bound before allocation. Reject noncanonical sizes and excess digits.
 		limit := maxRegistrationBytes
-		if kind != "registration" {
+		if kind == "implementation" {
 			limit = maxEnvelopeBytes
+		} else if kind == "review" {
+			limit = projectPayloadBytes
 		}
 		digits := ""
 		var b [1]byte
@@ -55,7 +57,7 @@ func draftLocalProjectIntake(stateDir, kind, launch string) (ProjectIntakeStatus
 			if b[0] == '\n' {
 				break
 			}
-			if b[0] < '0' || b[0] > '9' || len(digits) >= 6 {
+			if b[0] < '0' || b[0] > '9' || len(digits) >= 7 {
 				return fmt.Errorf("invalid draft frame")
 			}
 			digits += string(b[:])

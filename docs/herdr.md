@@ -771,7 +771,7 @@ For review, select an available implementation result and choose **Submit review
 job for this result**. The association, target job/result digest and binding
 revision are pinned. Enter the execution profile, criteria and rules. Go builds
 the deterministic prompt from the full immutable result diff and changed-file
-contents, never a summary or caller substitute. Prompts exceeding 16 KiB are
+contents, never a summary or caller substitute. Prompts exceeding 256 KiB are
 rejected, not truncated. The existing core gate checks target linkage, the exact
 reviewer, OpenCode server
 2.2.6 and ordered read/glob/grep policy at fresh intake and again before prompting.

@@ -12,7 +12,7 @@ func PrepareResultPublicationBytes(dir string, t ResultPublicationTarget, raw []
 	if !t.valid() {
 		return ResultPublicationStatus{}, errors.New("invalid publication target")
 	}
-	if _, err := decodeStrictJSONObject(raw, composeLimit, &p); err != nil || !p.valid() || p.Target != t {
+	if _, err := decodeStrictJSONObject(raw, projectPayloadBytes, &p); err != nil || !p.valid() || p.Target != t {
 		return ResultPublicationStatus{}, errors.New("invalid publication bytes")
 	}
 	j, err := openLocalJournal(dir, t.journal())

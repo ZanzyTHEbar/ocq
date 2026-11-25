@@ -192,6 +192,9 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 			return MainStatus{}, err
 		}
 	}
+	if in.Mode == "role-refresh" {
+		return startMainRoleRefresh(r, j, rec, in, claim, false)
+	}
 	// A later explicit start of an already bound/attempted operation is recovery,
 	// not a replay of the original prompt or a permanent creation-profile fence.
 	registered := rec.RegistrationJSON == ""
@@ -283,6 +286,10 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 			return inspectMainUncertain(r, j.dir, project, id, err)
 		}
 	} else {
+		selected, _, _, e := selectedMain(r, j.dir, project)
+		if e != nil || selected.Role.SHA256 != rec.Role.SHA256 {
+			return MainStatus{}, errors.Join(e, errors.New("Main operating contract changed; prepare a fresh operation, never replay"))
+		}
 		matches, _, e := observeMainRole(rec)
 		if e != nil || !matches {
 			return MainStatus{}, errors.Join(e, errors.New("Main role not proven; no automatic repair"))

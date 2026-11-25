@@ -83,8 +83,9 @@ Use rows and native text controls, not nested cards or invented diagrams.
 - **Main/clients:** short summary, technical identity/history disclosures. A new
   client remains explicitly new; an unverified route is never presented as bound.
 - **Confirmations:** one readable action summary derived from exact retained
-  bytes, with optional Technical details and Advanced roles. No mandatory JSON
-  pages. Preserve original context checks, uncertainty handling and pointer-only
+  bytes, with optional Technical details and Advanced roles. Never display JSON,
+  even in optional details; use readable domain fields and existing-file inputs.
+  Preserve original context checks, uncertainty handling and pointer-only
   final confirmation.
 
 ## Do's and Don'ts

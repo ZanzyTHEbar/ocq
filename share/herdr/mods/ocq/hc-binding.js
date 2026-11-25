@@ -18,8 +18,9 @@ export class PrivateHCBinding {
     return JSON.stringify([u.scope, b, u.connectionID, u.connectionGeneration, u.bindingEpoch,
       this.compatibility.panelMarker, this.compatibility.status?.image_sha256]);
   }
-  approvedDigest() {
-    return this.approved && this.approved === this.review && this.approved.context === this.context()
+  approvedDigest(purpose = "action") {
+    return (purpose === "navigation" || purpose === "action" && this.approved?.navigationOnly === false) &&
+      this.approved && this.approved === this.review && this.approved.context === this.context()
       ? this.approved.value.binding_sha256 : null;
   }
   read(cx, onApproved = null) {
@@ -58,7 +59,7 @@ export class PrivateHCBinding {
         this.review = { context, value, pages: this.host.workOperator.pagesFor(value), page: 0 };
         return this.review;
   }
-  render(cx, theme, button, box = v_flex().w_full().min_w(0).gap(6)) {
+  render(cx, theme, button, box = v_flex().w_full().min_w(0).gap(6), purpose = "navigation") {
     const context = this.context(), review = this.review, current = review && review.context === context;
     if (!context) {
       box.child(div().text_color(theme.muted).child("Verify this project's connection before reviewing its terminal service. Saved work and drafts are retained."));
@@ -70,11 +71,17 @@ export class PrivateHCBinding {
     if (review && !current) box.child(div().text_color(theme.muted).child("Review the terminal service for this connection again. Prior navigation approval is no longer valid."));
     if (!current) return box;
     const b = review.value.binding;
-    box.child(div().text_size(12).child(`Open conversations on ${this.host.machine ?? "this computer"}\nRepository: ${b.folder}`));
-    if (this.approvedDigest()) return box.child(div().text_size(12).child("Private HC reviewed for this connection."));
-    box.child(div().child("Use the verified terminal service on this machine. This approves navigation only, not permissions."))
-      .child(button("ocq-read-hc-approve", "Use this terminal service", cx => {
+    const action = purpose === "action";
+    box.child(div().text_size(12).child(`${action ? "Dispatcher terminal service" : "Conversation terminal service"}: ${this.host.machine ?? "this computer"}\nRepository: ${b.folder}`));
+    if (this.approvedDigest(purpose)) return box.child(div().text_size(12).child(action
+      ? "HC identity reviewed for separately confirmed dispatcher actions."
+      : "HC identity reviewed for conversation navigation."));
+    box.child(div().child(action
+      ? "Review this HC identity for dispatcher actions. Start, drain and retirement still require their separate explicit confirmations. This does not answer OpenCode permissions."
+      : "Use this HC identity for conversation navigation only. This cannot authorize dispatcher actions or answer OpenCode permissions."))
+      .child(button(action ? "ocq-read-hc-approve-action" : "ocq-read-hc-approve", action ? "Review HC for dispatcher actions" : "Use for navigation only", cx => {
         if (review === this.review && review.context === this.context()) {
+          review.navigationOnly = !action;
           this.approved = review;
           const next = review.onApproved; review.onApproved = null;
           next?.(cx);
