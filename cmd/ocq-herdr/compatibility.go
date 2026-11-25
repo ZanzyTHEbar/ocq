@@ -39,11 +39,13 @@ func modActions() map[string]string {
 	}
 	out := map[string]string{"mail-ack": "mail-ack-sequence-read-before-archive-v1"}
 	out["work-confirm"] = core.WorkProtocol
+	out[taskGoalAction] = "ocq-task-goal-v1/submit"
 	out["main-start"] = core.MainProtocol
 	out["main-author-v1"] = workflowProtocol + "/author"
 	out["client-prepare"] = core.ClientProtocol + "/prepare"
 	out["client-attention-prepare-v1"] = core.AttentionClientProtocol + "/prepare"
 	out["client-open"] = core.ClientProtocol + "/open"
+	out["session-delete-v1"] = core.SessionDeleteProtocol
 	out["capture-receipt-preview"] = "capture/recorded-receipt-preview/v1"
 	for family, ops := range families {
 		for _, op := range ops {
@@ -62,7 +64,7 @@ func modRead(action string) bool {
 	}
 	switch action {
 	case "workflow-context", "workflow-goal", "work-list", "work-status", "work-recover", "work-output", "work-handoff", "work-preview",
-		"main-list", "main-status", "main-recover", "main-preview", "client-list", "client-status", "client-verify":
+		"main-list", "main-status", "main-recover", "main-preview", "client-list", "client-status", "client-verify", "session-delete-check-v1":
 		// Preview retains private authorization evidence, but never arms/submits.
 		return true
 	case "view-snapshot", "watch-wait", "observation-read-status":
@@ -227,7 +229,7 @@ func installCompatibility(root *cobra.Command) {
 		if e != nil || s.Image != image || s.Context != context || s.Queue == "" || s.Queue != queue {
 			return errors.New("bridge compatibility/context changed; no action attempted")
 		}
-		for _, family := range []string{"notification-ack-", "queued-cancel-", "command-resolve-", "agent-reconcile-", "command-submit-", "agent-submit-", "result-publish-", "capture-", "dispatcher-", "work-", "main-", "client-"} {
+		for _, family := range []string{"notification-ack-", "queued-cancel-", "command-resolve-", "agent-reconcile-", "command-submit-", "agent-submit-", "result-publish-", "capture-", "dispatcher-", "work-", "main-", "client-", "session-delete-"} {
 			if strings.HasPrefix(name, family) && (len(a) < 2 || a[0] != space || a[1] != queue) {
 				return errors.New("selected compatibility scope differs from action")
 			}
@@ -235,7 +237,7 @@ func installCompatibility(root *cobra.Command) {
 		if name == "work-confirm" && (len(a) != 9 || a[5] != folder || a[7] != image || workObservation != s.ObservationContext) {
 			return errors.New("work context differs from matched bridge")
 		}
-		if name == "main-author-v1" || name == "main-start" || name == "client-prepare" || name == "client-attention-prepare-v1" || name == "client-open" {
+		if name == taskGoalAction || name == "main-author-v1" || name == "main-start" || name == "client-prepare" || name == "client-attention-prepare-v1" || name == "client-open" || name == "session-delete-v1" {
 			if len(a) < 8 || a[5] != folder || a[7] != image || workObservation != s.ObservationContext {
 				return errors.New("Main/client context differs from matched bridge")
 			}

@@ -43,9 +43,8 @@ export default Plugin.define({
   async setup(context) {
     const target = context.options;
     const fail = () => context.ui.toast.show({
-      title: "OCQ handoff not opened",
-      message: "Exact session, role, ownership, profile, or location could not be verified. Return to the OCQ project and inspect its recorded handoff. Nothing was created, resumed, or sent by this plugin.",
-      variant: "error", duration: 15000,
+      title: "Could not open this conversation",
+      variant: "error",
     });
     // Public router/plugin contract validated at official 2.3.2 commit
     // c0ad18b402eb2827fc1ee71c171b1177b3fc02d1, not a semver range.
@@ -68,18 +67,11 @@ export default Plugin.define({
       if (!matches(session, target) || context.ui.router.current().type !== "home") { fail(); return; }
       // This is the public router, NOT --session or an API creation fallback.
       // If the session disappears now, the native session view handles absence.
-       context.ui.router.navigate({ type: "session", sessionID: target.session_id });
-       if (target.protocol === "ocq-attention-handoff-v1") {
-         const route = context.ui.router.current();
-         if (route.type !== "session" || route.sessionID !== target.session_id) { fail(); return; }
-       }
-      context.ui.toast.show({
-        title: target.target_kind === "worker" ? `OCQ job ${target.job_id}` : `Main / Integrator · ${target.project_id}`,
-        message: (target.protocol === "ocq-attention-handoff-v1" ? `Exact attention route: ${target.session_id}. ` : "") + (target.target_kind === "worker"
-          ? "Inspect this bounded job and respond to human permission requests in OpenCode. Do not send steering prompts or change its execution profile. Navigation is not reconciliation, completion, validation, or integration approval."
-          : "Persistent Main conversation in the configured canonical checkout. Send subsequent goals here normally; Main coordinates bounded OCQ work, exact snapshot review and authorized integration. Opening this client does not submit a prompt or grant integration permission."),
-        variant: "warning", duration: 15000,
-      });
+      context.ui.router.navigate({ type: "session", sessionID: target.session_id });
+      if (target.protocol === "ocq-attention-handoff-v1") {
+        const route = context.ui.router.current();
+        if (route.type !== "session" || route.sessionID !== target.session_id) fail();
+      }
     } catch (_) { fail(); }
   },
 });

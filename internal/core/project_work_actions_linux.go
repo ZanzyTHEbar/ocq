@@ -210,6 +210,11 @@ func ConfirmProjectWork(dir, project, id, digest string, c WorkActionContext) (W
 	if err = j.syncFile(id + ".intent.json"); err != nil {
 		return status, err
 	}
+	if status.TaskGoal != nil {
+		if err = j.syncFile(id + ".task.json"); err != nil {
+			return status, err
+		}
+	}
 	if err = j.syncFile(id + "." + digest + ".preview.json"); err != nil {
 		return status, err
 	}
@@ -230,7 +235,7 @@ func ConfirmProjectWork(dir, project, id, digest string, c WorkActionContext) (W
 		err = e
 	} else {
 		var payload ResultPublicationPayload
-		_, err = decodeStrictJSONObject([]byte(p.Payload), composeLimit, &payload)
+		_, err = decodeStrictJSONObject([]byte(p.Payload), projectPayloadBytes, &payload)
 		if err == nil {
 			w, e := OpenExistingResultPublisher(dir)
 			if e == nil {
@@ -376,6 +381,13 @@ func workFinalReport(r *Reader, status WorkStatus) (WorkOutput, error) {
 	}
 	if err = json.Unmarshal(b, &proof); err != nil {
 		return out, err
+	}
+	if status.Kind == "review" {
+		for _, m := range proof.Messages {
+			if m.Type == "user" && m.ID != j.Agent.PromptID {
+				return out, errors.New("interactive review output is not an independent static verdict")
+			}
+		}
 	}
 	for n := len(proof.Messages) - 1; n >= 0; n-- {
 		m := proof.Messages[n]

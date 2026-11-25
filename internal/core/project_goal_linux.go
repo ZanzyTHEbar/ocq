@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"syscall"
+	"unicode"
 )
 
 const GoalProtocol = "ocq-goal-lineage-v1"
@@ -47,6 +49,9 @@ func LinkProjectGoalWork(dir, project, operation, request string) (GoalWorkLink,
 	if err != nil {
 		return GoalWorkLink{}, err
 	}
+	if _, e := workRead(j.dir, request+".task.json"); !errors.Is(e, syscall.ENOENT) {
+		return GoalWorkLink{}, errors.New("standalone tasks do not belong to a Main intake prompt")
+	}
 	link := GoalWorkLink{GoalProtocol, project, operation, rec.PromptID, rec.Digest, request, work.Digest}
 	name := ".goal-" + request + ".json"
 	if raw, e := workRead(j.dir, name); e == nil {
@@ -77,6 +82,7 @@ type GoalView struct {
 	Links                 []GoalWorkLink `json:"links"`
 	Work                  []WorkStatus   `json:"work"`
 	IntegrationAuthorized bool           `json:"integration_authorized"`
+	Title                 string         `json:"title,omitempty"`
 }
 
 func InspectProjectGoal(dir, project, operation string) (GoalView, error) {
@@ -96,6 +102,11 @@ func InspectProjectGoal(dir, project, operation string) (GoalView, error) {
 		return out, err
 	}
 	defer j.Close()
+	rec, input, err := mainLoad(r, j, project, operation)
+	if err != nil || rec.Digest != main.IntentSHA256 {
+		return out, errors.New("goal title input identity changed")
+	}
+	out.Title = goalTitle(input.Prompt, operation)
 	work, err := ListProjectWork(dir, project)
 	if err != nil {
 		return out, err
@@ -123,4 +134,23 @@ func InspectProjectGoal(dir, project, operation string) (GoalView, error) {
 		out.Work = append(out.Work, w)
 	}
 	return out, workOutputBound(out)
+}
+
+func goalTitle(prompt, operation string) string {
+	// Workflow-authored prompts put a transport preamble before the actual goal.
+	if strings.HasPrefix(prompt, "OCQ retained goal operation: "+operation+". ") {
+		if _, goal, ok := strings.Cut(prompt, "\n\n"); ok {
+			prompt = goal
+		} else {
+			return ""
+		}
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(prompt), "\n")
+	title := []rune(strings.Join(strings.FieldsFunc(line, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}), " "))
+	if len(title) > 72 {
+		return string(title[:71]) + "…"
+	}
+	return string(title)
 }

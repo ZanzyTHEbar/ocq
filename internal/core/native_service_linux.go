@@ -79,16 +79,52 @@ func nativeCallContext(parent context.Context, directory string, service nativeS
 // GET verified the discovered origin/auth. Auth is selected from the exact
 // official managed registration or explicit inherited choice before transport.
 func nativePrivateBody(ctx context.Context, service nativeService, method, path string, body any, password string) ([]byte, error) {
+	return nativePrivateBodyLimit(ctx, service, method, path, body, password, WorkRequestBytes, 256<<10)
+}
+
+// Larger project-review prompts use the same source-validated discovery/auth and
+// private HTTP transport as Main, not a second server or a large argv argument.
+func nativeInlineReviewPrompt(directory, path string, body any) ([]byte, error) {
+	service, err := discoverNativeService(directory)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	password, err := nativePassword(ctx, directory, service)
+	if err != nil {
+		return nil, err
+	}
+	return nativePrivateBodyLimit(ctx, service, "post", path+locationQuery(directory), body, password, projectPayloadBytes, projectPayloadBytes)
+}
+
+func nativePrivateBodyLimit(ctx context.Context, service nativeService, method, path string, body any, password string, limit, responseLimit int) ([]byte, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > WorkRequestBytes || !strings.HasPrefix(path, "/") {
+	if len(b) > limit || !strings.HasPrefix(path, "/") {
 		return nil, errors.New("private Main API body/path exceeds contract")
 	}
-	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), service.Origin+path, bytes.NewReader(b))
+	out, status, err := nativePrivateRequest(ctx, service, method, path, b, password, responseLimit)
+	if err == nil && status == http.StatusNoContent && len(out) == 0 {
+		return []byte("null"), nil
+	}
+	if err != nil || status < 200 || status >= 300 || !json.Valid(out) {
+		return nil, errors.New("private Main API acknowledgement unavailable/uncertain; inspect exact ID only")
+	}
+	return out, nil
+}
+
+// Retain status for the session deletion protocol's exact 204/404 fences.
+// Fresh connections and no redirects apply to every request.
+func nativePrivateRequest(ctx context.Context, service nativeService, method, path string, body []byte, password string, responseLimit int) ([]byte, int, error) {
+	if !strings.HasPrefix(path, "/") {
+		return nil, 0, errors.New("invalid native request path")
+	}
+	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), service.Origin+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, errors.New("private Main request unavailable")
+		return nil, 0, errors.New("private native request unavailable")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.SetBasicAuth("opencode", password)
@@ -97,17 +133,14 @@ func nativePrivateBody(ctx context.Context, service nativeService, method, path 
 	client := http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(req)
 	if err != nil {
-		return nil, errors.New("private Main API acknowledgement uncertain; never repeat the attempted mutation")
+		return nil, 0, errors.New("private native response unavailable")
 	}
 	defer response.Body.Close()
-	out, err := io.ReadAll(io.LimitReader(response.Body, 256<<10+1))
-	if err == nil && response.StatusCode == http.StatusNoContent && len(out) == 0 {
-		return []byte("null"), nil
+	out, err := io.ReadAll(io.LimitReader(response.Body, int64(responseLimit)+1))
+	if err != nil || len(out) > responseLimit {
+		return nil, 0, errors.New("bounded native response unavailable")
 	}
-	if err != nil || len(out) > 256<<10 || response.StatusCode < 200 || response.StatusCode >= 300 || !json.Valid(out) {
-		return nil, errors.New("private Main API acknowledgement unavailable/uncertain; inspect exact ID only")
-	}
-	return out, nil
+	return out, response.StatusCode, nil
 }
 
 func nativeSession(directory string, service nativeService, id string) (map[string]any, error) {

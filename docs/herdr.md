@@ -1,37 +1,18 @@
 # Herdr workspace
 
-**Current source transport:** the panel automatically uses a privately provisioned
-[native push endpoint](push-transport.md), verified with Herdr 0.1.15 and 0.1.16. It does not
-start a listener or inherit an HC socket route. Stored subscriptions and explicit
-reviewed commands use this one socket. Mutations require endpoint-owner
-`--allow-actions` plus their original exact preview/attempt/receipt contracts.
-Read-only status/recovery/output/handoff controls do not require mutation opt-in.
-Local agent reconciliation retains a separate explicit human review and durable
-claim/attempt; viewing a job never invokes it. Native inspection-client and
-commands-only dispatcher controls additionally require an explicitly reviewed,
-owner-pinned existing private HC binding. The backend performs the one launch;
-presentation/verification remain separate explicit controls. See the binding
-contract and remaining host limitations in [push transport](push-transport.md).
-There is no exec/long-poll fallback.
-The display host's configuration-only bootstrap and automatic lifecycle are
-documented in [push transport](push-transport.md#automatic-native-association).
-There are no panel connection controls. Queue shows Jobs and Notifications
-together; project Inbox is distinct. Exact lookup is **Advanced → Find receipt**.
-The older helper/action and bounded-observer sections below document retained
-CLI/core contracts, not currently enabled panel capabilities. Do not infer
-deployment readiness or install this experimental source into a shared runtime
-from the previous acceptance descriptions.
+The current [goals and sessions panel](goals-and-sessions.md) is **Machines →
+Projects → conversations**. Selection is read-only. The panel offers project
+setup, one goal composer and exact Open actions. Main handles orchestration;
+there are no queue, mail, pipeline or evidence views.
 
-The OCQ Herdr panel shows stored projects, jobs, results and inbox mail. It can
-explicitly acknowledge mail, compose local lane updates and submit local commands/agents
-or project intake after preview and confirmation. It is not a scheduler or a live OpenCode
-permission client. Queue also offers an explicit local commands-only dispatcher
-lifecycle, separate from submission.
+The panel uses each machine's existing [native push endpoint](push-transport.md).
+It starts no listener and does not fall back to polling or exec for projections.
+Sending and opening require endpoint opt-in and their retained exact contracts;
+Open also verifies the owner-pinned native terminal service.
 
-The **Projects → Operator** view also discovers server-prepared implementation,
-capture, independent-review and review-result requests. Its versioned,
-pointer-only confirmation is available on the selected local or remote machine.
-It does not enable older remote submission or execution controls.
+Sections describing the former operator and single-context panel below are
+historical documentation for retained core/bridge contracts. They do not
+describe controls available in this candidate or authorize deployment.
 
 ## Install
 
@@ -771,7 +752,7 @@ For review, select an available implementation result and choose **Submit review
 job for this result**. The association, target job/result digest and binding
 revision are pinned. Enter the execution profile, criteria and rules. Go builds
 the deterministic prompt from the full immutable result diff and changed-file
-contents, never a summary or caller substitute. Prompts exceeding 16 KiB are
+contents, never a summary or caller substitute. Prompts exceeding 256 KiB are
 rejected, not truncated. The existing core gate checks target linkage, the exact
 reviewer, OpenCode server
 2.2.6 and ordered read/glob/grep policy at fresh intake and again before prompting.

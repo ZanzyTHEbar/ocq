@@ -164,6 +164,9 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 	if err != nil {
 		return MainStatus{}, err
 	}
+	if mainDeletionState(j.dir, project, rec) != "" {
+		return MainStatus{}, errors.New("this Main session was deleted or its deletion is uncertain; no old start or retry")
+	}
 	if _, superseded, err := readMainSupersession(j.dir, id, rec.Digest); err != nil || superseded {
 		return MainStatus{}, errors.Join(err, errors.New("Main setup superseded; this intent can never start"))
 	}
@@ -191,6 +194,9 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 		if err = j.syncFile(file); err != nil {
 			return MainStatus{}, err
 		}
+	}
+	if in.Mode == "role-refresh" {
+		return startMainRoleRefresh(r, j, rec, in, claim, false)
 	}
 	// A later explicit start of an already bound/attempted operation is recovery,
 	// not a replay of the original prompt or a permanent creation-profile fence.
@@ -248,9 +254,12 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 			if e != nil || current != rec.Binding {
 				return MainStatus{}, errors.New("Main selected binding changed since preparation")
 			}
+			if in.Mode == "replace" && !retiredMain(r, j.dir, project, current) {
+				return MainStatus{}, errors.New("Main replacement requires exact acknowledged retirement")
+			}
 		}
 	}
-	if in.Mode == "create" {
+	if mainCreatesSession(in.Mode) {
 		fresh, e := mainStage(j, id, "session", claim)
 		if e != nil {
 			return MainStatus{}, e
@@ -278,11 +287,15 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 	if !promptAttempted && nativeProfile(session) != rec.ProfileSHA {
 		return MainStatus{}, errors.New("Main profile changed since preview; do not overwrite it")
 	}
-	if in.Mode == "create" || in.Mode == "adopt" {
+	if mainSetupMode(in.Mode) {
 		if err = ensureMainRole(j, rec, id, claim); err != nil {
 			return inspectMainUncertain(r, j.dir, project, id, err)
 		}
 	} else {
+		selected, _, _, e := selectedMain(r, j.dir, project)
+		if e != nil || selected.Role.SHA256 != rec.Role.SHA256 {
+			return MainStatus{}, errors.Join(e, errors.New("Main operating contract changed; prepare a fresh operation, never replay"))
+		}
 		matches, _, e := observeMainRole(rec)
 		if e != nil || !matches {
 			return MainStatus{}, errors.Join(e, errors.New("Main role not proven; no automatic repair"))

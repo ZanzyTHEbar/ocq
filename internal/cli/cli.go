@@ -171,16 +171,28 @@ func commandPalette(state *string) []*cobra.Command {
 		}
 		return output(item)
 	})
-	reconcile := queueCommand(state, "reconcile JOB_ID", func(q *core.Queue, args []string) error {
+	var lifecyclePolicy string
+	reconcile := &cobra.Command{Use: "reconcile JOB_ID", RunE: func(_ *cobra.Command, args []string) error {
 		if len(args) != 1 {
 			return validation("reconcile requires one exact agent job ID")
 		}
-		job, err := q.Reconcile(args[0])
+		q, err := core.OpenExistingAgentObserver(*state)
+		if err != nil {
+			return err
+		}
+		defer q.Close()
+		var job core.Job
+		if lifecyclePolicy == "" {
+			job, err = q.Reconcile(args[0])
+		} else {
+			job, err = q.ReconcileWithLifecyclePolicy(args[0], lifecyclePolicy)
+		}
 		if err != nil {
 			return err
 		}
 		return output(job)
-	})
+	}}
+	reconcile.Flags().StringVar(&lifecyclePolicy, "lifecycle-policy", "", "explicit one-attempt re-evaluation of an unknown agent under "+core.CooperativeLifecyclePolicy+"; never resumes execution")
 	submit := queueCommand(state, "submit [flags] -- COMMAND [ARG...]", nil)
 	schedulingFile := submit.Flags().String("scheduling-file", "", "separate version-1 immutable scheduling envelope")
 	key := submit.Flags().String("key", "", "required immutable idempotency key")

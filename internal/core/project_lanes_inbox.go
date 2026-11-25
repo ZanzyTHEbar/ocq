@@ -103,6 +103,9 @@ func deterministicMessageID(key string) string {
 }
 
 func validateInboxSender(sender, laneID, jobID string) error {
+	if sender == "observer:ocq" {
+		return nil // Internal observer transition; public mail-send checks its own authors.
+	}
 	if strings.HasPrefix(sender, "lane:") {
 		if sender != "lane:"+laneID {
 			return faults.New(faults.CodeValidationFailed, fmt.Sprintf("sender %q must name the lane %s owning this message", sender, laneID))
@@ -123,6 +126,29 @@ func validateInboxSender(sender, laneID, jobID string) error {
 		return nil
 	}
 	return faults.New(faults.CodeValidationFailed, fmt.Sprintf("sender %q must be lane:<lane_id>, job:<job_id>, or integrator:<id>", sender))
+}
+
+// This runs in the SAME transaction as a new unknown/blocked job observation.
+// Content identity, not a polling timestamp, deduplicates repeated diagnoses.
+func observerBlockedMail(c *sql.Conn, jobID, outcome, reason string) error {
+	ctx := context.Background()
+	var project, lane, path string
+	err := c.QueryRowContext(ctx, "SELECT project_id,lane_id,fsfork_path FROM project_lanes WHERE owner_job_id=?", jobID).Scan(&project, &lane, &path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // Unattributed agent jobs have no project integrator inbox.
+	}
+	if err != nil {
+		return err
+	}
+	body := "OCQ lifecycle observer: job " + jobID + " is " + outcome + ": " + reason +
+		"\nObserver-authored diagnosis, not a worker report or terminal proof. Capacity and ownership remain held; no prompt, retry or acknowledgement was sent."
+	_, err = insertInboxMessageConn(ctx, c, ProjectInboxMessage{
+		Key:       "observer-blocked:" + jobID + ":" + sha256Hex([]byte(outcome+"\n"+reason)),
+		ProjectID: project, Sender: "observer:ocq", Recipient: "integrator:" + project,
+		LaneID: lane, JobID: jobID, Kind: "lane.blocked", Subject: "Execution needs attention",
+		Body: body, FsforkPath: path, CreatedAt: now(),
+	})
+	return err
 }
 
 func validateInboxRecipient(recipient, projectID string) error {

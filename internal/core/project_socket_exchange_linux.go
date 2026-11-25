@@ -124,7 +124,7 @@ func DraftProjectIntakeBytes(dir, kind string, input []byte) (string, []byte, er
 			}
 		case "review":
 			var draft ProjectReviewDraft
-			if _, err = decodeStrictJSONObject(input, maxEnvelopeBytes, &draft); err == nil {
+			if _, err = decodeStrictJSONObject(input, projectPayloadBytes, &draft); err == nil {
 				raw, err = reader.BuildProjectReviewDraft(draft)
 			}
 		default:

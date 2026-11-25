@@ -49,9 +49,16 @@ func intakeKey(kind string, raw []byte) (string, error) {
 	}
 }
 
+func intakeRequestLimit(kind string) int {
+	if kind == "submission" {
+		return projectPayloadBytes
+	}
+	return maxRegistrationBytes
+}
+
 func intakeStatus(j *composeJournal) (ProjectIntakeStatus, intakeRecord) {
 	var r intakeRecord
-	b, err := j.read("intent.json", 2*composeLimit)
+	b, err := j.read("intent.json", projectPayloadBytes)
 	if errors.Is(err, syscall.ENOENT) {
 		for _, name := range []string{"claim.json", "attempt.json", "cancelled.json", "completed.json"} {
 			if _, err := j.read(name, 4096); !errors.Is(err, syscall.ENOENT) {
@@ -60,7 +67,7 @@ func intakeStatus(j *composeJournal) (ProjectIntakeStatus, intakeRecord) {
 		}
 		return ProjectIntakeStatus{State: "idle"}, r
 	}
-	if err != nil || json.Unmarshal(b, &r) != nil || r.Version != 1 || !isValidHexLen(r.ID, 64) || !isValidHexLen(r.Digest, 64) || len(r.Request) == 0 || len(r.Request) > composeLimit || sha256Hex(r.Request) != r.Digest {
+	if err != nil || json.Unmarshal(b, &r) != nil || r.Version != 1 || !isValidHexLen(r.ID, 64) || !isValidHexLen(r.Digest, 64) || len(r.Request) == 0 || len(r.Request) > intakeRequestLimit(r.Kind) || sha256Hex(r.Request) != r.Digest {
 		return ProjectIntakeStatus{State: "blocked"}, intakeRecord{}
 	}
 	key, err := intakeKey(r.Kind, r.Request)
@@ -151,6 +158,9 @@ func prepareIntakeLocked(j *composeJournal, kind, key string, raw []byte) (Proje
 		return ProjectIntakeStatus{}, err
 	}
 	r := intakeRecord{Version: 1, ID: id, Kind: kind, Key: key, Device: dev, Inode: ino, Digest: sha256Hex(raw), Request: raw}
+	if b, err := json.Marshal(r); err != nil || len(b) > projectPayloadBytes {
+		return ProjectIntakeStatus{}, faults.New(faults.CodeValidationFailed, "encoded project intake record exceeds 1 MiB")
+	}
 	if err := j.create("intent.json", r); err != nil {
 		return ProjectIntakeStatus{}, classifyDiagnostic(faults.CodeStorageFailed, err)
 	}

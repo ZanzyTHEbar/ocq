@@ -1,5 +1,3 @@
-import { div } from "gpui-kit";
-import { v_flex } from "gpui-base";
 import { spaces } from "herdr";
 import { panelEpoch, panelVisible } from "./panel-state.js";
 
@@ -16,14 +14,17 @@ const families = {
   dispatcher: ["prepare", "arm", "attempt", "bind", "cancel", "drain-prepare", "drain-arm", "drain-attempt", "retire", "native-launch"],
 };
 export const ACTIONS = Object.freeze(Object.fromEntries([["mail-ack", "mail-ack-sequence-read-before-archive-v1"], ["work-confirm", "ocq-work-v1"],
+  ["work-task-submit-v1", "ocq-task-goal-v1/submit"],
   ["main-start", "ocq-main-v1"], ["main-author-v1", "ocq-operator-workflow-v1/author"],
+  ["session-delete-v1", "ocq-session-delete-v1"],
   ["client-prepare", "ocq-client-v1/prepare"], ["client-attention-prepare-v1", "ocq-attention-client-v1/prepare"], ["client-open", "ocq-client-v1/open"],
   ["capture-receipt-preview", "capture/recorded-receipt-preview/v1"],
   ...Object.entries(families).flatMap(([f, ops]) => ops.map(op => [`${f}-${op}`, `${f}/${op}/journal-v1`]))]));
 const hex = s => typeof s === "string" && /^[0-9a-f]{64}$/.test(s);
 const unavailable = () => { throw Error("Native client/dispatcher execution requires an explicitly pinned HC host/core; this socket has no such launch authority. No native call, helper rendezvous or exec fallback was invoked."); };
 const localSpace = s => s.machine !== null && s.id.startsWith(`${s.machine}/`) ? s.id.slice(s.machine.length + 1) : s.id;
-const pointerActions = new Set(["work-confirm", "main-start", "main-author-v1", "client-prepare", "client-attention-prepare-v1", "client-open"]);
+const pointerActions = new Set(["work-confirm", "work-task-submit-v1", "main-start", "main-author-v1", "client-prepare", "client-attention-prepare-v1", "client-open", "session-delete-v1"]);
+const optionalActions = new Set(["session-delete-v1", "work-task-submit-v1"]);
 const supported = action => pointerActions.has(action) || action === "mail-ack" ||
   ["compose-", "intake-", "notification-ack-", "queued-cancel-", "command-resolve-", "agent-reconcile-", "command-submit-", "agent-submit-", "result-publish-", "capture-", "dispatcher-"].some(f => action.startsWith(f)) && action !== "dispatcher-native-launch" && !!ACTIONS[action];
 
@@ -56,7 +57,7 @@ export const compatibility = {
     return this.workReady() && (s?.machine === null ||
       c?.executionPeer === s?.machine && typeof c?.executionCore === "string" && !!c.executionCore);
   },
-  nativeReady() { return this.machineReady() && !!this.hc?.approvedDigest(); },
+  nativeReady(purpose = "action") { return this.machineReady() && !!this.hc?.approvedDigest(purpose); },
   transfer(current) {
     const status = this.status, epoch = this.epoch, serial = this.serial;
     const valid = () => current() && this.ready() && this.status === status && this.epoch === epoch && this.serial === serial;
@@ -86,14 +87,17 @@ export const compatibility = {
     return ["--mod-contract", PROTOCOL, "--mod-action", ACTIONS[action], "--mod-image", v.image_sha256, "--mod-context", v.bridge_context, "--mod-space", localSpace(s), "--mod-folder", s.folder, "--mod-queue", v.queue_identity];
   },
   authorizeWork(args, options, action) {
-    const lengths = { "work-confirm": 9, "main-start": 9, "main-author-v1": 8, "client-prepare": 10, "client-attention-prepare-v1": 10, "client-open": 8 };
+    const lengths = { "work-confirm": 9, "work-task-submit-v1": 8, "main-start": 9, "main-author-v1": 8, "client-prepare": 10, "client-attention-prepare-v1": 10, "client-open": 8, "session-delete-v1": 10 };
     const prepare = action === "client-prepare" || action === "client-attention-prepare-v1";
     const s = this.scope, v = this.status;
-    if (action === "main-author-v1" && !this.machineReady()) throw Error("Selected-machine workflow authority unavailable");
+    const author = action === "main-author-v1" || action === "work-task-submit-v1";
+    if (author && !this.machineReady()) throw Error("Selected-machine workflow authority unavailable");
     if (!pointerActions.has(action) || typeof options.current !== "function" || !options.current() || !this.workReady() ||
+      v.actions[action] !== ACTIONS[action] ||
       options.on !== s.machine || args.length !== lengths[action] || args[0] !== localSpace(s) || args[1] !== v.queue_identity ||
       args[4] !== (s.machine ?? "local") || args[5] !== s.folder || args[6] !== v.observation_store_context || args[7] !== v.image_sha256 ||
-      (action === "client-open" ? !hex(args[3]) : !prepare && action !== "main-author-v1" && !hex(args[8])) ||
+      (action === "session-delete-v1" ? !hex(args[9]) : action === "client-open" ? !hex(args[3]) : !prepare && !author && !hex(args[8])) ||
+      action === "work-task-submit-v1" && !/^task-[a-f0-9]{32}$/.test(args[3]) ||
       (prepare && (!/^[A-Za-z0-9_-]{1,64}$/.test(args[3]) || !["worker", "integrator"].includes(args[8]) || (args[8] === "integrator" ? args[9] !== "" : !/^[A-Za-z0-9_-]{1,64}$/.test(args[9])))))
       throw Error("Exact versioned pointer-action context required");
     return ["--mod-contract", PROTOCOL, "--mod-action", ACTIONS[action], "--mod-image", v.image_sha256, "--mod-context", v.bridge_context,
@@ -110,15 +114,10 @@ export const compatibility = {
     const space = s.machine !== null && s.id.startsWith(`${s.machine}/`) ? s.id.slice(s.machine.length + 1) : s.id;
     if (!v || v.protocol !== PROTOCOL || v.journal_claims !== CLAIMS || v.build_kind !== "local-development" ||
       !hex(v.image_sha256) || !hex(v.bridge_context) || v.space_id !== space || v.folder !== s.folder ||
-      !v.actions || Object.keys(v.actions).length !== Object.keys(ACTIONS).length ||
-      Object.entries(ACTIONS).some(([a, value]) => v.actions[a] !== value) || !hex(v.queue_identity))
+      !v.actions || Object.keys(v.actions).some(a => !Object.hasOwn(ACTIONS, a)) ||
+      Object.entries(ACTIONS).some(([a, value]) => !(optionalActions.has(a) && !Object.hasOwn(v.actions, a)) && v.actions[a] !== value) || !hex(v.queue_identity))
       throw Error("Endpoint read protocol or explicit context mismatch");
     return v;
-  },
-  notice(_cx, theme) {
-    return v_flex().px(10).py(4).text_size(12).text_color(theme.muted)
-      .child(div().child(this.allowActions ? "Reviewed socket actions. Native operations additionally require the exact reviewed private HC binding." : "Read-only endpoint · stored reads and explicit read-only verification remain available; owner opt-in is required for reviewed actions."))
-      .child(div().child(this.reason || "Configure an explicit endpoint. HC machine names do not supply a socket route."));
   },
 };
 
@@ -140,7 +139,8 @@ export async function bridgeCommand(args, options = {}) {
   let request = args;
   const native = args[0] === "client-open" || args[0] === "client-verify" || args[0] === "dispatcher-status" ||
     args[0].startsWith("dispatcher-") && ACTIONS[args[0]];
-  if (native && (!compatibility.nativeReady() || options.hcBinding !== compatibility.hc.approvedDigest() ||
+  const purpose = args[0] === "client-open" || args[0] === "client-verify" ? "navigation" : "action";
+  if (native && (!compatibility.nativeReady(purpose) || options.hcBinding !== compatibility.hc.approvedDigest(purpose) ||
       typeof options.current !== "function" || !options.current())) throw Error("Exact reviewed private HC binding required");
   const hc = native ? ["--hc-binding-sha256", options.hcBinding] : [];
   if (ACTIONS[args[0]]) {
@@ -152,27 +152,4 @@ export async function bridgeCommand(args, options = {}) {
     request = [args[0], "--mod-space", localSpace(s), "--mod-folder", s.folder, ...hc, ...args.slice(1)];
   }
   return connection.command(request, options.payload); // Never retries; transport loss is uncertain.
-}
-
-const readButtons = new Set(["ocq-queue-refresh", "ocq-queue-next", "ocq-queue-first", "ocq-queue-back",
-  "ocq-main-workflow-recover", "ocq-main-workflow-return", "ocq-main-workflow-previous", "ocq-main-workflow-next",
-  "ocq-queue-lookup-job", "ocq-queue-lookup-event", "ocq-queue-job-event", "ocq-queue-event-job",
-  "ocq-queue-show-summary", "ocq-queue-projects", "ocq-refresh", "ocq-queue", "ocq-projects",
-  "ocq-project-overview", "ocq-return-board", "ocq-manifest-original", "ocq-manifest-fields",
-  "ocq-results-more", "ocq-results-reload", "ocq-inbox-more", "ocq-inbox-reload", "ocq-open-queue",
-   "ocq-work-job", "ocq-work-result", "ocq-work-status", "ocq-work-recover", "ocq-work-output", "ocq-work-handoff",
-   "ocq-work-output-previous", "ocq-work-output-next", "ocq-inspection-check-mail",
-    "ocq-main-observe", "ocq-main-recover", "ocq-main-review-previous", "ocq-main-review-next",
-    "ocq-agent-handoff-stored", "ocq-agent-handoff-copy", "ocq-agent-handoff-verify",
-   "ocq-agent-reconcile-back", "ocq-agent-reconcile-check", "ocq-dispatch-read", "ocq-dispatch-close", "ocq-dispatch-back-confirm"]);
-export function enabledButton(id, context = legacyCompatibility) {
-  const compatibility = context;
-  // Reading/recovery never borrows mutation readiness, including after an
-  // uncertain attempt reconnects to a default read-only endpoint.
-  if (readButtons.has(id) || id.startsWith("ocq-main-goal-check-") || id.startsWith("ocq-result-check-") || id.startsWith("ocq-client-record-")) return true;
-  if (id === "ocq-main-open" || id === "ocq-client-worker-new") return compatibility.workReady();
-  if (/^ocq-(client-(open|verify|show)|dispatch-)/.test(id)) return compatibility.nativeReady();
-  if (compatibility.ready() || compatibility.workReady() && /^(ocq-work-|ocq-main-|ocq-client-prepare)/.test(id)) return true;
-  return ["ocq-work-select-", "ocq-project-job-", "ocq-queue-job-", "ocq-queue-event-",
-    "ocq-log-", "ocq-project-", "ocq-lane-", "ocq-read-", "ocq-attachment-", "ocq-result-manifest-", "ocq-page-"].some(p => id.startsWith(p));
 }

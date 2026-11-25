@@ -4,37 +4,27 @@
 
 ## Platform
 
-Native desktop: Herdr / GPUI JavaScript mod, not a browser surface.
+Native desktop · Herdr
 
 ## Users and purpose
 
-Developers following project work, independent review and retained handoff beside
-Herdr Files and Changes. Work is the landing view.
+Developers use OCQ to give Main a goal, open Main to discuss or redirect it,
+and visit the exact conversations Main assigns. Machines lead to projects,
+and projects lead to conversations. Selecting a machine or project never
+starts or opens a session. Setup uses the machine owner's existing role defaults.
 
-## User correction
+Main owns worker and review orchestration. Queue, agent mail, and audit history
+are retained agent and core capabilities, not panel destinations. Meaningful
+session transitions use Herdr notifications; there is no panel activity feed.
 
-Compact task-first native operation, not transport management. Connection,
-disconnection and reconnection are automatic background work using a privately
-provisioned exact-context association. No connect controls or transport form.
-Queue shows bounded independently scrollable Jobs and Notifications together;
-project Inbox stays distinct. Find receipt belongs only in Advanced.
-Use short labels and progressive Details, not status bars, redundant selected
-item narration or a Review paused strip.
+## Boundaries
 
-## Constraints
+SQLite owns queue history, OpenCode owns sessions and permissions, and Herdr
+owns tabs. Open uses exact recorded ownership and first checks for an existing
+matching tab client. A prepared goal remains unsent until a person explicitly
+sends it. No uncertain mutation is automatically retried.
 
-SQLite owns queue history; OpenCode owns execution and human permissions.
-Observations are not liveness, validation, completion or mutation authority.
-Unknown ownership holds capacity. Never replay uncertain actions.
-Keep full exact retained bytes, context/image/generation fences,
-durable arm, one attempt, exact receipt recovery and pointer-only confirmations.
-Normal setup, goal, task and session-opening confirmations show a concise semantic
-summary of those frozen bytes. Raw JSON and identity pins are optional Technical
-details, never mandatory pages. Configured roles are defaults under Advanced.
-No fabricated data or design approval.
-
-## Authority
-
-This document records the explicit November 17 corrective brief. Earlier source
-and renders are evidence of rejected transport chrome, not user-approved comps.
-Implementation and independent native visual acceptance remain separate gates.
+Open is the only conversation action. People send updates in the existing
+OpenCode tab; OCQ does not add a chat surface. Delete is a separate confirmed
+action for owned idle sessions. Completed job history and reviews remain
+historical when a person continues the native conversation.

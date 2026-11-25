@@ -17,6 +17,7 @@ type WorkPrepareRequest struct {
 	ParentRequestID string `json:"parent_request_id,omitempty"`
 	Profile         string `json:"profile,omitempty"`
 	Brief           string `json:"brief,omitempty"`
+	BaseRef         string `json:"base_ref,omitempty"`
 	Criteria        string `json:"criteria,omitempty"`
 	Rules           string `json:"rules,omitempty"`
 	ReviewResult    string `json:"review_result,omitempty"`
@@ -55,6 +56,7 @@ type WorkJob struct {
 	SessionID      string `json:"session_id"`
 	Worktree       string `json:"worktree"`
 	TerminalProven bool   `json:"terminal_proven"`
+	SessionState   string `json:"session_state,omitempty"`
 }
 
 type WorkAssociation struct {
@@ -80,6 +82,15 @@ type WorkStatus struct {
 	Receipt         *ProjectSubmissionReceipt `json:"receipt,omitempty"`
 	Job             *WorkJob                  `json:"job,omitempty"`
 	Result          *WorkAssociation          `json:"result,omitempty"`
+	TaskGoal        *TaskGoal                 `json:"task_goal,omitempty"`
+}
+
+// TaskGoal identifies standalone intake, not evidence of execution, handoff, or archive.
+type TaskGoal struct {
+	IntentSHA256 string `json:"intent_sha256"`
+	Title        string `json:"title"`
+	BaseCommit   string `json:"base_commit"`
+	GoalSHA256   string `json:"goal_sha256"`
 }
 
 type WorkPreview struct {

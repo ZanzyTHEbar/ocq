@@ -91,10 +91,31 @@ func (q *Queue) Reconcile(id string) (_ Job, resultErr error) {
 	return q.store.reconcileChecked(id, nil, nil)
 }
 
+// ReconcileWithLifecyclePolicy explicitly authorizes one observation under a
+// newer lifecycle contract. It never changes the immutable execution request.
+func (q *Queue) ReconcileWithLifecyclePolicy(id, policy string) (_ Job, resultErr error) {
+	defer func() { resultErr = classifyDiagnostic(faults.CodeRuntimeFailed, resultErr) }()
+	return q.store.reconcileCheckedPolicy(id, policy, nil, nil)
+}
+
+// Reconciliation must not initialize or migrate a queue as a side effect.
+func OpenExistingAgentObserver(dir string) (*Queue, error) {
+	s, err := openExistingWritableStore(dir)
+	if err != nil {
+		return nil, err
+	}
+	s.existingSchemaOnly = true
+	return &Queue{store: s}, nil
+}
+
 // The optional bridge hooks fence an exact stored observation and retain its
 // operation receipt while the same dispatcher lock still excludes observers.
 // Neither hook is an alternative completion policy or an execution control.
 func (s *store) reconcileChecked(id string, check func(Job) error, observed func(error) error) (Job, error) {
+	return s.reconcileCheckedPolicy(id, "", check, observed)
+}
+
+func (s *store) reconcileCheckedPolicy(id, policy string, check func(Job) error, observed func(error) error) (Job, error) {
 	lock, err := s.lock()
 	if err != nil {
 		return Job{}, err
@@ -112,7 +133,21 @@ func (s *store) reconcileChecked(id string, check func(Job) error, observed func
 			return Job{}, err
 		}
 	}
-	observeErr := s.observeAgent(job)
+	explicitObservation := policy != ""
+	if policy != "" {
+		if err := s.prepareLifecycleReevaluation(job, policy); err != nil {
+			return Job{}, err
+		}
+	} else {
+		intent, err := s.lifecycleIntent(id)
+		if err != nil {
+			return Job{}, errors.New("this job requires an explicit, single-attempt lifecycle-policy re-evaluation; stored ownership unchanged")
+		}
+		// Once explicitly adopted, further API-only observations can be requested
+		// normally. Polling still never re-evaluates this historical job.
+		explicitObservation = intent.Source == "explicit_reevaluation"
+	}
+	observeErr := s.observeAgentPolicy(job, explicitObservation)
 	if observed != nil {
 		if err := observed(observeErr); err != nil {
 			return Job{}, errors.Join(observeErr, err)

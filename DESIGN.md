@@ -1,98 +1,21 @@
 ---
-name: OCQ native task panel
-description: Compact task-first Herdr sidebar; review pending.
-typography:
-  title:
-    fontSize: "16px"
-    fontWeight: 600
-  body:
-    fontSize: "13px"
-  detail:
-    fontSize: "12px"
-rounded:
-  control: "5px"
-spacing:
-  tight: "4px"
-  control-inline: "8px"
-  panel: "12px"
-components:
-  button:
-    rounded: "{rounded.control}"
-    padding: "5px 8px"
+name: OCQ conversations
+description: Native Herdr sidebar for goals and their conversations.
 ---
 
-# Design System: OCQ native task panel
+# OCQ conversations
 
-## Overview
+Use Herdr's theme and type. A compact header carries Back, a project title and
+the machine label. Use the same flat rows for the machine and project lists;
+avoid nested cards and counts.
 
-Native, task-first operation beside Herdr Files/Changes. The task and available
-action lead; protocol evidence unfolds in place. This record describes the
-current source and isolated native render, not independent design approval.
-Automatic association and simultaneous queue regions have real native evidence;
-peer-loss recovery is held because native close rejected after the read ended.
-The source retains the physical slot rather than inventing settlement. This is
-not a passed reconnect/dispose acceptance or permission to deploy.
+A project has one inline New goal field and one Send goal action. Main and the
+goal-created sessions are a flat list with titles, short role/state text, Open
+and contextual Delete. Keep action labels fixed at 320 and 360 logical pixels.
+Open enters the real conversation; do not add a worker composer. Confirm Delete
+inline beneath its exact row, with Cancel and one destructive action; if active,
+direct the person to stop the session in OpenCode. Saved goals occupy the
+composer position rather than creating a second form.
 
-## Colors
-
-Inherit `theme()`; never freeze the user's theme into copied hex values.
-`background`/`foreground` provide the working surface, `muted` secondary facts,
-`border` separators and `hover` selection/focus. `accent` marks the local primary
-setup action. `blocked` marks unavailable authority, not ordinary empty content.
-
-## Typography
-
-Use Herdr's native family. Body 13 logical pixels, details/status 12, empty-state
-heading 16 semibold. No display face, decorative mono or microtext.
-
-## Layout
-
-Default 360px panel; acceptance must also inspect 320px. At most two ordinary
-header rows: project/context and Details, then Work/Queue/Inbox/Advanced. No
-transport status bar, connection form or recovery strip. A setup fault changes
-the existing Details affordance to Check setup; ordinary reconnecting is silent.
-Expanded Details is bounded and scrollable.
-
-Queue has stacked Jobs and Notifications regions, each owning half the remaining
-height and its own native scroll, cursor and snapshot. Neither list is a tab.
-Project Inbox is separate; Advanced owns Find receipt and execution controls.
-Normal task rows are at most two lines. Empty states have one sentence and at
-most one relevant action. Exact review and consequential confirmations are not
-subject to ordinary row/copy truncation.
-
-## Elevation & Depth
-
-Flat native surfaces, one-pixel dividers, no added shadows or animation.
-
-## Shapes
-
-Controls use 5px corners and existing Herdr hover/selection treatment.
-Use rows and native text controls, not nested cards or invented diagrams.
-
-## Components
-
-- **Navigation:** Work first; Queue and Inbox remain one action away. Project
-  summary is under Details; project switching is an explicit Change disclosure.
-- **Connection:** automatic exact-context private association and single-owner
-  background recovery. No user connection controls. Fault reason in Details.
-  Observed data and action authorization are separate facts.
-- **Empty project:** explanation, guarded local registration, setup help on demand.
-  Copying help never starts Main.
-- **Tasks:** exact request identity remains visible; friendly kind/state labels
-  are presentation only. Recorded is not execution success.
-- **Main/clients:** short summary, technical identity/history disclosures. A new
-  client remains explicitly new; an unverified route is never presented as bound.
-- **Confirmations:** one readable action summary derived from exact retained
-  bytes, with optional Technical details and Advanced roles. No mandatory JSON
-  pages. Preserve original context checks, uncertainty handling and pointer-only
-  final confirmation.
-
-## Do's and Don'ts
-
-- Do keep timestamps, full pins and protocol explanations in Details.
-- Do preserve disabled, unknown, stale and terminal-unproven distinctions.
-- Don't interpret transport status as agent liveness or mutation permission.
-- Don't populate empty screens with invented projects or replace user workspace
-  state to manufacture a prettier demonstration.
-- Don't call earlier isolated renders user-approved; this direction follows the
-  explicit corrective brief and still requires independent native visual review.
+The panel inherits native focus, scrolling and colors. Do not add a private
+toast, status strip, details drawer, or alternate operator navigation.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -17,6 +18,7 @@ import (
 )
 
 const workflowProtocol = "ocq-operator-workflow-v1"
+const taskGoalAction = "work-task-submit-v1"
 
 type workflowSelection struct {
 	ID      string `json:"id"`
@@ -183,7 +185,7 @@ func workflowCommands() []*cobra.Command {
 		req := core.MainPrepareRequest{Protocol: core.MainProtocol, ProjectID: a[2], OperationID: a[3], Mode: in.Mode, Prompt: in.Goal, ExpectedRevision: in.ExpectedRevision}
 		saved, savedErr := core.InspectProjectMain(dir, a[2], a[3])
 		switch in.Mode {
-		case "create", "adopt":
+		case "create", "adopt", "replace":
 			if in.Goal != "" {
 				return errors.New("setup never starts a goal")
 			}
@@ -265,5 +267,90 @@ func workflowCommands() []*cobra.Command {
 		}
 		return writeWork(cmd, out)
 	}}
-	return []*cobra.Command{contextCommand, author, goal}
+	return []*cobra.Command{contextCommand, author, goal, standaloneGoalCommand()}
+}
+
+func standaloneGoalCommand() *cobra.Command {
+	return &cobra.Command{Use: taskGoalAction + " SPACE QUEUE PROJECT REQUEST PEER FOLDER STORE IMAGE", Args: cobra.ExactArgs(8), RunE: func(cmd *cobra.Command, a []string) error {
+		dir, err := existingBridgeStateDir()
+		if err != nil {
+			return err
+		}
+		registry, _ := cmd.Context().Value(workflowKey{}).(*workflowRegistry)
+		if registry == nil || a[0] != registry.Space || a[1] != registry.Queue ||
+			a[4] != registry.peer() || a[5] != registry.Folder || !workPointer.MatchString(a[3]) || !strings.HasPrefix(a[3], "task-") {
+			return errors.New("exact owner task scope required")
+		}
+		desc, err := compatibility(a[0], a[5])
+		if err != nil || desc.Queue != a[1] || desc.ObservationStoreContext != a[6] || desc.Image != a[7] {
+			return errors.New("task queue/store/image changed")
+		}
+		raw, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 20<<10+1))
+		if err != nil || len(raw) > 20<<10 || !utf8.Valid(raw) {
+			return errors.New("bounded task required")
+		}
+		var in struct {
+			Goal string `json:"goal"`
+		}
+		d := json.NewDecoder(bytes.NewReader(raw))
+		d.DisallowUnknownFields()
+		if d.Decode(&in) != nil || d.Decode(new(any)) != io.EOF || strings.TrimSpace(in.Goal) == "" || len(in.Goal) > 14<<10 {
+			return errors.New("bounded nonempty task goal required")
+		}
+		// Exact retained requests are observation only, including incomplete
+		// preparation. Reconnects never authorize another queue submission.
+		if status, e := core.InspectProjectWork(dir, a[2], a[3]); e == nil {
+			if status.TaskGoal == nil || status.TaskGoal.GoalSHA256 != compatHash([]byte(in.Goal)) {
+				return errors.New("retained task goal differs")
+			}
+			return writeWork(cmd, status)
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
+		if _, err = registry.ready(cmd.Context(), dir); err != nil {
+			return err
+		}
+		profile := ""
+		for _, item := range registry.Selections {
+			if item.Role == "implementation" {
+				if profile != "" {
+					return errors.New("one default implementation selection is required")
+				}
+				profile = item.Profile
+			}
+		}
+		reader, err := core.OpenReader(dir)
+		if err != nil {
+			return err
+		}
+		binding, err := reader.WorkBinding(a[2])
+		reader.Close()
+		if err != nil || binding.RepoRoot != a[5] || profile == "" {
+			return errors.New("exact bound project/base/default profile unavailable")
+		}
+		req := core.WorkPrepareRequest{Protocol: core.WorkProtocol, ProjectID: a[2], RequestID: a[3],
+			Kind: "implementation", BindingRevision: strconv.Itoa(binding.Revision), Brief: in.Goal, BaseRef: binding.CommitAnchor, Profile: profile}
+		action := core.WorkActionContext{Protocol: core.WorkProtocol, Space: a[0], QueueIdentity: a[1], Peer: a[4],
+			Folder: a[5], StoreContext: a[6], ImageSHA256: a[7], ImageRole: "bridge", Action: "confirm"}
+		body, err := json.Marshal(req)
+		if err != nil {
+			return err
+		}
+		status, fresh, err := core.PrepareStandaloneTask(dir, body)
+		if err != nil {
+			return err
+		}
+		if !fresh {
+			return writeWork(cmd, status)
+		}
+		preview, err := core.PreviewProjectWork(dir, a[2], a[3], action)
+		if err != nil {
+			return err
+		}
+		status, err = core.ConfirmProjectWork(dir, a[2], a[3], preview.PreviewSHA256, action)
+		if err != nil {
+			return err
+		}
+		return writeWork(cmd, status)
+	}}
 }

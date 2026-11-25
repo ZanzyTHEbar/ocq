@@ -1,43 +1,45 @@
 import { div } from "gpui-kit";
-import { v_flex } from "gpui-base";
-import { spaces, panes, exec } from "herdr";
+import { h_flex, v_flex } from "gpui-base";
+import { spaces, panes, exec, notify } from "herdr";
 import { createHash } from "crypto";
-import { sourceCompatibility, enabledButton } from "./compatibility.js";
-import { WorkOperator } from "./work-operator.js";
+import { bridgeCommand, sourceCompatibility } from "./compatibility.js";
+import { ProjectSessions } from "./project-sessions.js";
 import { MainClientControls } from "./main-client.js";
-import { OperatorWorkflow } from "./workflow.js";
+import { GoalComposer } from "./workflow.js";
+import { TaskGoalComposer } from "./task-goal.js";
 import { PrivateHCBinding } from "./hc-binding.js";
 import { panelEpoch, panelVisible } from "./panel-state.js";
 
-// Space.folder is a launch default, not its current project. Pick an exact
-// terminal in an exact tab; never substitute the active unrelated space.
 export function projectSpaces(machine, repo = null) {
   const live = panes();
-  return spaces().filter(s => s.machine === machine).flatMap(s => s.tabs.flatMap(tab =>
-    live.filter(p => p.tab === tab.id && p.terminal && p.cwd &&
+  const choices = [];
+  for (const space of spaces().filter(s => s.machine === machine)) {
+    const matches = space.tabs.flatMap(tab => live.filter(p => p.tab === tab.id && p.terminal && p.cwd &&
       (!repo || p.cwd === repo || p.cwd.startsWith(repo.endsWith("/") ? repo : `${repo}/`))).map(p => ({
-      ...s, folder: p.cwd,
+      ...space, folder: p.cwd, activeTab: tab.active,
       setupContext: { tab: tab.id, tabName: tab.name, pane: p.pane, terminal: p.terminal, cwd: p.cwd, branch: p.branch },
-    }))));
+    })));
+    if (repo) {
+      // Prefer an exact root in each existing space. Git and the endpoint
+      // still reverify the chosen location before it can authorize actions.
+      matches.sort((a, b) => Number(b.folder === repo) - Number(a.folder === repo) || Number(b.activeTab) - Number(a.activeTab));
+      if (matches.length) choices.push(matches[0]);
+    } else choices.push(...matches);
+  }
+  return choices;
 }
 
-// A project detail owns reviews/controllers, not a connection, dispatcher or HC.
-// All reads/actions use its source's one stream and an explicit project context.
 export class RuntimeProject {
-  constructor(source, project, space, cx) {
+  constructor(source, project, space) {
     this.source = source; this.sourceKey = source.key; this.root = source.owner;
     this.selected = project?.project_id || null; this.project = project;
-    this.spaceID = space?.setupContext ? space.id : null;
-    this.folder = project?.repo_root || space?.setupContext?.cwd || null;
-    this.machine = source.machine; this.space = space;
-    this.setupContext = space?.setupContext || null;
-    this.generation = 0; this.panelEpoch = source.generation; this.closed = false;
-    this.workspaceView = "projects"; this.projectView = "operator";
-    this.worktreeCheck = {}; this.publication = {}; this.intake = {}; this.compose = {};
-    this.renderTargets = []; this.headerTargets = []; this.handle = this.root.handle;
+    this.spaceID = space?.id || null; this.space = space;
+    this.folder = project?.repo_root || space?.folder || null;
+    this.machine = source.machine; this.setupContext = space?.setupContext || null;
+    this.generation = 0; this.panelEpoch = source.generation; this.marker = panelEpoch();
+    this.resultCursor = "0"; this.historyRead = false;
     this.compatibility = sourceCompatibility(() => this.panelCurrent() && this.spaceID ? {
-      id: this.spaceID, machine: this.machine, folder: this.folder,
-      source: this.sourceKey, generation: this.source.generation,
+      id: this.spaceID, machine: this.machine, folder: this.folder, source: this.sourceKey, generation: source.generation,
     } : null);
     const connection = {
       updates: { current: () => this.panelCurrent() && source.online() },
@@ -55,259 +57,271 @@ export class RuntimeProject {
       connection, get connectionID() { return source.connectionID; },
       get connectionGeneration() { return source.generation; },
       get bindingEpoch() { return source.generation; },
-      get revision() { return source.revision; },
       scope: { machine: this.machine, localSpace: this.localSpace(), folder: this.folder },
-      current: () => this.panelCurrent(),
-      binding: null,
+      current: () => this.panelCurrent(), binding: null,
     };
-    this.workOperator = new WorkOperator(this);
+    this.sessions = new ProjectSessions(this);
     this.mainClient = new MainClientControls(this);
-    this.workflow = new OperatorWorkflow(this);
+    this.workflow = new GoalComposer(this);
+    this.taskGoal = new TaskGoalComposer(this);
     this.nativeHC = new PrivateHCBinding(this);
+    this.needsVerification = true;
   }
-  localSpace() { return this.spaceID?.startsWith(`${this.machine}/`) && this.machine !== null ? this.spaceID.slice(this.machine.length + 1) : this.spaceID; }
+  localSpace() {
+    return this.machine !== null && this.spaceID?.startsWith(`${this.machine}/`) ? this.spaceID.slice(this.machine.length + 1) : this.spaceID;
+  }
+  terminalCurrent() {
+    const s = this.setupContext;
+    return !s || (spaces().some(space => space.id === this.spaceID && space.machine === this.machine && space.tabs.some(t => t.id === s.tab)) &&
+      panes().some(p => p.pane === s.pane && p.tab === s.tab && p.terminal === s.terminal && p.cwd === s.cwd && p.branch === s.branch));
+  }
   panelCurrent() {
-    return !this.closed && this.root.detail === this && this.source.current() && this.source.generation === this.panelEpoch &&
-      (this.observationPanelEpoch === undefined || this.observationPanelEpoch === panelEpoch()) &&
-      (!this.spaceID || spaces().some(s => s.id === this.spaceID && s.machine === this.machine &&
-        s.tabs.some(tab => tab.id === this.setupContext?.tab))) &&
-      (!this.setupContext || panes().some(p => p.pane === this.setupContext.pane && p.tab === this.setupContext.tab &&
-        p.terminal === this.setupContext.terminal && p.cwd === this.setupContext.cwd && p.branch === this.setupContext.branch));
+    return !this.closed && this.root.detail === this && this.source.current() && this.source.machine === this.machine &&
+      this.source.generation === this.panelEpoch && this.marker === panelEpoch() && panelVisible() && this.terminalCurrent();
   }
   invalidate() {
-    this.generation++; this.compatibility.invalidateObservation("Owning runtime/route changed; review again.");
-    this.workOperator.suspend(); this.nativeHC.approved = null;
-    this.nativeHC.review = null; this.nativeHC.error = null; this.workflow.review = null;
+    this.generation++;
+    this.compatibility.invalidateObservation("Project connection changed");
+    this.updates.binding = null; this.board = null;
+    this.sessions.reset(); this.workflow.review = null;
+    this.nativeHC.approved = null; this.nativeHC.review = null;
+    this.deleteIntent = null;
+    this.needsVerification = true; this.error = null;
+    this.resultCursor = "0"; this.historyRead = false;
   }
-  invalidateObservation() {
-    this.invalidate(); this.updates.binding = null;
-    this.pendingNavigation = null; this.navigation = null;
-    this.navigationError = null;
-    this.error = null; this.errorStage = null; this.observationPending = true;
-  }
-  renewObservation(cx) {
-    this.invalidateObservation();
-    cx.notify();
-  }
-  observeContext(cx) {
-    const context = JSON.stringify([this.source.generation, panelEpoch(), this.setupContext]);
-    if (context !== this.observationContext) {
-      const initial = this.observationContext === undefined;
-      const navigation = initial ? this.pendingNavigation : null;
-      this.observationContext = context;
-      this.observationPanelEpoch = panelEpoch();
-      this.panelEpoch = this.source.generation;
-      // Rendering may invalidate stale authority, but must not notify itself.
-      this.invalidateObservation();
-      this.pendingNavigation = navigation;
-    }
-    // Refresh observations only. Never restore a review, recover an uncertain
-    // operation, open a terminal or send input as a consequence of navigation.
-    if (this.observationPending && !this.verifyingRepository && this.spaceID &&
-        this.source.online() && this.panelCurrent() && panelVisible()) {
-      this.observationPending = false;
-      cx.spawn(task => this.initialize(task));
-    }
-  }
-  async initialize(cx) {
-    if (!this.spaceID || !this.folder || this.verifyingRepository) return;
-    const request = { generation: this.generation, source: this.source.generation, panel: panelEpoch() };
-    const current = () => this.panelCurrent() && request.generation === this.generation &&
-      request.source === this.source.generation && request.panel === panelEpoch() && panelVisible();
-    this.verifyingRepository = request; this.error = null; this.errorStage = null;
-    let phase = "repository";
-    try {
-      if (this.setupContext) {
-        const repo = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: this.setupContext.cwd, on: this.machine, timeout: 5000 });
-        if (!current()) return;
-        const folder = repo.stdout?.replace(/\r?\n$/, "");
-        if (repo.code !== 0 || !folder || /[\r\n\0]/.test(folder))
-          throw Error("Selected terminal repository unavailable");
-        if (this.project && this.project.repo_root !== folder) {
-          phase = "repository-root"; throw Error("Selected terminal belongs to another checkout");
-        }
-        this.folder = folder; this.updates.scope.folder = folder;
-      }
-      phase = "compatibility";
-      const response = await this.updates.connection.command(["compatibility", this.localSpace(), this.folder]);
-      if (!current()) return;
-      if (response.code !== 0) throw Error("Repository compatibility unavailable");
-      phase = "compatibility-contract";
-      const status = this.compatibility.validate(JSON.parse(response.stdout), { id: this.spaceID, machine: this.machine, folder: this.folder });
-      phase = "source-pins";
-      if (status.queue_identity !== this.source.runtime.queue_identity || status.image_sha256 !== this.source.runtime.image_sha256 ||
-           status.observation_store_context !== this.source.binding?.store_context || ![6, 7].includes(status.observation_schema) ||
-          !/^[a-f0-9]{64}$/.test(status.observation_context)) throw Error("Project/source pins changed");
-      this.compatibility.observe();
-      this.compatibility.status = status; this.compatibility.allowActions = this.source.mutations;
-      this.updates.binding = { queue_identity: status.queue_identity, store_context: status.observation_store_context, bridge_context: status.observation_context };
-      phase = "work-binding";
-      this.workOperator.sync();
-      phase = "work-observation";
-      this.source.subscribe(true);
-    } catch (_) {
-      if (current()) {
-        this.errorStage = phase;
-        this.error = {
-          repository: "The selected terminal's Git repository could not be read. Retry verification or choose a project terminal.",
-          "repository-root": "This terminal belongs to a different Git checkout from this project. Choose a project terminal; no work or history was started.",
-          compatibility: "The owning runtime could not read project compatibility. Retry read-only verification; no work was started.",
-          "compatibility-contract": "The runtime compatibility response did not match this project context. Retry verification or return to Work.",
-          "source-pins": "The runtime queue, image or observation context changed. Reopen the project to verify its current source.",
-          "work-binding": "The project's stored work context could not be bound. Retry read-only verification.",
-          "work-observation": "The project's stored work observation could not be requested. Retry read-only verification.",
-        }[phase];
-      }
-    }
-    finally {
-      if (this.verifyingRepository === request) this.verifyingRepository = false;
-      // A superseded read must wake the queued current-context read too.
-      cx.notify();
-    }
-  }
-  followNavigation(cx) {
-    const target = this.pendingNavigation;
-    if (!target || !this.spaceID || !this.workOperator.bound || !this.workOperator.readAt) return;
-    this.pendingNavigation = null;
-    if (!this.panelCurrent() || target.sourceGeneration !== this.source.generation || target.panelMarker !== panelEpoch()) {
-      this.navigationError = "The runtime changed before navigation. Reopen this project to verify the conversation."; return;
-    }
-    if (target.kind === "worker") {
-      const worker = this.workOperator.rows.find(v => ["implementation", "review"].includes(v.kind) && v.job?.job_id === target.job);
-      if (!worker?.job?.session_id || target.session && worker.job.session_id !== target.session) {
-        this.navigationRecord = target.record;
-        this.navigationError = "This update has no verified worker conversation yet. Open Main for the project status; no session was guessed."; return;
-      }
-      this.workOperator.choose(worker, cx);
-      this.mainClient.openConversation("worker", worker.request_id, cx);
-    } else if (this.mainClient.selectedMain) this.mainClient.openConversation("integrator", "", cx);
-    else {
-      this.navigationRecord = target.record;
-      this.navigationError = "This project has no linked Main conversation. Its stored update is shown below; nothing was created.";
-    }
-  }
-  dispose() { this.closed = true; this.invalidate(); this.workOperator.scroll.release(); }
-  resetObservationVersions() { this.invalidate(); }
+  dispose() { this.closed = true; this.invalidate(); }
   refresh(cx) {
     const created = this.workflow.status;
-    if (!this.selected && ["create", "adopt"].includes(created?.mode) && created.state === "ready" &&
+    // Replacement advances the binding of this same project and checkout.
+    // Reuse the current panel and its draft instead of reopening the view.
+    if (["create", "adopt"].includes(created?.mode) && created.state === "ready" &&
         created.repo === this.folder && created.project_id && created.session_id) {
-      this.root.openProject(this.source, { project_id: created.project_id, repo_root: created.repo, label: this.workflow.label.value() }, this.space, cx);
+      this.root.openProject(this.source, { project_id: created.project_id, repo_root: created.repo,
+        label: this.workflow.label.value() || this.project?.label }, this.space, cx);
     } else this.source.subscribe(true);
     cx.notify();
   }
-  navigationScope() {
-    return { source: this.sourceKey, core: this.source.runtime.core_id, queue: this.source.runtime.queue_identity,
-      project: this.selected, sourceGeneration: this.source.generation, generation: this.generation };
+  async initialize(cx) {
+    if (!this.spaceID || this.verifying) return;
+    const generation = this.generation;
+    const current = () => this.panelCurrent() && generation === this.generation;
+    this.verifying = true; this.error = null;
+    let reason = "Could not verify this checkout. Choose a project terminal.";
+    try {
+      const result = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: this.setupContext.cwd, on: this.machine, timeout: 5000 });
+      if (!current()) return;
+      const folder = result.stdout?.replace(/\r?\n$/, "");
+      if (result.code !== 0 || !folder || /[\r\n\0]/.test(folder) || this.project && this.project.repo_root !== folder) throw Error();
+      this.folder = folder; this.updates.scope.folder = folder;
+      reason = "Project connection could not be verified.";
+      const response = await this.updates.connection.command(["compatibility", this.localSpace(), folder]);
+      if (!current()) return;
+      if (response.code !== 0) throw Error();
+      const status = this.compatibility.validate(JSON.parse(response.stdout), { id: this.spaceID, machine: this.machine, folder });
+      if (status.queue_identity !== this.source.runtime.queue_identity || status.image_sha256 !== this.source.runtime.image_sha256 ||
+          status.observation_store_context !== this.source.binding?.store_context || ![6, 7].includes(status.observation_schema) ||
+          !/^[a-f0-9]{64}$/.test(status.observation_context)) throw Error();
+      this.compatibility.observe();
+      this.compatibility.status = status; this.compatibility.allowActions = this.source.mutations;
+      this.updates.binding = { queue_identity: status.queue_identity, store_context: status.observation_store_context, bridge_context: status.observation_context };
+      this.source.subscribe(true);
+    } catch (_) { if (current()) this.error = reason; }
+    finally { this.verifying = false; cx.notify(); }
   }
-  navigationCurrent(scope) {
-    return this.panelCurrent() && this.source.online() && JSON.stringify(scope) === JSON.stringify(this.navigationScope());
+  observeResults(slot) {
+    if (!this.panelCurrent() || slot.status !== "ready") return;
+    for (const result of slot.data.items) {
+      const row = this.sessions.rows.find(r => r.job.job_id === result.job_id);
+      const event = result.event;
+      if (!event?.id || !row) continue;
+      const key = JSON.stringify([this.sourceKey, event.id]);
+      if (this.root.notified.has(key)) continue;
+      this.root.notified.add(key);
+      if (this.historyRead) {
+        try {
+          const blocked = event.state === "unknown";
+          const action = row.job.session_state || !row.job.session_id ? undefined : { name: `ocq.${this.sessionCommand(row)}` };
+          notify({ title: `${this.project.label} · ${blocked ? "Session needs attention" : "Job ended"}`,
+            body: row.title, level: blocked ? "warning" : "info", action });
+        } catch (_) { /* Notification delivery does not change stored state. */ }
+      }
+    }
+    if (!slot.has_more) this.historyRead = true;
+    // Keep listening from the last page's start until it fills. This is a
+    // non-consuming project result cursor; never ack global queue events.
+    if (slot.has_more) this.resultCursor = slot.cursor;
   }
-  select(project, cx) {
-    const scope = this.navigationScope();
-    if (!this.navigationCurrent(scope)) return;
+  sessionCommand(row) {
+    return `open-${createHash("sha256").update(JSON.stringify([this.sourceKey, this.selected, row.request_id, row.job.session_id])).digest("hex")}`;
+  }
+  openNotified(command, cx) {
+    if (!this.sessions.current(this.sessions.bound) || !this.compatibility.machineReady()) return;
+    const row = this.sessions.rows.find(item => item.job.session_id && !item.job.session_state && this.sessionCommand(item) === command);
+    if (row) this.mainClient.openConversation("worker", row.request_id, cx);
+  }
+  deleteCurrent(intent) {
+    return this.deleteIntent === intent && this.sessions.current(intent.scope) &&
+      this.mainClient.targetSession(intent.kind, intent.work) === intent.session;
+  }
+  requestDelete(kind, work, session, label, cx) {
+    const scope = this.sessions.bound;
+    if (!this.sessions.current(scope) || this.mainClient.targetSession(kind, work) !== session || this.deleteIntent?.state === "deleting") return;
+    const available = this.compatibility.machineReady() &&
+      this.compatibility.status?.actions?.["session-delete-v1"] === "ocq-session-delete-v1";
+    const intent = { scope, kind, work, session, label, state: available ? "checking" : "unsupported" };
+    this.deleteIntent = intent;
+    if (available) this.readDelete(intent, cx);
+  }
+  deleteArgs(intent) {
+    const s = intent.scope;
+    return [s.space, s.queue, s.project, intent.session, s.machine ?? "local", s.folder, s.store,
+      this.compatibility.status?.image_sha256, intent.work];
+  }
+  readDeleteResult(response, intent) {
+    const value = response.code === 0 && JSON.parse(response.stdout);
+    if (value?.protocol !== "ocq-session-delete-v1" || value.session_id !== intent.session ||
+        !["ready", "active", "pending", "resources", "job_unsettled", "changed", "unavailable", "uncertain", "deleted"].includes(value.state) ||
+        (value.state === "ready" && !/^[a-f0-9]{64}$/.test(value.preview_sha256 || ""))) throw Error("Exact deletion check unavailable");
+    return value;
+  }
+  readDelete(intent, cx) {
     cx.spawn(async task => {
       try {
-        const response = await this.source.command(["board", project], undefined,
-          { project_id: project, space: this.localSpace(), folder: this.folder });
-        if (!this.navigationCurrent(scope)) return;
-        const board = response.code === 0 && JSON.parse(response.stdout), summary = board?.project;
-        if (summary?.project_id !== project || summary.current_binding?.repo_root !== this.folder) throw Error("Project navigation mismatch");
-        this.root.openProject(this.source, { ...summary, repo_root: this.folder }, this.space, task);
-      } catch (_) { if (this.navigationCurrent(scope)) this.error = "Owning project unavailable. No Main or goal was started."; }
+        const response = await bridgeCommand(["session-delete-check-v1", "--work-observation-context", intent.scope.bridge,
+          "--", ...this.deleteArgs(intent)], { on: this.machine, compatibility: this.compatibility });
+        const value = this.readDeleteResult(response, intent);
+        if (this.deleteCurrent(intent)) { intent.state = value.state; intent.preview = value.preview_sha256; }
+      } catch (_) { if (this.deleteCurrent(intent)) intent.state = "unavailable"; }
       task.notify();
     });
   }
-  inspect(job, cx) { this.openTarget("job", job, cx); }
-  openTarget(kind, id, cx) {
-    const scope = this.navigationScope();
-    if (!this.selected || !this.navigationCurrent(scope) || !["job", "manifest"].includes(kind)) return;
-    if (this.navigation?.kind === kind && this.navigation.id === id && this.navigationCurrent(this.navigation.scope)) { cx.notify(); return; }
-    const view = { kind, id, scope, page: 0 };
-    this.navigation = view;
-    if (kind === "job") this.detailJob = id;
-    this.source.subscribe();
+  confirmDelete(intent, cx) {
+    if (!this.deleteCurrent(intent) || intent.state !== "ready") return;
+    intent.state = "deleting";
     cx.spawn(async task => {
       try {
-        const response = await this.updates.connection.command([kind, scope.project, id]);
-        if (this.navigation !== view || !this.navigationCurrent(scope)) return;
-        if (response.code !== 0) throw Error("Stored detail unavailable");
-        const value = JSON.parse(response.stdout);
-        if (kind === "job" ? value?.project_id !== scope.project || value.job_id !== id :
-            typeof value !== "string" || createHash("sha256").update(value).digest("hex") !== id) throw Error("Stored detail identity mismatch");
-        view.pages = this.workOperator.pagesFor(value);
-      } catch (_) { if (this.navigation === view && this.navigationCurrent(scope)) view.error = "Owning source detail unavailable; retained execution state is unchanged."; }
-      task.notify();
+        const response = await bridgeCommand(["session-delete-v1", ...this.deleteArgs(intent), intent.preview], {
+          on: this.machine, compatibility: this.compatibility,
+          current: () => this.deleteCurrent(intent) && intent.state === "deleting",
+        });
+        const value = this.readDeleteResult(response, intent);
+        if (this.deleteIntent !== intent) return;
+        if (value.state === "deleted") { this.deleteIntent = null; this.source.subscribe(true); }
+        else intent.state = value.state === "ready" ? "unavailable" : value.state;
+      } catch (_) {
+        if (this.deleteIntent === intent) { intent.state = "uncertain"; this.source.subscribe(true); }
+      } finally { task.notify(); }
     });
-    cx.notify();
   }
-  panelControl(id, text, action, t, targets = this.headerTargets) {
-    const scope = this.navigationScope();
-    const run = task => {
-      if (this.navigationCurrent(scope)) action(task);
-      else { this.navigationError = "The project context changed. Reopen it before navigating."; task.notify(); }
-    };
-    targets.push({ id, run });
-    return div().id(id).role("button").accessibility_label(text).px(8).py(5).rounded(5).cursor_pointer()
-      .hover(e => e.bg(t.hover)).on_click((_e, cx) => run(cx)).child(text);
+  renderDelete(kind, work, session, button, note) {
+    const intent = this.deleteIntent;
+    if (!intent || intent.kind !== kind || intent.work !== work || intent.session !== session) return null;
+    const reason = {
+      checking: "Checking whether the session is idle…",
+      deleting: "Deleting session…",
+      active: "Open the session and stop it in OpenCode before deleting.",
+      pending: "Open the session and resolve pending requests before deleting.",
+      job_unsettled: "Wait for OCQ to finish checking the job before deleting.",
+      resources: "Close the session’s running tools or child sessions before deleting.",
+      changed: "This session changed. Check it again before deleting.",
+      uncertain: "Deletion could not be confirmed. Do not repeat it.",
+      deleted: "This session was already deleted.",
+      unsupported: "Deletion requires an updated machine bridge.",
+      unavailable: "Could not verify this session. Nothing was deleted.",
+    }[intent.state];
+    return v_flex().gap(6).py(6)
+      .child(div().font_semibold().child(`Delete ${intent.label}?`))
+      .child(note(reason || "Keep this session idle until deletion finishes. The checkout and recorded results stay."))
+      .child(h_flex().gap(6)
+        .child(button("ocq-delete-cancel", "Cancel", task => { this.deleteIntent = null; task.notify(); }, intent.state !== "deleting"))
+        .child(button("ocq-delete-confirm", "Delete session", task => this.confirmDelete(intent, task), intent.state === "ready")));
   }
   render(cx, t) {
-    this.observeContext(cx);
-    this.renderTargets = []; this.headerTargets = [];
-    const box = v_flex().w_full().flex_1().min_w(0).min_h(0).gap(4);
-    if (this.navigationError) box.child(div().px(12).text_color(t.blocked).child(this.navigationError));
-    if (this.navigationRecord) box.child(this.root.recordSummary(this.navigationRecord, t).px(12).max_h(240).overflow_y_scroll());
-    const scope = this.navigationScope();
-    const button = (id, text, action) => {
-      const allowed = () => this.navigationCurrent(scope) && enabledButton(id, this.compatibility);
-      this.renderTargets.push({ id, run: task => { if (allowed()) action(task); } });
-      return div().id(id).role("button").accessibility_label(text).px(8).py(5).rounded(5).cursor_pointer()
-        .when(!allowed(), e => e.opacity(0.4)).hover(e => e.bg(t.hover))
-        .on_click((_e, task) => { if (allowed()) action(task); }).child(text);
-    };
-    if (!this.source.online()) return box.child(div().p(12).child("The owning runtime is unavailable. Stored project details are retained; no work or conversation was redirected."));
-    if (!this.panelCurrent()) return box
-      .child(div().p(12).child("The selected project terminal changed or closed. Choose another terminal in this checkout; your draft and saved operations are retained."))
-      .child(this.root.button("ocq-project-choose-context", "Choose a project terminal", task => {
-        if (!this.closed && this.root.detail === this) this.root.openProject(this.source, this.project, null, task);
-      }, t));
-    if (!this.spaceID) {
-      box.overflow_y_scroll();
+    if (this.marker !== panelEpoch() || this.panelEpoch !== this.source.generation) {
+      this.marker = panelEpoch(); this.panelEpoch = this.source.generation; this.invalidate();
+    }
+    const box = v_flex().id("ocq-project-conversations").w_full().flex_1().min_w(0).min_h(0).overflow_y_scroll().p(12).gap(8);
+    const button = (id, text, action, enabled = true, label = text) => this.root.button(id, text, action, t, enabled, label);
+    const note = text => div().text_size(12).text_color(t.muted).child(text);
+    if (!this.source.online()) return box.child(note("Machine unavailable. Check its Herdr connection."));
+    if (!this.spaceID || !this.terminalCurrent()) {
       const choices = projectSpaces(this.machine, this.project?.repo_root);
-      box.child(div().p(12).child(this.project ? "Choose a terminal in this project's checkout. Its Git root will be verified; unrelated terminal folders are not offered." :
-        "Choose a terminal folder to verify for this project. Space names and launch folders are not repository identity."));
-      for (const s of choices) box.child(this.panelControl(`space-${s.id}-${s.setupContext.pane}`, `${this.machine ?? "This computer"} · ${s.name} · Tab ${s.setupContext.tabName}\n${s.folder}`, task => this.root.openProject(this.source, this.project, s, task, this.pendingNavigation), t).flex_none());
-      if (!choices.length) box.child(div().p(12).text_color(t.muted).child(this.project ?
-        "No live terminal is currently in this project's checkout. Return to Work to keep reading its stored updates; no session was guessed." :
-        "No live terminal folder is available. Open a terminal in the intended repository, then choose it here."));
+      if (!choices.length) return box.child(note("Open a terminal in this project’s checkout in Herdr."));
+      box.child(note("Choose the Herdr space for this project."));
+      for (const s of choices) box.child(button(`space-${s.id}-${s.setupContext.pane}`, s.name, task => this.root.openProject(this.source, this.project, s, task)));
       return box;
     }
-    if (this.error) {
-      const record = this.pendingNavigation?.record;
-      if (record && record !== this.navigationRecord) box.child(this.root.recordSummary(record, t).px(12).max_h(240).overflow_y_scroll());
-      box.child(div().p(12).text_color(t.blocked).child(this.error));
-      box.child(this.panelControl("ocq-project-verify-retry", "Retry read-only verification", task => {
-        this.invalidate(); this.updates.binding = null;
-        task.spawn(next => this.initialize(next));
-      }, t));
-      if (this.project) box.child(this.panelControl("ocq-project-verify-context", "Choose a project terminal", task =>
-        this.root.openProject(this.source, this.project, null, task, this.pendingNavigation), t));
-      return box;
+    if (this.needsVerification && !this.verifying && this.panelCurrent()) {
+      this.needsVerification = false;
+      cx.spawn(task => this.initialize(task));
     }
-    if (this.verifyingRepository || this.observationPending) return box.child(div().p(12).child("Refreshing this project's connection and stored Main…"));
-    if (this.navigation) {
-      const v = this.navigation, current = this.navigationCurrent(v.scope);
-      return box.child(v_flex().flex_1().min_h(0).p(12).gap(6).overflow_y_scroll()
-        .child(div().font_semibold().child(v.kind === "job" ? "Stored project job" : "Result manifest"))
-        .child(div().text_size(12).child(`${v.scope.project}\n${v.id}`))
-        .child(div().child(!current ? "Context changed; return to Work and reopen this project." : v.error || v.pages?.[v.page] || "Reading owning source…"))
-        .when(current && !!v.pages, e => e.child(div().text_size(12).child(`Page ${v.page + 1}/${v.pages.length}`))
-          .when(v.page > 0, p => p.child(this.panelControl("ocq-read-project-previous", "Previous", task => { v.page--; task.notify(); }, t)))
-          .when(v.page < v.pages.length - 1, p => p.child(this.panelControl("ocq-read-project-next", "Next", task => { v.page++; task.notify(); }, t))))
-        .child(this.panelControl("ocq-read-project-main", "Return to Main", task => this.select(this.selected, task), t)));
+    if (this.error) return box.child(note(this.error))
+      .child(button("ocq-verify-project", "Check project", task => task.spawn(next => this.initialize(next))))
+      .child(button("ocq-choose-space", "Choose space", task => this.root.openProject(this.source, this.project, null, task, true)));
+    if (!this.updates.binding || this.selected && !this.sessions.readAt) return box.child(note("Reading project…"));
+    const main = this.mainClient, scope = this.sessions.bound;
+    const ready = this.compatibility.machineReady();
+    const open = (kind, request, session, task) => {
+      if (this.sessions.current(scope) && main.targetSession(kind, request) === session) main.openConversation(kind, request, task);
+      else main.openRefused(task);
+    };
+    const opening = session => {
+      if (main.openIntent?.session !== session || !(main.working || main.tabNavigation || main.error || main.attachmentNotice)) return null;
+      const checking = main.working && main.openIntent?.readOnly;
+      const pending = main.working || main.tabNavigation;
+      return v_flex().gap(4)
+        .child(note(checking ? "Checking this opening…" : pending ? "Opening conversation…" :
+          main.error || "Attachment is unconfirmed. OCQ won’t repeat it."))
+        .when(!!(main.error || main.attachmentNotice || checking), v => v.child(
+          button("ocq-check-opening", "Check opening", task => main.checkOpeningStatus(task), ready && !pending)));
+    };
+    const standalone = this.taskGoal.supported();
+    if (standalone) box.child(this.taskGoal.render(cx, t, button));
+    if (main.selectedMain) {
+      const id = main.selectedMain.session_id;
+      const legacy = this.workflow.render(cx, t, button, true, standalone);
+      if (legacy) box.child(legacy);
+      const row = h_flex().items_center().gap(4).py(5).border_b(1).border_color(t.border)
+        .child(div().flex_1().font_semibold().child("Main"))
+        .child(button("ocq-open-main", "Open", task => open("integrator", "", id, task),
+          ready && !main.working && !main.tabNavigation, "Open Main"));
+      if (main.selectedMain.ownership_mode === "ocq_main") row.child(button("ocq-delete-main", "Delete…",
+        task => this.requestDelete("integrator", "", id, "Main", task), !this.deleteIntent || this.deleteIntent.state !== "deleting", "Delete Main"));
+      box.child(row);
+      const status = opening(id);
+      if (status) box.child(status);
+      const confirmation = this.renderDelete("integrator", "", id, button, note);
+      if (confirmation) box.child(confirmation);
+    } else if (main.retirement === "uncertain") box.child(note("Main’s deletion could not be confirmed. Ask the machine owner to check."));
+    else box.child(this.workflow.render(cx, t, button, false));
+    if (!main.openIntent && main.error) box.child(note(main.error));
+    for (const row of this.sessions.rows) {
+      const state = sessionState(row.job), role = row.kind === "review" ? "Reviewer" : "Worker";
+      const line = h_flex().id(`ocq-session-${row.job.session_id || row.request_id}`).items_center().gap(4).py(5).border_b(1).border_color(t.border)
+        .child(v_flex().flex_1().min_w(0).gap(2)
+          .child(div().truncate().font_semibold().child(row.title))
+          .child(note(`${row.goalTitle} · ${state}`)));
+      if (row.job.session_id && !row.job.session_state) {
+        line.child(button(`ocq-open-${row.job.session_id}`, "Open", task => open("worker", row.request_id, row.job.session_id, task),
+          ready && !main.working && !main.tabNavigation, `Open ${role.toLowerCase()}: ${row.title}`));
+        if (!row.task_goal) line.child(button(`ocq-delete-${row.job.session_id}`, "Delete…",
+          task => this.requestDelete("worker", row.request_id, row.job.session_id, role.toLowerCase(), task),
+          !this.deleteIntent || this.deleteIntent.state !== "deleting", `Delete ${role.toLowerCase()}: ${row.title}`));
+      }
+      box.child(line);
+      const status = opening(row.job.session_id);
+      if (status) box.child(status);
+      const confirmation = this.renderDelete("worker", row.request_id, row.job.session_id, button, note);
+      if (confirmation) box.child(confirmation);
     }
-    if (this.selected) box.child(this.workOperator.render(cx, t, button));
-    else box.child(v_flex().p(12).overflow_y_scroll().child(this.workflow.render(cx, t, button)));
+    if (main.selectedMain && !this.sessions.rows.length) box.child(note(standalone ? "Task sessions appear here when you start a goal." : "Goal sessions appear here when Main assigns them."));
     return box;
   }
+}
+
+function sessionState(job) {
+  if (job.session_state === "uncertain") return "Deletion unconfirmed";
+  if (job.state === "unknown") return "Needs attention";
+  if (job.terminal_proven) return { agent_succeeded: "Job finished", agent_failed: "Job failed", agent_interrupted: "Job interrupted" }[job.outcome] || "Job ended";
+  return { queued: "Waiting", launching: "Starting", running: "Running" }[job.state] || "Status unconfirmed";
 }

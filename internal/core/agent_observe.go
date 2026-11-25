@@ -17,17 +17,66 @@ import (
 
 const agentCompletionPolicy = "session-scoped-v1"
 
+// Native project conversations trust the configured cooperative harness, not
+// an inferred producer identity. The original input must still match in full.
+// Follow-up text cannot substitute for it or change the execution profile.
+func nativeConversationText(text string, files, agents, skills []json.RawMessage) bool {
+	return strings.TrimSpace(text) != "" && len(files)+len(agents)+len(skills) == 0
+}
+
+func matchesObservedUser(j Job, m message, anchored, conversation bool) bool {
+	if m.ID == j.Agent.PromptID {
+		return !anchored && m.Text == j.agentRequest.Prompt && jsonEqual(m.Metadata, ownershipMetadata(j)) &&
+			len(m.Files)+len(m.Agents)+len(m.Skills) == 0
+	}
+	return anchored && conversation && nativeConversationText(m.Text, m.Files, m.Agents, m.Skills)
+}
+
+func allowedObservedInbox(j Job, input inboxItem, conversation bool) bool {
+	if matchingInput(j, input) {
+		return true
+	}
+	return conversation && input.SessionID == j.Agent.SessionID && input.Type == "user" &&
+		input.ID != "" && input.ID != j.Agent.PromptID && (input.Delivery == "steer" || input.Delivery == "queue") &&
+		nativeConversationText(input.Payload.Text, input.Payload.Files, input.Payload.Agents, input.Payload.Skills)
+}
+
 // All reconciliation is observational. There is intentionally no POST, resume,
 // permission reply, cancellation or process-liveness shortcut in this function.
 func (s *store) observeAgent(j Job) error {
+	return s.observeAgentPolicy(j, false)
+}
+
+func (s *store) observeAgentPolicy(j Job, explicit bool) error {
 	if j.Agent == nil || j.agentRequest == nil {
 		return diagnostic(faults.CodeInvariantFailed, "missing exact agent ownership")
 	}
 	if j.State == "queued" || j.State == "cancelled" {
 		return diagnostic(faults.CodeValidationFailed, "agent job has not been admitted")
 	}
+	if workTerminal(j) {
+		return nil // Keep the first supported terminal evidence immutable.
+	}
+	policy, policyErr := s.lifecycleIntent(j.ID)
+	if errors.Is(policyErr, sql.ErrNoRows) || policyErr == nil && policy.Source == "explicit_reevaluation" && !explicit {
+		return nil // Replacing/polling an observer never upgrades historical jobs.
+	}
+	if policyErr != nil {
+		return policyErr
+	}
 	if j.Agent.Worktree == "" {
+		var intents int
+		if err := s.db.QueryRow("SELECT count(*) FROM agent_operations WHERE job_id=? AND kind='worktree'", j.ID).Scan(&intents); err != nil {
+			return err
+		}
+		if intents == 0 && j.State == "unknown" {
+			return nil // A pre-provision failure has nothing to reconcile/resume.
+		}
 		return s.agentUnknown(j.ID, "Workmux acknowledgment/ownership unresolved; no name/branch adoption and no mutation retry", false)
+	}
+	runtimeBefore, err := s.lifecycleRuntime(j, "lifecycle-runtime-before")
+	if err != nil {
+		return s.agentFailure(j, err)
 	}
 	// Preserve the superseded causal-provenance diagnosis before re-evaluating
 	// its entire transcript. New-policy interference remains latched separately.
@@ -58,6 +107,10 @@ func (s *store) observeAgent(j Job) error {
 	}
 	isReview, err := s.isProjectReviewJob(context.Background(), j.ID)
 	if err != nil {
+		return err
+	}
+	var conversation bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM project_jobs WHERE job_id=?)`, j.ID).Scan(&conversation); err != nil {
 		return err
 	}
 	intent, err := dbquery.New(s.db).AgentPromptIntent(context.Background(), j.ID)
@@ -100,13 +153,23 @@ func (s *store) observeAgent(j Job) error {
 		return s.agentFailure(j, err)
 	}
 	ownedPending := 0
+	followupPending := false
 	pendingDelivery := ""
+	pendingIDs := map[string]bool{}
 	for _, in := range inbox {
 		if in.SessionID == j.Agent.SessionID && (in.Type == "synthetic" || in.Type == "system") {
 			continue // Auxiliary context must drain before completion, not be adopted as our prompt.
 		}
+		if !allowedObservedInbox(j, in, conversation) {
+			return s.interference(j, "inbox input violates the exact session input contract; capacity held")
+		}
+		if pendingIDs[in.ID] {
+			return s.interference(j, "duplicate native inbox input identity; capacity held")
+		}
+		pendingIDs[in.ID] = true
 		if !matchingInput(j, in) {
-			return s.interference(j, "foreign or changed inbox input detected; ownership/capacity retained")
+			followupPending = true
+			continue
 		}
 		ownedPending++
 		pendingDelivery = in.Delivery
@@ -119,7 +182,7 @@ func (s *store) observeAgent(j Job) error {
 		// of consumption. Only the already-running, durably acknowledged own
 		// prompt may remain pending here. Never turn an unknown job back into
 		// running, resend input, or use auxiliary context as ownership proof.
-		if ownedPending == 1 && j.State == "running" && j.Agent.Phase == "prompt_accepted" {
+		if (ownedPending == 1 || followupPending) && j.State == "running" && j.Agent.Phase == "prompt_accepted" {
 			ack, err := os.ReadFile(filepath.Join(s.dir, "jobs", j.ID, "prompt-response.json"))
 			if err != nil {
 				return s.agentFailure(j, err)
@@ -128,35 +191,35 @@ func (s *store) observeAgent(j Job) error {
 			if decodeData(ack, &accepted) != nil || !matchingInput(j, accepted) {
 				return s.agentUnknown(j.ID, "exact accepted prompt evidence unavailable; capacity held", false)
 			}
-			if (accepted.Delivery != "steer" && accepted.Delivery != "queue") || pendingDelivery != accepted.Delivery {
+			if (accepted.Delivery != "steer" && accepted.Delivery != "queue") || ownedPending == 1 && pendingDelivery != accepted.Delivery {
 				return s.interference(j, "unsupported or changed delivery of owned inbox input")
 			}
 			messages, err := s.transcript(j)
 			if err != nil {
 				return s.agentFailure(j, err)
 			}
-			anchors := 0
+			anchored := false
 			for _, m := range messages {
 				switch m.Type {
 				case "user":
-					if anchors != 0 || m.ID != j.Agent.PromptID || m.Text != j.agentRequest.Prompt || !jsonEqual(m.Metadata, ownershipMetadata(j)) || len(m.Files)+len(m.Agents)+len(m.Skills) != 0 {
-						return s.interference(j, "additional or mismatched user history while owned input pending")
+					if !matchesObservedUser(j, m, anchored, conversation) {
+						return s.interference(j, "user history does not retain the original owned input or contains unsupported input")
 					}
-					anchors++
+					anchored = true
 				case "system", "synthetic": // Auxiliary only; no causality asserted.
 				case "assistant":
-					if anchors != 1 || m.Agent != j.agentRequest.Agent || m.Model != j.agentRequest.Model {
+					if !anchored || m.Agent != j.agentRequest.Agent || !sameAgentModel(m.Model, j.agentRequest.Model) {
 						return s.interference(j, "unexpected assistant execution while owned input pending")
 					}
 				case "idle":
-					if anchors != 1 || (m.Outcome != "succeeded" && m.Outcome != "failed" && m.Outcome != "interrupted") {
+					if !anchored || (m.Outcome != "succeeded" && m.Outcome != "failed" && m.Outcome != "interrupted") {
 						return s.interference(j, "unsupported idle history while owned input pending")
 					}
 				default:
 					return s.interference(j, "unsupported execution input/history while owned input pending")
 				}
 			}
-			_, err = s.agentEvidence(j.ID, "owned-input-pending", []byte(`{"state":"pending","completion":false,"capacity":"held","reason":"exact acknowledged own input awaits consumption; auxiliary context is not ownership proof"}`))
+			_, err = s.agentEvidence(j.ID, "owned-input-pending", []byte(`{"state":"pending","completion":false,"capacity":"held","reason":"session input awaits consumption; original ownership still required, follow-up producer not attested"}`))
 			return err // Keep running/agent_pending; all terminal fences below remain.
 		}
 		return s.agentUnknown(j.ID, "session input pending in inbox; no completion, resend, or resume", true)
@@ -211,13 +274,24 @@ func (s *store) observeAgent(j Job) error {
 	lastTime := float64(0)
 	text := strings.Builder{}
 	assistants := 0
-	anchors := 0
+	inputs := []string{}
 	auxiliary := []map[string]string{}
 	shellReferences := []string{}
 	toolIDs := map[string]bool{}
 	toolCount := 0
 	toolErrors := 0
-	for _, m := range messages {
+	// A prior interrupted turn can end before a later successful one. Apply
+	// the incomplete-assistant exception only to that turn's own idle event,
+	// not to the final outcome of the entire multi-turn observation.
+	idleAfter := make([]int, len(messages))
+	nextIdle := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		idleAfter[i] = nextIdle
+		if messages[i].Type == "idle" {
+			nextIdle = i
+		}
+	}
+	for i, m := range messages {
 		if m.ID == "" || seen[m.ID] || m.Time.Created <= 0 || m.Time.Created < lastTime {
 			return s.agentUnknown(j.ID, "transcript order/identity cannot be established; no completion inferred", false)
 		}
@@ -225,21 +299,22 @@ func (s *store) observeAgent(j Job) error {
 		lastTime = m.Time.Created
 		switch m.Type {
 		case "user":
-			if anchors != 0 || m.ID != j.Agent.PromptID || m.Text != j.agentRequest.Prompt || !jsonEqual(m.Metadata, ownershipMetadata(j)) || len(m.Files)+len(m.Agents)+len(m.Skills) != 0 {
-				return s.interference(j, "additional or mismatched user input; exact single owned prompt required")
+			if !matchesObservedUser(j, m, len(inputs) > 0, conversation) {
+				return s.interference(j, "user history does not retain the original owned input or contains unsupported input")
 			}
-			anchors++
+			inputs = append(inputs, m.ID)
+			assistants = 0 // Successful idle must have a response after the last input.
 		case "system", "synthetic":
 			auxiliary = append(auxiliary, map[string]string{"id": m.ID, "type": m.Type})
 		case "assistant":
-			if anchors != 1 {
+			if len(inputs) == 0 {
 				return s.interference(j, "assistant execution before the owned prompt anchor")
 			}
-			if m.Agent != j.agentRequest.Agent || m.Model != j.agentRequest.Model {
+			if m.Agent != j.agentRequest.Agent || !sameAgentModel(m.Model, j.agentRequest.Model) {
 				return s.interference(j, "unexpected assistant agent/model mutation")
 			}
-			last := messages[len(messages)-1]
-			aborted := last.Type == "idle" && (last.Outcome == "failed" || last.Outcome == "interrupted")
+			end := idleAfter[i]
+			aborted := end >= 0 && (messages[end].Outcome == "failed" || messages[end].Outcome == "interrupted")
 			assistants++
 			for _, part := range m.Content {
 				switch part.Type {
@@ -254,15 +329,13 @@ func (s *store) observeAgent(j Job) error {
 					if isReview && part.Name != "read" && part.Name != "glob" && part.Name != "grep" {
 						return s.interference(j, fmt.Sprintf("reviewer job invoked non-read-only tool %q; capacity held", part.Name))
 					}
-					id, err := terminalTool(part)
+					id, errorsRecorded, err := terminalTool(part)
 					if err != nil {
 						return s.agentUnknown(j.ID, err.Error()+"; capacity held", false)
 					}
 					toolIDs[part.ID] = true
 					toolCount++
-					if part.State.Status == "error" {
-						toolErrors++
-					}
+					toolErrors += errorsRecorded
 					if id != "" {
 						shellReferences = append(shellReferences, id)
 					}
@@ -273,18 +346,18 @@ func (s *store) observeAgent(j Job) error {
 			if m.Time.Completed <= 0 && !aborted {
 				return s.agentUnknown(j.ID, "assistant still incomplete; capacity held", false)
 			}
-			if m.Time.Completed > 0 && (m.Time.Completed < m.Time.Created || (last.Type == "idle" && m.Time.Completed > last.Time.Created)) {
+			if m.Time.Completed > 0 && (m.Time.Completed < m.Time.Created || end >= 0 && m.Time.Completed > messages[end].Time.Created) {
 				return s.agentUnknown(j.ID, "assistant completion is not coherently before the terminal boundary", false)
 			}
 		case "idle":
-			if anchors != 1 || (m.Outcome != "succeeded" && m.Outcome != "failed" && m.Outcome != "interrupted") {
+			if len(inputs) == 0 || (m.Outcome != "succeeded" && m.Outcome != "failed" && m.Outcome != "interrupted") {
 				return s.interference(j, "idle without owned prompt or supported explicit outcome")
 			}
 		default:
 			return s.interference(j, "command/shell/unsupported history or unexpected agent/model/location mutation")
 		}
 	}
-	if anchors != 1 {
+	if len(inputs) == 0 {
 		return s.agentUnknown(j.ID, "exact prompt not consumed into user history; never resend", false)
 	}
 	terminal := messages[len(messages)-1]
@@ -341,8 +414,8 @@ func (s *store) observeAgent(j Job) error {
 	}
 	if len(finalInbox) > 0 {
 		for _, in := range finalInbox {
-			if in.SessionID != j.Agent.SessionID || (in.Type != "system" && in.Type != "synthetic" && !matchingInput(j, in)) {
-				return s.interference(j, "foreign input arrived across terminal inspection; capacity held")
+			if in.SessionID != j.Agent.SessionID || (in.Type != "system" && in.Type != "synthetic" && !allowedObservedInbox(j, in, conversation)) {
+				return s.interference(j, "unsupported input arrived across terminal inspection; capacity held")
 			}
 		}
 		return s.agentUnknown(j.ID, "session input arrived across terminal inspection; wait for inbox to drain; capacity held", true)
@@ -393,12 +466,20 @@ func (s *store) observeAgent(j Job) error {
 	if !jsonEqual(after, finalSession) {
 		return s.agentUnknown(j.ID, "session changed across final inspection; retry GET inspection only", false)
 	}
-	evidence := map[string]any{"completion_policy": agentCompletionPolicy, "session": finalSession, "prompt_id": j.Agent.PromptID, "request_digest": j.Digest, "messages": messages, "auxiliary_events": auxiliary, "auxiliary_event_count": len(auxiliary), "auxiliary_provenance": "not asserted; session context under local single-user policy", "prior_diagnostic": json.RawMessage(priorDiagnostic), "active": false, "stable_transcript": true, "pending_permissions": len(finalPermissions), "pending_forms": len(finalForms), "inbox": 0, "tool_policy": "foreground-shell-v1: known terminal tools and owned runtime shell exit; cooperative resources only", "tool_count": toolCount, "tool_error_count": toolErrors, "resources_before": resourcesBefore, "resources_final": resourcesFinal, "validation": "not_run"}
+	runtimeFinal, err := s.lifecycleRuntime(j, "lifecycle-runtime-final")
+	if err != nil || runtimeFinal != runtimeBefore {
+		return s.agentUnknown(j.ID, "lifecycle runtime changed/unavailable across observation; capacity held", false)
+	}
+	evidence := map[string]any{"completion_policy": agentCompletionPolicy, "session": finalSession, "prompt_id": j.Agent.PromptID, "request_digest": j.Digest, "messages": messages, "auxiliary_events": auxiliary, "auxiliary_event_count": len(auxiliary), "auxiliary_provenance": "not asserted; session context under local single-user policy", "prior_diagnostic": json.RawMessage(priorDiagnostic), "active": false, "stable_transcript": true, "pending_permissions": len(finalPermissions), "pending_forms": len(finalForms), "inbox": 0, "tool_policy": CooperativeLifecyclePolicy, "tool_count": toolCount, "tool_error_count": toolErrors, "resources_before": resourcesBefore, "resources_final": resourcesFinal, "validation": "not_run", "lifecycle_intent": policy, "lifecycle_runtime": runtimeFinal, "trust": "configured cooperative harness and foreground producers; not producer attestation or an execution permission"}
+	if conversation {
+		evidence["input_policy"] = "exact original then native project conversation; follow-up producer not attested"
+		evidence["user_message_ids"] = inputs
+	}
 	b, err := json.Marshal(evidence)
 	if err != nil {
 		return err
 	}
-	proof, err := s.agentEvidence(j.ID, "terminal-evidence-session-v1", b)
+	proof, err := s.agentEvidence(j.ID, "terminal-evidence-cooperative-v1", b)
 	if err != nil {
 		return err
 	}
@@ -413,7 +494,7 @@ func (s *store) observeAgent(j Job) error {
 		if err := q.CompleteAgentOwnership(context.Background(), dbquery.CompleteAgentOwnershipParams{ServerOutcome: terminal.Outcome, TerminalEvidence: proof, JobID: j.ID}); err != nil {
 			return err
 		}
-		reason := fmt.Sprintf("session-scoped-v1 / foreground-shell-v1: one exact prompt, stable terminal session, terminal tools (%d errors recorded), no active loop/pending input/permission/form or running owned runtime resources; validation not run", toolErrors)
+		reason := fmt.Sprintf("session-scoped-v1 / %s: exact original input and %d observed follow-up inputs, stable terminal session, terminal tools (%d errors recorded), no active loop/pending input/permission/form or running owned runtime resources; validation not run", CooperativeLifecyclePolicy, len(inputs)-1, toolErrors)
 		n, err := q.CompleteAgentJob(context.Background(), dbquery.CompleteAgentJobParams{Outcome: "agent_" + terminal.Outcome, Reason: reason, ID: j.ID})
 		if err == nil && n != 1 {
 			return fmt.Errorf("agent terminal evidence CAS failed; ownership retained")

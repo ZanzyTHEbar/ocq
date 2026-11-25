@@ -30,6 +30,20 @@ type agentModel struct {
 	ProviderID string `json:"providerID"`
 	Variant    string `json:"variant,omitempty"`
 }
+
+// OpenCode 2.3.2 ModelResolver.withVariant treats "default" as omitted, not
+// as a named overlay (c0ad18b4, packages/core/src/model-resolver.ts).
+// Compare resolved identity without changing canonical request/receipt bytes.
+func sameAgentModel(a, b agentModel) bool {
+	if a.Variant == "default" {
+		a.Variant = ""
+	}
+	if b.Variant == "default" {
+		b.Variant = ""
+	}
+	return a == b
+}
+
 type permissionRule struct {
 	Action   string `json:"action"`
 	Resource string `json:"resource"`

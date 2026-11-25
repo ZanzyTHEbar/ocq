@@ -1,5 +1,8 @@
 # Operator workflow (unreleased)
 
+This describes the retained agent/core contracts and the previous operator
+panel. For current panel interaction see [Goals and sessions](goals-and-sessions.md).
+
 ## All-machine panel
 
 The default OCQ panel discovers runtimes for every machine in Herdr's public

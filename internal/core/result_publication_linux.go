@@ -56,7 +56,8 @@ type ResultPublicationPayload struct {
 }
 
 func (p ResultPublicationPayload) valid() bool {
-	return p.Target.valid() && isValidHexLen(p.OwnershipDigest, 64) && len(p.Manifest) > 0 && len(p.Manifest) <= maxManifestBytes && utf8.ValidString(p.Manifest) && (p.Supersedes == "" || isValidAssociationID(p.Supersedes))
+	// The parser applies the kind-specific bound (review results remain 16 KiB).
+	return p.Target.valid() && isValidHexLen(p.OwnershipDigest, 64) && len(p.Manifest) > 0 && len(p.Manifest) <= maxResultBytes && utf8.ValidString(p.Manifest) && (p.Supersedes == "" || isValidAssociationID(p.Supersedes))
 }
 
 type ResultPublicationContext struct {
@@ -191,7 +192,7 @@ type publicationMarker struct {
 	Digest  string `json:"payload_sha256"`
 }
 
-const publicationRecordLimit = 256 << 10
+const publicationRecordLimit = projectPayloadBytes
 
 func publicationRead(dir *os.File, name string) ([]byte, error) {
 	f, err := composePrivateAt(dir, name, syscall.O_RDONLY)
@@ -222,7 +223,7 @@ func publicationLoad(dir *os.File, t ResultPublicationTarget, digest string) (Re
 	if err != nil || json.Unmarshal(b, &rec) != nil || rec.Version != 1 || sha256Hex(rec.Raw) != rec.Digest {
 		return out, p
 	}
-	if _, err = decodeStrictJSONObject(rec.Raw, composeLimit, &p); err != nil || !p.valid() || p.Target != t || sha256Hex([]byte(p.Manifest)) != digest {
+	if _, err = decodeStrictJSONObject(rec.Raw, projectPayloadBytes, &p); err != nil || !p.valid() || p.Target != t || sha256Hex([]byte(p.Manifest)) != digest {
 		return out, p
 	}
 	m, err := parseManifestBytes([]byte(p.Manifest), "", t.Project)
@@ -404,13 +405,13 @@ func ReceiveResultPublication(dir string, t ResultPublicationTarget, launch stri
 			if one[0] == '\n' {
 				break
 			}
-			if one[0] < '0' || one[0] > '9' || digits.Len() >= 6 {
+			if one[0] < '0' || one[0] > '9' || digits.Len() >= 7 {
 				return errors.New("invalid publication frame")
 			}
 			digits.WriteByte(one[0])
 		}
 		n, err := strconv.Atoi(digits.String())
-		if err != nil || n < 1 || n > composeLimit || strconv.Itoa(n) != digits.String() {
+		if err != nil || n < 1 || n > projectPayloadBytes || strconv.Itoa(n) != digits.String() {
 			return errors.New("invalid publication size")
 		}
 		raw := make([]byte, n)
@@ -418,7 +419,7 @@ func ReceiveResultPublication(dir string, t ResultPublicationTarget, launch stri
 			return err
 		}
 		var p ResultPublicationPayload
-		if _, err = decodeStrictJSONObject(raw, composeLimit, &p); err != nil || !p.valid() || p.Target != t {
+		if _, err = decodeStrictJSONObject(raw, projectPayloadBytes, &p); err != nil || !p.valid() || p.Target != t {
 			return errors.New("invalid publication payload")
 		}
 		digest := sha256Hex([]byte(p.Manifest))

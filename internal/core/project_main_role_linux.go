@@ -22,22 +22,23 @@ type MainRoleSelection struct {
 // Retained and previewed before any instruction mutation. No ownership or auth
 // token. State and executable pointers are local-only, never tracked defaults.
 type MainRoleContract struct {
-	Protocol      string            `json:"protocol"`
-	Key           string            `json:"key"`
-	ProjectID     string            `json:"project_id"`
-	SetupID       string            `json:"setup_id"`
-	SessionID     string            `json:"session_id"`
-	StateDir      string            `json:"state_dir"`
-	QueueIdentity string            `json:"queue_identity"`
-	StoreContext  string            `json:"store_context"`
-	CLI           string            `json:"cli"`
-	CLISHA256     string            `json:"cli_sha256"`
-	Repo          string            `json:"repo"`
-	GitCommonDir  string            `json:"git_common_dir"`
-	MainBranch    string            `json:"main_branch"`
-	Selection     MainRoleSelection `json:"selection"`
-	Instructions  string            `json:"instructions"`
-	SHA256        string            `json:"sha256"`
+	Protocol       string            `json:"protocol"`
+	Key            string            `json:"key"`
+	ProjectID      string            `json:"project_id"`
+	SetupID        string            `json:"setup_id"`
+	SessionID      string            `json:"session_id"`
+	StateDir       string            `json:"state_dir"`
+	QueueIdentity  string            `json:"queue_identity"`
+	StoreContext   string            `json:"store_context"`
+	CLI            string            `json:"cli"`
+	CLISHA256      string            `json:"cli_sha256"`
+	Repo           string            `json:"repo"`
+	GitCommonDir   string            `json:"git_common_dir"`
+	MainBranch     string            `json:"main_branch"`
+	Selection      MainRoleSelection `json:"selection"`
+	Instructions   string            `json:"instructions"`
+	SHA256         string            `json:"sha256"`
+	PreviousSHA256 string            `json:"previous_sha256,omitempty"`
 }
 
 func parseMainRole(raw string) (MainRoleSelection, error) {
@@ -102,8 +103,10 @@ Use the exact state_dir, CLI image/path, project_id, canonical repo/common-dir/m
 
 Preserve dirty user work. Canonical primary MAIN must still own main_branch with the same common-dir. Never switch/reset/stash, make an alternate Main checkout, or adopt by title/branch/latest. Anchor advancement requires explicit project main refresh preparation/preview/CAS, not an implicit rebind.
 
+Installed, advertised and permitted capabilities are different. Before declaring a requested skill or agent unavailable, inspect the effective read-only /api/skill and /api/agent catalogs at this exact repo Location on the existing service. A skill with autoinvoke=false is hidden from the advertised list but can be loaded explicitly by its registered ID when the user requests it. An architecture agent is not necessarily an architecture skill. If inspection is unavailable, report discovery as unverified, not missing. Never install, change shared configuration, substitute the selected role profiles, or invoke hidden/untracked subagents to work around a capability boundary. OCQ trusts configured cooperative foreground tools, native catalog search and awaited Code Mode/MCP RPC completion under its versioned harness lifecycle contract; it does not maintain a second ordinary-tool permission list. Concrete background shell/job/task/PTY/delegation resources require independent terminal observation, not merely an outer tool return. Static review still permits only read/glob/grep.
+
 Keep ONE user goal alive through the following ordinary agent loop. Use only OCQ admission for bounded implementation/review assignments; no hidden direct subagent or unqueued execution. Choose and retain exact new request IDs; do not reuse unknown attempts.
-1. Write the bounded implementation brief privately. Use project work prepare PROJECT --request-id ID --binding-revision REV --profile-file FILE --brief-file FILE. Preview with project work preview PROJECT ID, review exact retained bytes/scope, then project work confirm PROJECT ID --preview-sha256 DIGEST only within the user's goal authority.
+1. Write the bounded implementation brief privately. Use project work prepare PROJECT --request-id ID --binding-revision REV --profile-file FILE --brief-file FILE. If the goal requires a feature/milestone base, supply --base-ref REF_OR_COMMIT; preparation resolves it once in this repo and freezes the full commit in the retained payload and brief. Omission uses the Main binding anchor. Main remains on main_branch; never move/rebind it to select a worker base. Review the requested ref AND frozen worker commit in project work preview PROJECT ID, then project work confirm PROJECT ID --preview-sha256 DIGEST only within the user's goal authority. Reviewers inherit the exact captured implementation base, not a newly resolved branch tip.
 2. Await project work wait PROJECT ID --timeout-seconds 20. pending is NOT completion: renew this same read-only wait in the ordinary tool loop without requiring another human prompt. It installs the existing observation lease with watch-before-check and expiry revalidation; no dispatch/API mutation. attention/unknown ownership/permission/form/blocker requires human attention, never approval replies, retry, adoption or capacity release.
 3. Only terminal execution proof permits project work capture-prepare PROJECT --request-id CAPTURE --binding-revision REV --implementation ID; preview/confirm its exact retained machine snapshot. Admission, idle, shell/client exit, prose success or snapshot existence alone is not completion proof.
 4. Prepare a fresh independent review against that EXACT confirmed capture using project work review-prepare PROJECT --request-id REVIEW --binding-revision REV --capture CAPTURE --profile-file REVIEW_FILE --criteria-file FILE --rules-file FILE. Criteria/rules must concern the supplied inline diff/contents, not queue storage, capture authenticity/digest verification or live canonical state; those are machine checks. The reviewer checkout is pristine baseline/context, not the candidate filesystem. Do not add a report schema: Work supplies the canonical strict JSON contract (verdict approved|needs_revision|unable_to_review, findings array, nonempty limitations string). Use the supported bounded static-review policy; no worker profile/ownership/resource-fence relaxation. Preview/confirm, then renew the exact review wait until terminal proof or genuine attention.
@@ -111,37 +114,69 @@ Keep ONE user goal alive through the following ordinary agent loop. Use only OCQ
 6. Deliver the usable handoff under this same user goal. Distinguish execution proof, tests/validation, reviewer verdict, snapshot drift and readiness. integration_authorized remains false: approved/ready_for_integrator_review is NOT permission to merge/integrate. Act on MAIN only under separate standing human integration authority, preserving its preconditions and dirty work. No commit/push/deploy merely because a review approved.
 
 Native human permissions remain human-only. Never auto-answer permissions/forms, bypass blocks, retry an ambiguous POST, release unknown capacity, or treat auxiliary/system/synthetic events as causal execution proof. This instruction entry is ordinary disclosed context, not a fake producer/system event or permission override. Human Main turns/profile changes are legitimate; bounded workers still require one exact prompt, dedicated fresh session/worktree, stable full transcript, explicit terminal outcome, no active loop/pending inputs/resources and conservative unknown ownership.
+
+Private orchestration briefs, profiles and criteria are control-plane inputs, not product edits. Author them only through tools permitted by your CURRENT effective agent and policy. This contract grants no write permission and does not override a Coordinator no-write boundary. Never use shell, another interpreter or an admission API to evade a denied write. Report a real policy conflict rather than asking the user to supply an internal file path as though it were a business requirement.
+Before reporting an earlier blocked handoff as current, read the exact goal-linked capture, review-result and project inbox non-consumingly. A later recorded result may resolve an earlier preparation failure; retain both histories. Review approval does not authorize integration or a different business scope.
 `
 
 func mainRolePath(rec mainRecord) string {
 	return "/api/experimental/session/" + url.PathEscape(rec.SessionID) + "/instructions/entries"
 }
 
+func mainRoleEntryKey(role MainRoleContract) string {
+	return role.Key
+}
+
 func observeMainRole(rec mainRecord) (bool, bool, error) {
 	if rec.Role.Protocol != MainRoleProtocol || rec.Role.SHA256 != mainRoleDigest(rec.Role) {
 		return false, false, errors.New("retained Main role missing or corrupt; explicit setup required")
 	}
+	seen, present, err := readMainRoleEntry(rec)
+	if err != nil || !present {
+		return false, present, err
+	}
+	if !jsonEqual(seen, rec.Role) {
+		return false, true, errors.New("Main role entry changed; explicit versioned refresh required, never implicit overwrite")
+	}
+	return true, true, nil
+}
+
+// There is one active API context key. Immutable previous values live in OCQ's
+// intent journal, not as competing active instruction sources in OpenCode.
+func readMainRoleEntry(rec mainRecord) (MainRoleContract, bool, error) {
+	var seen MainRoleContract
 	b, err := nativeCall(rec.Repo, rec.Server, "get", mainRolePath(rec), nil)
 	if err != nil {
-		return false, false, err
+		return seen, false, err
 	}
 	var entries []struct {
 		Key   string          `json:"key"`
 		Value json.RawMessage `json:"value"`
 	}
 	if err = decodeData(b, &entries); err != nil {
-		return false, false, err
+		return seen, false, err
 	}
+	present := false
 	for _, entry := range entries {
-		if entry.Key == rec.Role.Key {
-			var seen MainRoleContract
-			if _, err := decodeStrictJSONObject(entry.Value, WorkResponseBytes, &seen); err != nil || !jsonEqual(seen, rec.Role) {
-				return false, true, errors.New("Main role entry changed; never overwrite")
+		if entry.Key == mainRoleEntryKey(rec.Role) {
+			if present {
+				return seen, true, errors.New("duplicate active Main instruction key")
 			}
-			return true, true, nil
+			present = true
+			if _, err := decodeStrictJSONObject(entry.Value, WorkResponseBytes, &seen); err != nil ||
+				seen.Protocol != MainRoleProtocol || seen.Key != mainRoleKey || seen.SHA256 != mainRoleDigest(seen) {
+				return seen, true, errors.New("active Main instruction entry corrupt")
+			}
+		} else {
+			var header struct {
+				Protocol string `json:"protocol"`
+			}
+			if json.Unmarshal(entry.Value, &header) == nil && header.Protocol == MainRoleProtocol {
+				return seen, present, errors.New("competing active Main contracts; explicit operator review required, no automatic removal")
+			}
 		}
 	}
-	return false, false, nil
+	return seen, present, nil
 }
 
 func ensureMainRole(j *composeJournal, rec mainRecord, id string, claim workClaim) error {
@@ -166,7 +201,7 @@ func ensureMainRole(j *composeJournal, rec mainRecord, id string, claim workClai
 	if !fresh {
 		return errors.New("Main role attempt unknown; exact GET recovery only, never repeat PUT")
 	}
-	_, putErr := nativeCall(rec.Repo, rec.Server, "put", mainRolePath(rec)+"/"+url.PathEscape(rec.Role.Key), map[string]any{"value": rec.Role})
+	_, putErr := nativeCall(rec.Repo, rec.Server, "put", mainRolePath(rec)+"/"+url.PathEscape(mainRoleEntryKey(rec.Role)), map[string]any{"value": rec.Role})
 	matches, _, readErr := observeMainRole(rec)
 	if matches && readErr == nil {
 		return retainMainRoleObservation(j, rec, id)

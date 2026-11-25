@@ -21,14 +21,15 @@ const workIntentLimit = 128
 const workFileLimit = 2048
 
 type workRecord struct {
-	Protocol string         `json:"protocol"`
-	Input    string         `json:"input_json"`
-	Digest   string         `json:"input_sha256"`
-	Binding  ProjectBinding `json:"binding"`
-	Queue    string         `json:"queue_path"`
-	Device   string         `json:"queue_device"`
-	Inode    string         `json:"queue_inode"`
-	Created  string         `json:"created_at"`
+	Protocol   string         `json:"protocol"`
+	Input      string         `json:"input_json"`
+	Digest     string         `json:"input_sha256"`
+	Binding    ProjectBinding `json:"binding"`
+	Queue      string         `json:"queue_path"`
+	Device     string         `json:"queue_device"`
+	Inode      string         `json:"queue_inode"`
+	Created    string         `json:"created_at"`
+	BaseCommit string         `json:"base_commit,omitempty"`
 }
 
 type workPayload struct {
@@ -77,7 +78,10 @@ func decodeWork(raw []byte) (WorkPrepareRequest, error) {
 	want := WorkPrepareRequest{Protocol: in.Protocol, ProjectID: in.ProjectID, RequestID: in.RequestID, Kind: in.Kind, BindingRevision: in.BindingRevision}
 	switch in.Kind {
 	case "implementation":
-		want.Profile, want.Brief = in.Profile, in.Brief
+		want.Profile, want.Brief, want.BaseRef = in.Profile, in.Brief, in.BaseRef
+		if len(in.BaseRef) > 1024 || strings.ContainsAny(in.BaseRef, "\r\n\x00") {
+			return in, errors.New("worker base ref must be a bounded single Git ref or commit")
+		}
 		if strings.TrimSpace(in.Brief) == "" || len(in.Brief) > 16<<10 {
 			return in, errors.New("plain brief must be nonempty and <=16 KiB")
 		}
@@ -156,6 +160,9 @@ func workLoad(r *Reader, dir *os.File, project, id string) (workRecord, workPayl
 	if err != nil || in.ProjectID != project || in.RequestID != id || rec.Protocol != WorkProtocol || rec.Digest != sha256Hex([]byte(rec.Input)) || rec.Binding.ProjectID != project || strconv.Itoa(rec.Binding.Revision) != in.BindingRevision || rec.Queue != r.store.dir {
 		return rec, payload, in, errors.New("work intent identity/content mismatch")
 	}
+	if in.BaseRef != "" && !isValidHexLen(rec.BaseCommit, 40) || in.BaseRef == "" && rec.BaseCommit != "" {
+		return rec, payload, in, errors.New("frozen worker base unavailable")
+	}
 	info, err := os.Lstat(filepath.Join(r.store.dir, "queue.db"))
 	if err != nil {
 		return rec, payload, in, err
@@ -227,6 +234,16 @@ func workInspect(r *Reader, dir *os.File, project, id string) (out WorkStatus, r
 		return out, err
 	}
 	out.Kind, out.IntentSHA256, out.CreatedAt, out.BindingRevision, out.ParentRequestID = in.Kind, rec.Digest, rec.Created, in.BindingRevision, in.ParentRequestID
+	if raw, e := workRead(dir, id+".task.json"); e == nil {
+		var saved TaskGoal
+		if _, e = decodeStrictJSONObject(raw, 4096, &saved); e != nil || in.Kind != "implementation" ||
+			in.BaseRef != rec.Binding.CommitAnchor || saved != standaloneTaskGoal(rec, in) {
+			return out, errors.New("standalone task identity mismatch")
+		}
+		out.TaskGoal = &saved
+	} else if !errors.Is(e, syscall.ENOENT) {
+		return out, e
+	}
 	out.State = "preparing"
 	if p.Payload == "" {
 		return out, nil
@@ -252,6 +269,9 @@ func workInspect(r *Reader, dir *os.File, project, id string) (out WorkStatus, r
 			out.State = "recorded_observed"
 			out.Receipt = &receipt
 			out.Job, err = workJob(r, receipt.JobID)
+			if err == nil && out.Job.SessionID != "" {
+				out.Job.SessionState = sessionDeletionState(dir, project, out.Job.SessionID, id)
+			}
 			return out, err
 		}
 		if !faults.IsCode(e, faults.CodeNotFound) {
@@ -259,7 +279,7 @@ func workInspect(r *Reader, dir *os.File, project, id string) (out WorkStatus, r
 		}
 	} else {
 		var payload ResultPublicationPayload
-		if _, e := decodeStrictJSONObject([]byte(p.Payload), composeLimit, &payload); e != nil {
+		if _, e := decodeStrictJSONObject([]byte(p.Payload), projectPayloadBytes, &payload); e != nil {
 			return out, e
 		}
 		a, e := publicationReceipt(r, payload)
@@ -448,6 +468,21 @@ func workBinding(r *Reader, project string) (ProjectBinding, error) {
 // Persist caller-known identity before capture reads. Any interrupted preparation
 // stays preparing: same-ID recovery is observational, never a recapture retry.
 func PrepareProjectWork(dir string, raw []byte) (WorkStatus, error) {
+	return prepareProjectWork(dir, raw, nil)
+}
+
+// PrepareStandaloneTask uses the normal work intent and immutable queue receipt.
+// Only the call that created the complete intent may proceed to admission.
+func PrepareStandaloneTask(dir string, raw []byte) (out WorkStatus, fresh bool, err error) {
+	out, err = prepareProjectWork(dir, raw, &fresh)
+	return
+}
+
+func standaloneTaskGoal(rec workRecord, in WorkPrepareRequest) TaskGoal {
+	return TaskGoal{IntentSHA256: rec.Digest, Title: goalTitle(in.Brief, ""), BaseCommit: rec.BaseCommit, GoalSHA256: sha256Hex([]byte(in.Brief))}
+}
+
+func prepareProjectWork(dir string, raw []byte, standalone *bool) (WorkStatus, error) {
 	in, err := decodeWork(raw)
 	if err != nil {
 		return WorkStatus{}, err
@@ -470,7 +505,11 @@ func PrepareProjectWork(dir string, raw []byte) (WorkStatus, error) {
 		if json.Unmarshal(b, &rec) != nil || rec.Input != string(raw) {
 			return WorkStatus{}, errors.New("request ID already binds different bytes")
 		}
-		return workInspect(r, j.dir, in.ProjectID, in.RequestID)
+		status, err := workInspect(r, j.dir, in.ProjectID, in.RequestID)
+		if err == nil && standalone != nil && status.TaskGoal == nil {
+			return status, errors.New("request has no retained standalone identity")
+		}
+		return status, err
 	} else if !errors.Is(e, syscall.ENOENT) {
 		return WorkStatus{}, e
 	}
@@ -497,28 +536,50 @@ func PrepareProjectWork(dir string, raw []byte) (WorkStatus, error) {
 	if strconv.Itoa(binding.Revision) != in.BindingRevision {
 		return WorkStatus{}, errors.New("exact current binding revision required")
 	}
+	if standalone != nil && (in.Kind != "implementation" || in.BaseRef != binding.CommitAnchor) {
+		return WorkStatus{}, errors.New("standalone task requires the exact saved project base")
+	}
 	dev, ino, err := j.queueIdentity()
 	if err != nil {
 		return WorkStatus{}, err
 	}
-	rec := workRecord{WorkProtocol, string(raw), sha256Hex(raw), binding, r.store.dir, dev, ino, now()}
+	baseCommit := ""
+	if in.BaseRef != "" {
+		baseCommit, err = gitRead(binding.RepoRoot, "rev-parse", "--verify", "--end-of-options", in.BaseRef+"^{commit}")
+		if err != nil || !isValidHexLen(baseCommit, 40) {
+			return WorkStatus{}, errors.New("worker base ref must resolve to a local commit in the bound repository")
+		}
+	}
+	rec := workRecord{Protocol: WorkProtocol, Input: string(raw), Digest: sha256Hex(raw), Binding: binding, Queue: r.store.dir, Device: dev, Inode: ino, Created: now(), BaseCommit: baseCommit}
 	if err = j.create(in.RequestID+".started.json", rec); err != nil {
 		return WorkStatus{}, err
 	}
-	payload, err := buildWorkPayload(r, j.dir, in, binding)
+	if standalone != nil {
+		if err = j.create(in.RequestID+".task.json", standaloneTaskGoal(rec, in)); err != nil {
+			return WorkStatus{}, err
+		}
+	}
+	payload, err := buildWorkPayload(r, j.dir, in, binding, baseCommit)
 	if err != nil {
 		return WorkStatus{}, err
 	}
-	if len(payload) > composeLimit {
+	if len(payload) > projectPayloadBytes {
 		return WorkStatus{}, errors.New("work payload exceeds bound")
 	}
-	if err = j.create(in.RequestID+".intent.json", workPayload{string(payload), sha256Hex(payload)}); err != nil {
+	record := workPayload{string(payload), sha256Hex(payload)}
+	if err = workOutputBound(record); err != nil {
 		return WorkStatus{}, err
+	}
+	if err = j.create(in.RequestID+".intent.json", record); err != nil {
+		return WorkStatus{}, err
+	}
+	if standalone != nil {
+		*standalone = true
 	}
 	return workInspect(r, j.dir, in.ProjectID, in.RequestID)
 }
 
-func buildWorkPayload(r *Reader, dir *os.File, in WorkPrepareRequest, b ProjectBinding) ([]byte, error) {
+func buildWorkPayload(r *Reader, dir *os.File, in WorkPrepareRequest, b ProjectBinding, baseCommit string) ([]byte, error) {
 	if in.Kind == "implementation" {
 		p, err := workProfile(in.Profile)
 		if err != nil {
@@ -529,7 +590,15 @@ func buildWorkPayload(r *Reader, dir *os.File, in WorkPrepareRequest, b ProjectB
 		p.BindingRevision = b.Revision
 		p.Repo = b.RepoRoot
 		p.Base = b.CommitAnchor
-		return r.BuildProjectImplementationDraft(ProjectImplementationDraft{ProjectJobDraftProfile: p, Prompt: in.Brief, Goal: in.Brief, Scope: []string{"The supplied brief within the bound repository"}, Exclusions: []string{"commit, merge, push, deploy, shared service/config changes"}, AcceptanceCriteria: []string{"Complete the supplied brief and report exact checks and gaps"}, AllowedActions: []string{"read", "edit", "write", "patch", "glob", "grep", "shell"}, ContextReferences: []string{}})
+		references := []string{}
+		if in.BaseRef != "" {
+			if !isValidHexLen(baseCommit, 40) {
+				return nil, errors.New("explicit worker base must be frozen before payload construction")
+			}
+			p.Base = baseCommit
+			references = append(references, "Worker base ref: "+in.BaseRef+"; resolved at preparation: "+baseCommit)
+		}
+		return r.BuildProjectImplementationDraft(ProjectImplementationDraft{ProjectJobDraftProfile: p, Prompt: in.Brief, Goal: in.Brief, Scope: []string{"The supplied brief within the bound repository"}, Exclusions: []string{"commit, merge, push, deploy, shared service/config changes"}, AcceptanceCriteria: []string{"Complete the supplied brief and report exact checks and gaps"}, AllowedActions: []string{"read", "edit", "write", "patch", "glob", "grep", "shell"}, ContextReferences: references})
 	}
 	parent, err := workInspect(r, dir, in.ProjectID, in.ParentRequestID)
 	if err != nil || parent.State != "recorded_observed" || parent.BindingRevision != in.BindingRevision {
@@ -570,7 +639,15 @@ func buildWorkPayload(r *Reader, dir *os.File, in WorkPrepareRequest, b ProjectB
 		p.ProjectID = in.ProjectID
 		p.BindingRevision = b.Revision
 		p.Repo = b.RepoRoot
-		p.Base = b.CommitAnchor
+		manifestBytes, err := r.store.projectManifestBytes(in.ProjectID, parent.Result.ManifestDigest)
+		if err != nil {
+			return nil, err
+		}
+		target, err := parseManifestBytes(manifestBytes, "result", in.ProjectID)
+		if err != nil || target.Digest != parent.Result.ManifestDigest {
+			return nil, errors.New("exact captured implementation base unavailable")
+		}
+		p.Base = target.Result.Base
 		rules := in.Rules + "\nReturn your final report as exactly one JSON object, without fences or surrounding prose: {\"verdict\":\"approved|needs_revision|unable_to_review\",\"findings\":[{\"location\":\"path:line\",\"severity\":\"critical|high|medium|low|info\",\"message\":\"finding\"}],\"limitations\":\"what was not verified\"}. Findings may be empty. Limitations must be nonempty. Do not claim tests ran. This is static review, not integration authorization."
 		return r.BuildProjectReviewDraft(ProjectReviewDraft{ProjectJobDraftProfile: p, TargetAssociationID: parent.Result.AssociationID, TargetJobID: parent.Result.JobID, TargetResultDigest: parent.Result.ManifestDigest, Criteria: in.Criteria, Rules: rules})
 	case "review_result":

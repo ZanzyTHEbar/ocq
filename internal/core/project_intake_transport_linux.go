@@ -77,7 +77,7 @@ func receiveLocalProjectIntake(stateDir, kind, launch string, textFrame bool) (P
 				if b[0] == '\n' {
 					break
 				}
-				if b[0] < '0' || b[0] > '9' || digits.Len() >= 6 {
+				if b[0] < '0' || b[0] > '9' || digits.Len() >= 7 {
 					return faults.New(faults.CodeValidationFailed, "invalid intake frame size")
 				}
 				digits.WriteByte(b[0])
@@ -94,7 +94,7 @@ func receiveLocalProjectIntake(stateDir, kind, launch string, textFrame bool) (P
 			}
 			size = binary.BigEndian.Uint32(header[:])
 		}
-		if size == 0 || size > composeLimit {
+		if size == 0 || int(size) > intakeRequestLimit(kind) {
 			return faults.New(faults.CodeValidationFailed, "invalid intake frame size")
 		}
 		raw := make([]byte, int(size))

@@ -20,7 +20,7 @@ capture-receipt
 queue-jobs queue-job queue-log notifications notification
 dispatcher-context dispatcher-status dispatcher-read agent-reconcile-status agent-handoff-status agent-handoff-verify
 work-list work-status work-recover work-output work-handoff work-preview
-main-list main-status main-recover main-preview client-list client-status
+main-list main-status main-recover main-preview client-list client-status session-delete-check-v1
 compose-context compose-status intake-status notification-ack-status queued-cancel-status
 command-resolve-status command-submit-context command-submit-status agent-submit-context agent-submit-status
 result-publish-context result-publish-list result-publish-status capture-context capture-list capture-status`)
@@ -38,7 +38,7 @@ func pushAction(name string) bool {
 	if strings.HasPrefix(name, "dispatcher-") && modActions()[name] != "" && name != "dispatcher-helper" {
 		return true
 	}
-	if name == "main-author-v1" || name == "work-confirm" || name == "main-start" || name == "client-prepare" || name == "client-attention-prepare-v1" || name == "client-open" || name == "client-verify" || name == "mail-ack" {
+	if name == taskGoalAction || name == "main-author-v1" || name == "work-confirm" || name == "main-start" || name == "client-prepare" || name == "client-attention-prepare-v1" || name == "client-open" || name == "client-verify" || name == "mail-ack" || name == "session-delete-v1" {
 		return true
 	}
 	for _, family := range []string{"compose-", "intake-", "notification-ack-", "queued-cancel-", "command-resolve-", "agent-reconcile-", "command-submit-", "agent-submit-", "result-publish-", "capture-"} {
@@ -76,6 +76,14 @@ func (e *pushEndpoint) command(ctx context.Context, connection string, request j
 		return reply
 	}
 	name := input.Args[0]
+	if name == taskGoalAction && (!e.runtime || input.Context == nil) {
+		return reply
+	}
+	projectAction := pushContains([]string{taskGoalAction, "main-author-v1", "main-start", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "work-confirm"}, name)
+	sessionDelete := name == "session-delete-v1" || name == "session-delete-check-v1"
+	if sessionDelete && (!e.runtime || input.Context == nil) {
+		return reply
+	}
 	if !e.runtime && input.Context != nil {
 		return reply
 	}
@@ -88,7 +96,7 @@ func (e *pushEndpoint) command(ctx context.Context, connection string, request j
 	} else if e.runtime && (pushAction(name) || name == "main-preview" || name == "work-preview" || name == "hc-binding" || name == "workflow-context") {
 		return reply
 	}
-	if e.runtime && pushAction(name) && !pushContains([]string{"main-author-v1", "main-start", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "work-confirm"}, name) {
+	if e.runtime && pushAction(name) && !sessionDelete && !projectAction {
 		return reply
 	}
 	if strings.HasPrefix(name, "dispatcher-") && name != "dispatcher-read" && name != "dispatcher-context" && name != "dispatcher-status" && e.hc == nil {
@@ -127,23 +135,29 @@ func (e *pushEndpoint) command(ctx context.Context, connection string, request j
 	if err = cmd.ParseFlags(input.Args[1:]); err != nil {
 		return reply
 	}
-	if e.runtime && input.Context != nil && pushContains([]string{"main-author-v1", "main-preview", "main-start", "main-list", "main-status", "main-recover", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "client-list", "client-status", "work-confirm", "work-list", "work-status", "work-output", "work-preview", "work-handoff", "work-recover"}, name) {
+	if sessionDelete {
+		a := cmd.Flags().Args()
+		peer, _ := ctx.Value(runtimePeerKey{}).(string)
+		if len(a) < 9 || a[0] != e.space || a[2] != input.Context.Project || a[4] != peer || a[5] != e.folder {
+			return reply
+		}
+	}
+	if e.runtime && input.Context != nil && (projectAction || pushContains([]string{"main-preview", "main-list", "main-status", "main-recover", "client-list", "client-status", "work-list", "work-status", "work-output", "work-preview", "work-handoff", "work-recover"}, name)) {
 		args := cmd.Flags().Args()
 		if len(args) < 3 || args[0] != e.space || args[2] != input.Context.Project {
 			return reply
 		}
-		if pushContains([]string{"main-author-v1", "main-preview", "main-start", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "work-confirm"}, name) {
+		if projectAction || name == "main-preview" {
 			peer, _ := ctx.Value(runtimePeerKey{}).(string)
 			if len(args) < 5 || args[4] != peer {
 				return reply
 			}
 		}
 	}
-	if e.workflow != nil && e.workflow.peer() != "local" && pushAction(name) &&
-		!pushContains([]string{"main-author-v1", "main-start", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "work-confirm"}, name) {
+	if e.workflow != nil && e.workflow.peer() != "local" && pushAction(name) && !sessionDelete && !projectAction {
 		return reply // Selected-machine workflow is not legacy remote execution.
 	}
-	if e.workflow != nil && pushContains([]string{"main-author-v1", "main-preview", "main-start", "client-prepare", "client-attention-prepare-v1", "client-open", "client-verify", "work-confirm"}, name) {
+	if e.workflow != nil && (projectAction || name == "main-preview") {
 		args := cmd.Flags().Args()
 		if len(args) < 5 || args[4] != e.workflow.peer() {
 			return reply // Compare the existing peer claim; never rewrite it.
@@ -166,7 +180,7 @@ func (e *pushEndpoint) command(ctx context.Context, connection string, request j
 		}
 	}
 	switch name {
-	case "main-author-v1":
+	case "main-author-v1", taskGoalAction:
 		if input.Payload == nil || len(*input.Payload) > 20<<10 {
 			return reply
 		}

@@ -6,9 +6,11 @@
   Follow docs/architecture.md, docs/reliability-contract.md, and
   docs/command-core.md and docs/agent-integration.md. Provisioning/API observation
   and cooperative tool completion exist. One fresh dedicated session/worktree, one exact
-  consumed user prompt, stable full transcript, explicit terminal outcome, no
+  consumed original prompt, stable full transcript, explicit terminal outcome, no
   active loop, pending input/permissions/forms or running owned resources are
-  required. Known tool states must be completed/error; shell tool completion is
+  required. Project worker follow-up text in the exact native conversation is
+  admitted context, not producer proof; standalone jobs remain single-input and
+  first-terminal evidence stays immutable. Known tool states must be completed/error; shell tool completion is
   not background exit. Check location-scoped shell lists and exact known shell
   IDs before/final observation; missing/unsupported resources hold capacity.
   Product never answers permissions. System/synthetic
@@ -77,7 +79,7 @@
   (`source=machine_capture`, `verification=machine_verified_snapshot`, keeping
   test `validation=not_run`), read-only `verify-worktree` live worktree-to-snapshot
   drift detection (`matches_snapshot` vs `modified_since_snapshot`), and the
-  `<=16 KiB` deterministic inline static-review gate (`read`/`glob`/`grep` plus
+  `<=256 KiB` deterministic inline static-review gate (`read`/`glob`/`grep` plus
   catch-all `deny *`). The Herdr native mod uses a short-lived
   Go bridge for stored views, explicit inbox acknowledgements, and local-only
   `lane.blocked` compose via prepare, retained preview, and confirmation; supported
@@ -107,8 +109,8 @@
 - Do not whitelist synthetic input by text, disable global injections, or switch
   agents as a workaround. Keep tool support to the documented cooperative native
   tools/runtime-tracked shells. PTY/delegation/plugins/escaped daemons and resource
-  loss/restart recovery are not broadly validated. Do not deploy.
-- Project reviews verify the exact agent and supported OpenCode policy version
+  loss/restart recovery are not broadly validated. 
+  - Project reviews verify the exact agent and supported OpenCode policy version
   at intake and again in the owned checkout before prompting. Preserve the
   ordered session rules, cooperative boundaries, and conservative uncertainty;
   do not claim filesystem sandboxing or silently substitute agents.

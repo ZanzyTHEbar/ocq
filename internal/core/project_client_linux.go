@@ -44,6 +44,9 @@ func clientTarget(r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer
 		if status.Receipt == nil || status.Job == nil || status.Kind != "implementation" && status.Kind != "review" {
 			return p, errors.New("exact admitted implementation/review worker required")
 		}
+		if status.Job.SessionState != "" {
+			return p, errors.New("worker deletion recorded or uncertain; no client is opened")
+		}
 		job, e := r.store.get(status.Job.JobID)
 		if e != nil {
 			return p, e

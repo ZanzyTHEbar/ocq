@@ -23,6 +23,9 @@ const mainSelectionPrefix = "ocq-main-v1 setup: "
 
 func mainFile(id, suffix string) string { return ".main-" + id + "." + suffix + ".json" }
 
+func mainCreatesSession(mode string) bool { return mode == "create" || mode == "replace" }
+func mainSetupMode(mode string) bool     { return mainCreatesSession(mode) || mode == "adopt" }
+
 func nativeJournalRoom(j *os.File, additional int) error {
 	if _, err := j.Seek(0, 0); err != nil {
 		return err
@@ -143,8 +146,11 @@ func decodeMain(raw []byte) (MainPrepareRequest, error) {
 	if in.Protocol != MainProtocol || !isValidProjectID(in.ProjectID) || !workID(in.OperationID) || !utf8.Valid(raw) || len(in.Prompt) > 16<<10 {
 		return in, errors.New("invalid bounded Main operation")
 	}
+	if in.Mode != "role-refresh" && in.ExpectedRoleSHA256 != "" {
+		return in, errors.New("expected role digest is only valid for explicit role-refresh")
+	}
 	switch in.Mode {
-	case "create", "adopt":
+	case "create", "adopt", "replace":
 		if in.Repo == "" || in.MainBranch == "" || in.Label == "" || in.Profile == "" || in.Role == "" {
 			return in, errors.New("initial Main setup requires explicit repo/branch/label/profile/role")
 		}
@@ -155,17 +161,20 @@ func decodeMain(raw []byte) (MainPrepareRequest, error) {
 			return in, err
 		}
 		rev, err := observationDecimal(in.ExpectedRevision)
-		if err != nil || in.Mode == "create" && rev != 0 || in.Mode == "adopt" && rev < 1 {
+		if err != nil || in.Mode == "create" && rev != 0 || in.Mode != "create" && rev < 1 || in.Prompt != "" {
 			return in, errors.New("explicit Main registration CAS revision required")
 		}
-	case "refresh", "reopen", "send":
+	case "refresh", "reopen", "send", "role-refresh":
 		if in.Repo != "" || in.MainBranch != "" || in.Label != "" || in.Profile != "" || in.Role != "" {
 			return in, errors.New("reuse the SQL-selected Main setup; do not silently change its profile/checkout")
 		}
 		if in.Mode == "send" && strings.TrimSpace(in.Prompt) == "" || in.Mode != "send" && in.Prompt != "" {
 			return in, errors.New("only a distinct explicit send may carry a subsequent prompt")
 		}
-		if in.Mode == "refresh" {
+		if in.Mode == "role-refresh" && !isValidHexLen(in.ExpectedRoleSHA256, 64) {
+			return in, errors.New("operating contract refresh requires the exact previous role SHA256")
+		}
+		if in.Mode == "refresh" || in.Mode == "role-refresh" {
 			rev, e := observationDecimal(in.ExpectedRevision)
 			if e != nil || rev < 1 {
 				return in, errors.New("Main anchor refresh requires explicit CAS revision")
@@ -204,7 +213,7 @@ func mainLoad(r *Reader, j *os.File, project, id string) (mainRecord, MainPrepar
 	return rec, in, nil
 }
 
-func selectedMain(r *Reader, j *os.File, project string) (mainRecord, MainPrepareRequest, ProjectBinding, error) {
+func selectedMainRecord(r *Reader, j *os.File, project string) (mainRecord, MainPrepareRequest, ProjectBinding, error) {
 	binding, err := workBinding(r, project)
 	if err != nil {
 		return mainRecord{}, MainPrepareRequest{}, binding, err
@@ -236,6 +245,35 @@ func selectedMain(r *Reader, j *os.File, project string) (mainRecord, MainPrepar
 	return rec, in, binding, err
 }
 
+func mainDeletionState(j *os.File, project string, rec mainRecord) string {
+	state := sessionDeletionState(j, project, rec.SessionID, "")
+	if state == "deleted" {
+		attempt, err := deletionRecord(j, rec.SessionID, "attempt")
+		if err != nil || attempt.Target.Setup != rec.SetupID || attempt.Target.Owner != nativeHash(rec.Metadata) ||
+			attempt.Target.Device != rec.Device || attempt.Target.Inode != rec.Inode {
+			return "uncertain"
+		}
+	}
+	return state
+}
+
+func selectedMain(r *Reader, j *os.File, project string) (mainRecord, MainPrepareRequest, ProjectBinding, error) {
+	rec, in, binding, err := selectedMainRecord(r, j, project)
+	if err != nil {
+		return rec, in, binding, err
+	}
+	if mainDeletionState(j, project, rec) != "" {
+		return rec, in, binding, errors.New("Main deletion recorded or uncertain; no current Main execution authority")
+	}
+	rec, err = selectedMainRole(r, j, project, rec)
+	return rec, in, binding, err
+}
+
+func retiredMain(r *Reader, j *os.File, project string, previous ProjectBinding) bool {
+	rec, _, binding, err := selectedMainRecord(r, j, project)
+	return err == nil && binding == previous && mainDeletionState(j, project, rec) == "deleted"
+}
+
 func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 	in, err := decodeMain(raw)
 	if err != nil {
@@ -263,7 +301,7 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 	} else if !errors.Is(e, syscall.ENOENT) {
 		return MainStatus{}, e
 	}
-	if in.Mode == "create" || in.Mode == "adopt" {
+	if mainSetupMode(in.Mode) {
 		profile, e := parseMainProfile(in.Profile)
 		if e != nil {
 			return MainStatus{}, e
@@ -313,7 +351,21 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 		if in.ExpectedRevision != "" && strconv.Itoa(binding.Revision) != in.ExpectedRevision {
 			return MainStatus{}, errors.New("Main binding CAS revision changed")
 		}
-		if in.Mode == "adopt" {
+		if in.Mode == "replace" {
+			if in.Repo != binding.RepoRoot || !retiredMain(r, j.dir, in.ProjectID, binding) {
+				return MainStatus{}, errors.New("replacement requires an acknowledged retired Main in the same checkout")
+			}
+			for _, entry := range entries {
+				oldID, found := strings.CutSuffix(strings.TrimPrefix(entry.Name(), ".main-"), ".intent.json")
+				if !found || !strings.HasPrefix(entry.Name(), ".main-") {
+					continue
+				}
+				_, old, err := mainLoad(r, j.dir, in.ProjectID, oldID)
+				if err != nil || old.Mode == "replace" && old.ExpectedRevision == in.ExpectedRevision {
+					return MainStatus{}, errors.New("exact retained Main replacement must be recovered, not repeated")
+				}
+			}
+		} else if in.Mode == "adopt" {
 			if in.Repo != binding.RepoRoot {
 				return MainStatus{}, errors.New("explicit adoption must use existing bound canonical repository")
 			}
@@ -325,6 +377,9 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 			rec.Repo, rec.Branch, rec.SetupID = setup.Repo, setup.Branch, setup.SetupID
 			rec.SessionID, rec.ProjectID, rec.Metadata, rec.OwnershipMode = setup.SessionID, setup.ProjectID, setup.Metadata, setup.OwnershipMode
 			rec.Role = setup.Role
+			if in.Mode == "role-refresh" && rec.Role.SHA256 != in.ExpectedRoleSHA256 {
+				return MainStatus{}, errors.New("Main operating contract CAS changed")
+			}
 		}
 	}
 	rec.Common, rec.Head, _, err = inspectCanonicalMain(rec.Repo, rec.Branch)
@@ -339,13 +394,28 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 	if err != nil {
 		return MainStatus{}, err
 	}
-	if in.Mode == "create" || in.Mode == "adopt" {
+	if mainSetupMode(in.Mode) {
 		profile, err = parseMainProfile(in.Profile)
 		if err != nil {
 			return MainStatus{}, err
 		}
 	}
-	if in.Mode == "create" {
+	if in.Mode == "role-refresh" {
+		previous := rec.Role
+		matches, _, e := observeMainRole(rec)
+		if e != nil || !matches {
+			return MainStatus{}, errors.Join(e, errors.New("exact previous operating contract must be present; never overwrite it"))
+		}
+		selection, _ := json.Marshal(previous.Selection)
+		rec.Role, err = prepareMainRole(r, rec, in.ProjectID, string(selection))
+		if err != nil {
+			return MainStatus{}, err
+		}
+		rec.Role.PreviousSHA256 = previous.SHA256
+		rec.Role.Instructions = "Explicit operating-contract successor to SHA256 " + previous.SHA256 + ". This value replaces the previous active context under " + mainRoleKey + " and supersedes its CLI and operating instructions. Immutable previous values remain in OCQ's journal, not as additional active contexts. It changes no agent, model, permissions, worker profiles, session, project binding, branch, anchor or user input. No prompt or continuation is sent.\n\n" + rec.Role.Instructions
+		rec.Role.SHA256 = mainRoleDigest(rec.Role)
+	}
+	if mainCreatesSession(in.Mode) {
 		rec.SessionID, err = randomID("ses_ocqmain_")
 		if err != nil {
 			return MainStatus{}, err
@@ -429,13 +499,13 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 		b, _ := json.Marshal(map[string]any{"agent": s["agent"], "model": s["model"], "permissions": s["permissions"], "metadata": s["metadata"], "location": s["location"], "id": s["id"]})
 		rec.SessionJSON = string(b)
 	}
-	if in.Mode == "create" || in.Mode == "adopt" {
+	if mainSetupMode(in.Mode) {
 		rec.Role, err = prepareMainRole(r, rec, in.ProjectID, in.Role)
 		if err != nil {
 			return MainStatus{}, err
 		}
 	}
-	if in.Mode == "create" || in.Mode == "adopt" || in.Mode == "refresh" {
+	if mainSetupMode(in.Mode) || in.Mode == "refresh" {
 		expected := binding.Revision
 		mode := "rebind"
 		if in.Mode == "create" {

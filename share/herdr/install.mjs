@@ -47,7 +47,15 @@ const paneIDs = ls => ls.spaces.flatMap(s => s.tabs.flatMap(t => t.terminals.map
 check(Number(process.versions.node.split(".")[0]) >= 18, "Node.js 18+ is required");
 check(["--plan", "--activate"].includes(mode), "Expected --plan or --activate");
 for (const p of [home, home + "/mods", home + "/layouts", home + "/data"]) owned(p, true);
-check(/^herdr-app 0\.1\.(14|15|16)$/.test(call("--version").trim()), "Unsupported Herdr version");
+const version = call("--version").trim();
+const image = version === "herdr-app 0.1.18"
+  ? "660a93c5b503619f9843de0ce54bda0e9050dd8a68ce0de4bb04af4df02b7b3d"
+  : null;
+const verifyImage = () => {
+  if (image) check(hash(read(app)) === image, "Herdr 0.1.18 executable differs from the validated image");
+};
+check(image || /^herdr-app 0\.1\.(14|15|16)$/.test(version), "Unsupported Herdr version");
+verifyImage();
 const before = api("status"), beforeLS = api("ls");
 check((before.overlays || []).every(o => o === "toast") && Object.keys(before.floats || {}).length === 0,
   "User overlay/float is open; preserve it and hold installation");
@@ -179,6 +187,7 @@ const layoutBytes = read(here + "/layouts/ocq-workspace.json");
 check(find(JSON.parse(layoutBytes), "ocq-panel")?.content?.mod === "ocq", "Invalid canonical layout");
 fs.writeFileSync(backup + "/canonical-layout.json", layoutBytes, { flag: "wx", mode: 0o600 }); sync(backup + "/canonical-layout.json");
 const current = api("status");
+verifyImage();
 check(JSON.stringify(navigation(current)) === JSON.stringify(navigation(before)), "User navigation changed; no retirement");
 check(JSON.stringify(fs.readdirSync(home + "/layouts").filter(n => n.endsWith(".json")).sort()) ===
   JSON.stringify([...layouts, ...retained].map(l => l.name).sort()), "Layout inventory changed; HOLD");

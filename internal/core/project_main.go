@@ -15,17 +15,18 @@ type MainProfile struct {
 
 // Main is a persistent human conversation, never a job or capacity owner.
 type MainPrepareRequest struct {
-	Protocol         string `json:"protocol"`
-	ProjectID        string `json:"project_id"`
-	OperationID      string `json:"operation_id"`
-	Mode             string `json:"mode"`
-	Repo             string `json:"repo,omitempty"`
-	MainBranch       string `json:"main_branch,omitempty"`
-	ExpectedRevision string `json:"expected_revision,omitempty"`
-	Label            string `json:"label,omitempty"`
-	Profile          string `json:"profile,omitempty"`
-	Prompt           string `json:"prompt,omitempty"`
-	Role             string `json:"role,omitempty"`
+	Protocol           string `json:"protocol"`
+	ProjectID          string `json:"project_id"`
+	OperationID        string `json:"operation_id"`
+	Mode               string `json:"mode"`
+	Repo               string `json:"repo,omitempty"`
+	MainBranch         string `json:"main_branch,omitempty"`
+	ExpectedRevision   string `json:"expected_revision,omitempty"`
+	Label              string `json:"label,omitempty"`
+	Profile            string `json:"profile,omitempty"`
+	Prompt             string `json:"prompt,omitempty"`
+	Role               string `json:"role,omitempty"`
+	ExpectedRoleSHA256 string `json:"expected_role_sha256,omitempty"`
 }
 
 type MainActionContext WorkActionContext
@@ -56,11 +57,12 @@ type MainStatus struct {
 }
 
 type MainList struct {
-	Protocol  string       `json:"protocol"`
-	ProjectID string       `json:"project_id"`
-	Items     []MainStatus `json:"items"`
-	Selected  *MainStatus  `json:"selected,omitempty"`
-	Goals     []GoalView   `json:"goals,omitempty"`
+	Protocol   string       `json:"protocol"`
+	ProjectID  string       `json:"project_id"`
+	Items      []MainStatus `json:"items"`
+	Selected   *MainStatus  `json:"selected,omitempty"`
+	Goals      []GoalView   `json:"goals,omitempty"`
+	Retirement string       `json:"retirement,omitempty"`
 }
 
 type MainPreview struct {

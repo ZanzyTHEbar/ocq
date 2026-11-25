@@ -45,7 +45,10 @@ func insertAgentOwnership(c *sql.Conn, id string) error {
 	if err != nil {
 		return err
 	}
-	return dbquery.New(c).InsertAgentOwnership(context.Background(), dbquery.InsertAgentOwnershipParams{JobID: id, SessionID: session, PromptID: prompt, Token: token})
+	if err := dbquery.New(c).InsertAgentOwnership(context.Background(), dbquery.InsertAgentOwnershipParams{JobID: id, SessionID: session, PromptID: prompt, Token: token}); err != nil {
+		return err
+	}
+	return insertLifecycleIntent(c, id, "admission", nil)
 }
 
 func (s *store) agentOwnership(id string) (*AgentOwnership, error) {
@@ -111,7 +114,20 @@ func (s *store) agentUnknown(id, reason string, blocked bool) error {
 		outcome = "blocked"
 	}
 	return s.write(func(c *sql.Conn) error {
-		return dbquery.New(c).MarkAgentUnknown(context.Background(), dbquery.MarkAgentUnknownParams{Outcome: outcome, Reason: reason, ID: id})
+		j, err := s.getFrom(c, id)
+		if err != nil {
+			return err
+		}
+		if j.State == "unknown" && j.Outcome == outcome && j.Reason == reason {
+			return nil
+		}
+		if j.State != "launching" && j.State != "running" && j.State != "unknown" && j.State != "finished" {
+			return nil
+		}
+		if err := dbquery.New(c).MarkAgentUnknown(context.Background(), dbquery.MarkAgentUnknownParams{Outcome: outcome, Reason: reason, ID: id}); err != nil {
+			return err
+		}
+		return observerBlockedMail(c, id, outcome, reason)
 	})
 }
 

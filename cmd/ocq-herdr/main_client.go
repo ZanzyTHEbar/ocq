@@ -272,13 +272,22 @@ func inspectNativeClient(parent context.Context, dir, project, digest string, c 
 	if err != nil {
 		return nativeClientView{}, err
 	}
-	s, err := core.VerifyProjectClient(dir, project, digest, c)
+	s, err := core.InspectProjectClient(dir, project, digest)
 	view := nativeClientView{Protocol: core.ClientProtocol, Status: s, TerminalState: "unobserved", CurrentRoute: "unverified"}
 	if err != nil {
 		return view, err
 	}
-	if s.Terminal == nil {
-		return view, nil
+	if s.Terminal == nil || s.State != "terminal_recorded" {
+		view.Status, err = core.VerifyProjectClient(dir, project, digest, c)
+		return view, err
+	}
+	// Closed historical viewers are receipt/resource evidence, not authority
+	// to run their old image again. Verify scope and exact HC identity first,
+	// without requiring obsolete launch binaries or an unchanged Main profile.
+	s, err = core.InspectProjectClientReceipt(dir, project, digest, c)
+	view.Status = s
+	if err != nil {
+		return view, err
 	}
 	conn, err := binding.connect(ctx)
 	if err != nil {
@@ -290,5 +299,9 @@ func inspectNativeClient(parent context.Context, dir, project, digest string, c 
 		return view, err
 	}
 	view.TerminalState = observed.State
-	return view, nil
+	if observed.State != "finished" {
+		// Live viewers still require the full current launch/target/image fence.
+		view.Status, err = core.VerifyProjectClient(dir, project, digest, c)
+	}
+	return view, err
 }

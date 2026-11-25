@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,7 +27,7 @@ func ownershipMetadata(j Job) any {
 
 func validateSession(j Job, info sessionInfo) error {
 	r := j.agentRequest
-	if info.ID != j.Agent.SessionID || info.ParentID != "" || info.Location.Directory != j.Agent.Worktree || info.Agent != r.Agent || info.Model != r.Model || !jsonEqual(info.Metadata, ownershipMetadata(j)) || !reflect.DeepEqual(info.Permissions, r.Permissions) || !jsonEqual(info.Permissions, r.Permissions) || info.ProjectID == "" {
+	if info.ID != j.Agent.SessionID || info.ParentID != "" || info.Location.Directory != j.Agent.Worktree || info.Agent != r.Agent || !sameAgentModel(info.Model, r.Model) || !jsonEqual(info.Metadata, ownershipMetadata(j)) || !reflect.DeepEqual(info.Permissions, r.Permissions) || !jsonEqual(info.Permissions, r.Permissions) || info.ProjectID == "" {
 		return diagnostic(faults.CodeRuntimeFailed, "exact session/location/agent/model/permissions/ownership metadata mismatch")
 	}
 	if j.Agent.ProjectID != "" && info.ProjectID != j.Agent.ProjectID {
@@ -36,12 +37,34 @@ func validateSession(j Job, info sessionInfo) error {
 }
 
 func (s *store) launchAgent(j Job) error {
+	policy, err := s.lifecycleIntent(j.ID)
+	if errors.Is(err, sql.ErrNoRows) && j.State == "queued" && j.Agent != nil && j.Agent.Phase == "queued" {
+		// A queued legacy receipt has not executed under an older observer.
+		// Record today's admission contract before its first external intent;
+		// do not strand unstarted work behind a policy-adoption ceremony.
+		err = s.write(func(c *sql.Conn) error {
+			return insertLifecycleIntent(c, j.ID, "admission", nil)
+		})
+		policy.Source = "admission"
+	}
+	if err != nil || policy.Source != "admission" {
+		return s.agentUnknown(j.ID, "no retained lifecycle admission policy; no provisioning or prompt attempted", false)
+	}
 	a, err := s.agentOwnership(j.ID)
 	if err != nil {
 		return err
 	}
 	j.Agent = a
 	r := j.agentRequest
+	// Check adapter compatibility before any Workmux/session mutation. This is
+	// a runtime-version check, not a capability inventory or permission policy.
+	probe := j
+	probeOwner := *a
+	probeOwner.Worktree = r.Repo
+	probe.Agent = &probeOwner
+	if _, err := s.lifecycleRuntime(probe, "lifecycle-runtime-before-provision"); err != nil {
+		return s.agentFailure(j, err)
+	}
 	branch := "ocq-" + j.ID
 	baseDir := filepath.Join(s.dir, "worktrees")
 	if err := privateDir(baseDir); err != nil {
@@ -119,6 +142,9 @@ func (s *store) launchAgent(j Job) error {
 		return err
 	}
 	j.Agent.Worktree = wanted
+	if _, err := s.lifecycleRuntime(j, "lifecycle-runtime-before-session"); err != nil {
+		return s.agentFailure(j, err)
+	}
 	// A review must have an available effective catalog in its OWN checkout
 	// before any session intent/POST. Keep the independent pre-prompt check too.
 	isReview, err := s.isProjectReviewJob(context.Background(), j.ID)
@@ -163,6 +189,9 @@ func (s *store) launchAgent(j Job) error {
 	if err := s.verifyProjectLaunchGate(context.Background(), j, inspected); err != nil {
 		return s.agentUnknown(j.ID, err.Error(), false)
 	}
+	if _, err := s.lifecycleRuntime(j, "lifecycle-runtime-before-prompt"); err != nil {
+		return s.agentFailure(j, err)
+	}
 	initial, err := s.transcript(j)
 	if err != nil {
 		return s.agentFailure(j, err)
@@ -196,7 +225,14 @@ func (s *store) launchAgent(j Job) error {
 	if err := s.agentIntent(j.ID, "prompt", prompt); err != nil {
 		return err
 	}
-	b, err = apiCall(wanted, "post", "/api/session/"+a.SessionID+"/prompt", prompt)
+	if len(r.Prompt) > maxManifestBytes {
+		// The project-review intake and launch gates above checked exact target,
+		// deterministic inline bytes and static permissions. Avoid --data argv
+		// limits for the larger prompt; keep the same one-attempt intent.
+		b, err = nativeInlineReviewPrompt(wanted, "/api/session/"+a.SessionID+"/prompt", prompt)
+	} else {
+		b, err = apiCall(wanted, "post", "/api/session/"+a.SessionID+"/prompt", prompt)
+	}
 	if err != nil {
 		return s.agentUnknown(j.ID, "prompt acknowledgment unavailable; exact-ID API inspection only, never resend", false)
 	}
@@ -233,7 +269,10 @@ func (s *store) interference(j Job, reason string) error {
 		if err := q.MarkSessionInterference(context.Background(), j.ID); err != nil {
 			return err
 		}
-		return q.MarkInterferenceUnknown(context.Background(), dbquery.MarkInterferenceUnknownParams{Reason: reason, ID: j.ID})
+		if err := q.MarkInterferenceUnknown(context.Background(), dbquery.MarkInterferenceUnknownParams{Reason: reason, ID: j.ID}); err != nil {
+			return err
+		}
+		return observerBlockedMail(c, j.ID, "uncertain", reason)
 	})
 }
 
