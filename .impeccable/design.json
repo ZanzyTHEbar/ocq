@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-15",
+  "title": "Design System: OCQ native task panel",
+  "extensions": {
+    "native": {
+      "runtime": "Herdr 0.1.15 GPUI",
+      "themeBindings": ["background", "foreground", "muted", "border", "hover", "accent", "blocked"],
+      "inspectionWidths": [360, 320],
+      "reviewStatus": "independent_review_pending"
+    },
+    "narrative": {
+      "northStar": "Task first; evidence on demand.",
+      "rules": [
+        "Observation freshness does not authorize actions.",
+        "Short native labels; exact technical identity remains inspectable.",
+        "No fabricated project data or inferred completion."
+      ]
+    }
+  }
+}
