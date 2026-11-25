@@ -361,7 +361,7 @@ func observeSnapshot(ctx context.Context, dir string, req ObservationRequest) (r
 			return out, err
 		}
 		out.Work = &work
-		main, err := ListProjectMain(s.dir, req.Work.ProjectID)
+		main, err := listProjectMain(s.dir, req.Work.ProjectID, &work)
 		if err != nil {
 			return out, err
 		}

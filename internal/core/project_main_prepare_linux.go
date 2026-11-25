@@ -20,11 +20,17 @@ import (
 )
 
 const mainSelectionPrefix = "ocq-main-v1 setup: "
+const mainPromptPrefix = "msg_ocqmain_"
 
 func mainFile(id, suffix string) string { return ".main-" + id + "." + suffix + ".json" }
 
 func mainCreatesSession(mode string) bool { return mode == "create" || mode == "replace" }
-func mainSetupMode(mode string) bool     { return mainCreatesSession(mode) || mode == "adopt" }
+func mainSetupMode(mode string) bool      { return mainCreatesSession(mode) || mode == "adopt" }
+
+func mainPromptPayload(in MainPrepareRequest, id string) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{"id": id, "text": in.Prompt, "metadata": map[string]any{"ocq_main_input": map[string]string{"project_id": in.ProjectID, "operation_id": in.OperationID, "prompt_digest": sha256Hex([]byte(in.Prompt))}}})
+	return b
+}
 
 func nativeJournalRoom(j *os.File, additional int) error {
 	if _, err := j.Seek(0, 0); err != nil {
@@ -525,12 +531,11 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 		rec.RegistrationJSON = string(reg)
 	}
 	if in.Prompt != "" {
-		rec.PromptID, err = randomID("msg_ocqmain_")
+		rec.PromptID, err = randomID(mainPromptPrefix)
 		if err != nil {
 			return MainStatus{}, err
 		}
-		b, _ := json.Marshal(map[string]any{"id": rec.PromptID, "text": in.Prompt, "metadata": map[string]any{"ocq_main_input": map[string]string{"project_id": in.ProjectID, "operation_id": in.OperationID, "prompt_digest": sha256Hex([]byte(in.Prompt))}}})
-		rec.PromptJSON = string(b)
+		rec.PromptJSON = string(mainPromptPayload(in, rec.PromptID))
 	}
 	rec.Device, rec.Inode, err = j.queueIdentity()
 	if err != nil {

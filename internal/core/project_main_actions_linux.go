@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"github.com/ZanzyTHEbar/faults-go"
 	"net/url"
-	"ocq/internal/core/dbquery"
 	"os"
+	"strings"
 	"syscall"
+
+	"github.com/ZanzyTHEbar/faults-go"
+
+	"ocq/internal/core/dbquery"
 )
 
 func mainContext(r *Reader, rec mainRecord, c MainActionContext) error {
@@ -105,26 +108,96 @@ func PreviewProjectMain(dir, project, id string, c MainActionContext) (MainPrevi
 	return out, nil
 }
 
+type mainAttemptState uint8
+
+const (
+	mainAttemptUntrusted mainAttemptState = iota
+	mainAttemptAbsent
+	mainAttemptValid
+)
+
+func validateMainPreview(j *os.File, id, digest string, rec mainRecord, c MainActionContext) error {
+	b, err := workRead(j, mainFile(id, "preview-"+digest))
+	if err != nil {
+		return err
+	}
+	var preview MainPreview
+	if _, err = decodeStrictJSONObject(b, WorkResponseBytes, &preview); err != nil {
+		return err
+	}
+	if preview.Protocol != MainProtocol || preview.Context != c || preview.InputJSON != rec.Input || preview.SessionJSON != mainPreviewSession(rec) || preview.RegistrationJSON != rec.RegistrationJSON || preview.PromptJSON != rec.PromptJSON || preview.PreviewSHA256 != digest || preview.Binding != rec.Binding || !jsonEqual(preview.Role, rec.Role) {
+		return errors.New("Main exact preview/context mismatch")
+	}
+	preview.PreviewSHA256 = ""
+	b, _ = json.Marshal(preview)
+	if sha256Hex(b) != digest {
+		return errors.New("Main preview digest mismatch")
+	}
+	return nil
+}
+
+func readMainStageClaim(j *os.File, name, intent string) (workClaim, error) {
+	var claim workClaim
+	b, err := workRead(j, name)
+	if err != nil {
+		return claim, err
+	}
+	if _, err = decodeStrictJSONObject(b, WorkResponseBytes, &claim); err != nil ||
+		claim.Intent != intent || claim.Payload != intent || !isValidHexLen(claim.Preview, 64) ||
+		claim.Context.Protocol != MainProtocol || claim.Context.Action != "start" {
+		return workClaim{}, errors.New("Main stage evidence/authorization mismatch")
+	}
+	return claim, nil
+}
+
+// Validate against the retained arm, not today's caller or store schema.
+// Re-previewing can change the preview digest, but not the armed context.
+// Even a valid attempt only fences replay; it does not prove a native effect.
+func readMainAttempt(j *os.File, id, stage, intent string, expected *WorkActionContext) (workClaim, mainAttemptState, error) {
+	attempt, err := readMainStageClaim(j, mainFile(id, stage+".attempt"), intent)
+	if errors.Is(err, syscall.ENOENT) {
+		return workClaim{}, mainAttemptAbsent, nil
+	}
+	if err != nil {
+		return workClaim{}, mainAttemptUntrusted, err
+	}
+	arm, err := readMainStageClaim(j, mainFile(id, stage+".armed"), intent)
+	if err != nil || arm.Context != attempt.Context || expected != nil && attempt.Context != *expected {
+		return workClaim{}, mainAttemptUntrusted, errors.Join(err, errors.New("Main stage attempt/authorization mismatch"))
+	}
+	return attempt, mainAttemptValid, nil
+}
+
+func readMainPromptAttempt(j *os.File, id string, rec mainRecord) (mainAttemptState, error) {
+	attempt, state, err := readMainAttempt(j, id, "prompt", rec.Digest, nil)
+	if state != mainAttemptValid {
+		return state, err
+	}
+	// A prior attempt is a replay fence, not authorization to send from
+	// today's context. Validate the preview that actually authorized it.
+	if err := validateMainPreview(j, id, attempt.Preview, rec, MainActionContext(attempt.Context)); err != nil {
+		return mainAttemptUntrusted, errors.Join(errors.New("Main prompt attempt's original preview unavailable or mismatched; never resend"), err)
+	}
+	return mainAttemptValid, nil
+}
+
 // Each stage has its own arm/attempt. An attempted stage is NEVER posted twice.
 // Explicit Start may only advance later unattempted stages after exact readback.
 func mainStage(j *composeJournal, id, stage string, claim workClaim) (bool, error) {
-	name := mainFile(id, stage+".attempt")
-	if b, e := workRead(j.dir, name); e == nil {
-		var old workClaim
-		if json.Unmarshal(b, &old) != nil || old.Intent != claim.Intent || old.Payload != claim.Payload || old.Context != claim.Context || !isValidHexLen(old.Preview, 64) {
-			return false, errors.New("Main stage attempt/authorization mismatch")
-		}
-		return false, nil
-	} else if !errors.Is(e, syscall.ENOENT) {
-		return false, e
+	if _, state, err := readMainAttempt(j.dir, id, stage, claim.Intent, &claim.Context); state != mainAttemptAbsent {
+		return false, err
 	}
+	return recordMainStage(j, id, stage, claim, nil)
+}
+
+// The caller holds the journal lock and has checked that the attempt is absent.
+func recordMainStage(j *composeJournal, id, stage string, claim workClaim, beforeAttempt func() error) (bool, error) {
 	if err := nativeJournalRoom(j.dir, 2); err != nil {
 		return false, err
 	}
 	arm := mainFile(id, stage+".armed")
-	if b, e := workRead(j.dir, arm); e == nil {
-		var old workClaim
-		if json.Unmarshal(b, &old) != nil || old.Intent != claim.Intent || old.Payload != claim.Payload || old.Context != claim.Context || !isValidHexLen(old.Preview, 64) {
+	if old, e := readMainStageClaim(j.dir, arm, claim.Intent); e == nil {
+		if old.Context != claim.Context {
 			return false, errors.New("Main arm mismatch")
 		}
 		if err := j.syncFile(arm); err != nil {
@@ -137,10 +210,39 @@ func mainStage(j *composeJournal, id, stage string, claim workClaim) (bool, erro
 	} else {
 		return false, e
 	}
-	if err := j.create(name, claim); err != nil {
+	if beforeAttempt != nil {
+		if err := beforeAttempt(); err != nil {
+			return false, err
+		}
+	}
+	if err := j.create(mainFile(id, stage+".attempt"), claim); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func beginMainPrompt(j *composeJournal, id string, rec mainRecord, claim workClaim, current map[string]any, selectMain func() mainSelection) (bool, error) {
+	if state, err := readMainPromptAttempt(j.dir, id, rec); state != mainAttemptAbsent {
+		return false, err
+	}
+	owner := nativeHash(json.RawMessage(rec.Metadata))
+	if err := nativeIdentity(current, rec.SessionID, rec.Repo, rec.ProjectID, owner); err != nil {
+		return false, err
+	}
+	if nativeProfile(current) != rec.ProfileSHA {
+		return false, errors.New("Main current profile differs; no input sent")
+	}
+	return recordMainStage(j, id, "prompt", claim, func() error {
+		// Sample the full SQL binding and journal-selected role after the final
+		// native GET. This fence is not atomic with the native session or POST.
+		s := selectMain()
+		if s.err != nil || s.binding != rec.Binding || s.setup.SetupID != rec.SetupID ||
+			s.setup.SessionID != rec.SessionID || s.setup.Role.SHA256 != rec.Role.SHA256 ||
+			nativeHash(json.RawMessage(s.setup.Metadata)) != owner {
+			return errors.Join(s.err, errors.New("Main binding, setup or role changed since preview; no input sent"))
+		}
+		return nil
+	})
 }
 
 func StartProjectMain(dir, project, id, digest string, c MainActionContext) (MainStatus, error) {
@@ -173,21 +275,8 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 	if err = mainContext(r, rec, c); err != nil {
 		return MainStatus{}, err
 	}
-	b, err := workRead(j.dir, mainFile(id, "preview-"+digest))
-	if err != nil {
+	if err = validateMainPreview(j.dir, id, digest, rec, c); err != nil {
 		return MainStatus{}, err
-	}
-	var preview MainPreview
-	if _, err = decodeStrictJSONObject(b, WorkResponseBytes, &preview); err != nil {
-		return MainStatus{}, err
-	}
-	if preview.Context != c || preview.InputJSON != rec.Input || preview.SessionJSON != mainPreviewSession(rec) || preview.RegistrationJSON != rec.RegistrationJSON || preview.PromptJSON != rec.PromptJSON || preview.PreviewSHA256 != digest || preview.Binding != rec.Binding || !jsonEqual(preview.Role, rec.Role) {
-		return MainStatus{}, errors.New("Main exact preview/context mismatch")
-	}
-	preview.PreviewSHA256 = ""
-	b, _ = json.Marshal(preview)
-	if sha256Hex(b) != digest {
-		return MainStatus{}, errors.New("Main preview digest mismatch")
 	}
 	claim := workClaim{Intent: rec.Digest, Payload: rec.Digest, Preview: digest, Context: WorkActionContext(c)}
 	for _, file := range []string{mainFile(id, "intent"), mainFile(id, "preview-"+digest)} {
@@ -197,6 +286,24 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 	}
 	if in.Mode == "role-refresh" {
 		return startMainRoleRefresh(r, j, rec, in, claim, false)
+	}
+	promptAttempt, err := readMainPromptAttempt(j.dir, id, rec)
+	if err != nil {
+		return MainStatus{}, err
+	}
+	if promptAttempt == mainAttemptValid {
+		// Observation only, even after a legitimate human profile change.
+		return inspectMainRecord(r, j.dir, project, id, true)
+	}
+	var prompt json.RawMessage
+	if in.Mode == "send" {
+		suffix, reserved := strings.CutPrefix(rec.PromptID, mainPromptPrefix)
+		prompt = mainPromptPayload(in, rec.PromptID)
+		if !reserved || !isValidHexLen(suffix, 32) || len(prompt) > WorkRequestBytes || string(prompt) != rec.PromptJSON {
+			return MainStatus{}, errors.New("retained Main prompt payload does not match the exact input")
+		}
+	} else if rec.PromptID != "" || rec.PromptJSON != "" {
+		return MainStatus{}, errors.New("unexpected retained Main prompt payload")
 	}
 	// A later explicit start of an already bound/attempted operation is recovery,
 	// not a replay of the original prompt or a permanent creation-profile fence.
@@ -208,8 +315,7 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 			return MainStatus{}, e
 		}
 	}
-	_, alreadySent := mainAttempt(j.dir, id, "prompt")
-	if registered && (rec.PromptID == "" || alreadySent) {
+	if registered && rec.PromptID == "" {
 		if setup, _, _, e := selectedMain(r, j.dir, project); e == nil && setup.SetupID == rec.SetupID && setup.SessionID == rec.SessionID {
 			return inspectMainRecord(r, j.dir, project, id, true)
 		}
@@ -260,15 +366,15 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 		}
 	}
 	if mainCreatesSession(in.Mode) {
+		var create map[string]any
+		if _, e := decodeStrictJSONObject([]byte(rec.SessionJSON), WorkRequestBytes, &create); e != nil {
+			return MainStatus{}, errors.New("invalid retained session creation")
+		}
 		fresh, e := mainStage(j, id, "session", claim)
 		if e != nil {
 			return MainStatus{}, e
 		}
 		if fresh {
-			var create any
-			if json.Unmarshal([]byte(rec.SessionJSON), &create) != nil {
-				return MainStatus{}, errors.New("invalid retained session creation")
-			}
 			if _, e = nativeCall(rec.Repo, service, "post", "/api/session", create); e != nil {
 				return inspectMainUncertain(r, j.dir, project, id, e)
 			}
@@ -283,8 +389,7 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 	}
 	// Main's normal subsequent human profile changes are legitimate. This exact
 	// operation only pins the snapshot prepared for its NEW explicit input.
-	_, promptAttempted := mainAttempt(j.dir, id, "prompt")
-	if !promptAttempted && nativeProfile(session) != rec.ProfileSHA {
+	if nativeProfile(session) != rec.ProfileSHA {
 		return MainStatus{}, errors.New("Main profile changed since preview; do not overwrite it")
 	}
 	if mainSetupMode(in.Mode) {
@@ -352,25 +457,19 @@ func StartProjectMain(dir, project, id, digest string, c MainActionContext) (Mai
 			return MainStatus{}, errors.New("Main registration is no longer the exact current binding")
 		}
 	}
-	if rec.PromptJSON != "" {
+	if prompt != nil {
 		// Exact profile/location check immediately before the sole prompt attempt.
 		current, e := nativeSession(rec.Repo, service, rec.SessionID)
 		if e != nil {
 			return inspectMainUncertain(r, j.dir, project, id, e)
 		}
-		if e = nativeIdentity(current, rec.SessionID, rec.Repo, rec.ProjectID, nativeHash(json.RawMessage(rec.Metadata))); e != nil {
-			return MainStatus{}, e
-		}
-		fresh, e := mainStage(j, id, "prompt", claim)
+		fresh, e := beginMainPrompt(j, id, rec, claim, current, func() mainSelection {
+			return loadMainSelection(r, j.dir, project)
+		})
 		if e != nil {
 			return MainStatus{}, e
 		}
 		if fresh {
-			if nativeProfile(current) != rec.ProfileSHA {
-				return MainStatus{}, errors.New("Main current profile differs; no input sent")
-			}
-			var prompt any
-			_ = json.Unmarshal([]byte(rec.PromptJSON), &prompt)
 			if _, e = nativeCall(rec.Repo, service, "post", "/api/session/"+url.PathEscape(rec.SessionID)+"/prompt", prompt); e != nil {
 				return inspectMainUncertain(r, j.dir, project, id, e)
 			}

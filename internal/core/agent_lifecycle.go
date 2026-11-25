@@ -266,10 +266,11 @@ func matchingInput(j Job, in inboxItem) bool {
 func (s *store) interference(j Job, reason string) error {
 	return s.write(func(c *sql.Conn) error {
 		q := dbquery.New(c)
-		if err := q.MarkSessionInterference(context.Background(), j.ID); err != nil {
+		n, err := q.MarkInterferenceUnknown(context.Background(), dbquery.MarkInterferenceUnknownParams{Reason: reason, ID: j.ID})
+		if err != nil || n == 0 {
 			return err
 		}
-		if err := q.MarkInterferenceUnknown(context.Background(), dbquery.MarkInterferenceUnknownParams{Reason: reason, ID: j.ID}); err != nil {
+		if err := q.MarkSessionInterference(context.Background(), j.ID); err != nil {
 			return err
 		}
 		return observerBlockedMail(c, j.ID, "uncertain", reason)

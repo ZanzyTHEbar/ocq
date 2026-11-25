@@ -54,8 +54,12 @@ func (s *store) observeAgentPolicy(j Job, explicit bool) error {
 	if j.State == "queued" || j.State == "cancelled" {
 		return diagnostic(faults.CodeValidationFailed, "agent job has not been admitted")
 	}
-	if workTerminal(j) {
-		return nil // Keep the first supported terminal evidence immutable.
+	// Dispatch and reconciliation hold the same dispatcher lock from the
+	// stored job read through evidence writes and the terminal transaction.
+	// A committed finish is final even if a downstream reader cannot verify
+	// its audit file. Do not reobserve or rewrite that file to recover proof.
+	if j.State == "finished" {
+		return nil
 	}
 	policy, policyErr := s.lifecycleIntent(j.ID)
 	if errors.Is(policyErr, sql.ErrNoRows) || policyErr == nil && policy.Source == "explicit_reevaluation" && !explicit {
