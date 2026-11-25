@@ -23,7 +23,7 @@ func clientDigest(p ClientPointer) string {
 	return nativeHash(p)
 }
 
-func clientTarget(r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer, error) {
+func clientTarget(ctx context.Context, r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer, error) {
 	p := ClientPointer{Protocol: in.Protocol, ProjectID: in.ProjectID, NavigationID: in.NavigationID, WorkRequestID: in.WorkRequestID, TargetKind: in.TargetKind, Space: in.Space}
 	binding, err := workBinding(r, in.ProjectID)
 	if err != nil {
@@ -73,12 +73,12 @@ func clientTarget(r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer
 		p.SetupID, p.OwnershipMode, p.SessionID, p.Cwd, p.OpenCodeProjectID = setup.SetupID, setup.OwnershipMode, setup.SessionID, setup.Repo, setup.ProjectID
 		p.OwnershipSHA256 = nativeHash(json.RawMessage(setup.Metadata))
 	}
-	service, err := discoverNativeService(p.Cwd)
+	service, err := discoverNativeServiceContext(ctx, p.Cwd)
 	if err != nil {
 		return p, err
 	}
 	p.ServerOrigin, p.ServiceIdentity = service.Origin, service.Identity
-	s, err := nativeSession(p.Cwd, service, p.SessionID)
+	s, err := nativeSessionContext(ctx, p.Cwd, service, p.SessionID)
 	if err != nil {
 		return p, err
 	}
@@ -86,7 +86,7 @@ func clientTarget(r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer
 		return p, err
 	}
 	if in.Protocol != AttentionClientProtocol {
-		if err = nativeClientIdle(p.Cwd, service, p.SessionID, s); err != nil {
+		if err = nativeClientIdleContext(ctx, p.Cwd, service, p.SessionID, s); err != nil {
 			return p, err
 		}
 	}
@@ -105,7 +105,11 @@ func clientTarget(r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer
 // These are bounded GET fences, not a readiness poll or completion transition.
 // Nothing here sends input, answers permissions or changes queue capacity.
 func nativeClientIdle(directory string, service nativeService, id string, before map[string]any) error {
-	body, err := nativeCall(directory, service, "get", "/api/session/active", nil)
+	return nativeClientIdleContext(context.Background(), directory, service, id, before)
+}
+
+func nativeClientIdleContext(ctx context.Context, directory string, service nativeService, id string, before map[string]any) error {
+	body, err := nativeCallContext(ctx, directory, service, "get", "/api/session/active", nil)
 	if err != nil {
 		return err
 	}
@@ -117,7 +121,7 @@ func nativeClientIdle(directory string, service nativeService, id string, before
 		return errors.New("native client requires exact idle session; active loop refused")
 	}
 	for _, suffix := range []string{"/inbox", "/permission", "/form"} {
-		body, err = nativeCall(directory, service, "get", "/api/session/"+id+suffix, nil)
+		body, err = nativeCallContext(ctx, directory, service, "get", "/api/session/"+id+suffix, nil)
 		if err != nil {
 			return err
 		}
@@ -126,7 +130,7 @@ func nativeClientIdle(directory string, service nativeService, id string, before
 			return errors.New("native client requires no pending input/permission/form")
 		}
 	}
-	body, err = nativeCall(directory, service, "get", "/api/session/"+id+"/message?limit=1&order=desc", nil)
+	body, err = nativeCallContext(ctx, directory, service, "get", "/api/session/"+id+"/message?limit=1&order=desc", nil)
 	if err != nil {
 		return err
 	}
@@ -134,7 +138,7 @@ func nativeClientIdle(directory string, service nativeService, id string, before
 	if decodeData(body, &latest) != nil || len(latest) != 1 || latest[0].Type != "idle" || (latest[0].Outcome != "succeeded" && latest[0].Outcome != "failed" && latest[0].Outcome != "interrupted") {
 		return errors.New("native client requires explicit terminal idle outcome")
 	}
-	after, err := nativeSession(directory, service, id)
+	after, err := nativeSessionContext(ctx, directory, service, id)
 	if err != nil {
 		return err
 	}
@@ -145,6 +149,10 @@ func nativeClientIdle(directory string, service nativeService, id string, before
 }
 
 func PrepareProjectClient(dir string, raw []byte) (ClientPointer, error) {
+	return PrepareProjectClientContext(context.Background(), dir, raw)
+}
+
+func PrepareProjectClientContext(ctx context.Context, dir string, raw []byte) (ClientPointer, error) {
 	var in ClientPrepareRequest
 	if _, err := decodeStrictJSONObject(raw, 16<<10, &in); err != nil {
 		return ClientPointer{}, err
@@ -181,7 +189,7 @@ func PrepareProjectClient(dir string, raw []byte) (ClientPointer, error) {
 	if err = nativeJournalRoom(j.dir, 2); err != nil {
 		return ClientPointer{}, err
 	}
-	p, err := clientTarget(r, j.dir, in)
+	p, err := clientTarget(ctx, r, j.dir, in)
 	if err != nil {
 		return p, err
 	}
@@ -203,6 +211,9 @@ func PrepareProjectClient(dir string, raw []byte) (ClientPointer, error) {
 	p.PointerSHA256 = clientDigest(p)
 	p.LauncherArgv[len(p.LauncherArgv)-1] = p.PointerSHA256
 	if err = workOutputBound(p); err != nil {
+		return p, err
+	}
+	if err = ctx.Err(); err != nil {
 		return p, err
 	}
 	// A failed private preparation has no HC/target effect. Preallocating the
@@ -244,9 +255,12 @@ func loadClientPointer(r *Reader, j *os.File, project, digest string) (ClientPoi
 	return p, nil
 }
 
-func verifyClientPointer(r *Reader, j *os.File, p ClientPointer) (nativeImages, string, error) {
+func verifyClientPointer(ctx context.Context, r *Reader, j *os.File, p ClientPointer) (nativeImages, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nativeImages{}, "", err
+	}
 	in := ClientPrepareRequest{Protocol: p.Protocol, ProjectID: p.ProjectID, NavigationID: p.NavigationID, TargetKind: p.TargetKind, WorkRequestID: p.WorkRequestID, Space: p.Space}
-	current, err := clientTarget(r, j, in)
+	current, err := clientTarget(ctx, r, j, in)
 	if err != nil {
 		return nativeImages{}, "", err
 	}
@@ -277,7 +291,7 @@ func verifyClientPointer(r *Reader, j *os.File, p ClientPointer) (nativeImages, 
 	if sha256Hex([]byte(overlay)) != p.OverlaySHA256 {
 		return images, "", errors.New("effective CLI plugin configuration changed; no plugins dropped")
 	}
-	return images, overlay, nil
+	return images, overlay, ctx.Err()
 }
 
 func RunProjectClient(dir, project, digest string) error {
@@ -325,7 +339,7 @@ func RunProjectClient(dir, project, digest string) error {
 		r.Close()
 		return errors.New("native TUI launch already attempted/unknown; never repeat")
 	}
-	images, overlay, err := verifyClientPointer(r, j, p)
+	images, overlay, err := verifyClientPointer(ctx, r, j, p)
 	j.Close()
 	r.Close()
 	if err != nil {
@@ -333,7 +347,7 @@ func RunProjectClient(dir, project, digest string) error {
 	}
 	// Rebind the scoped authentication handoff to the same pinned instance
 	// immediately before launch admission. No credential enters the pointer.
-	service, err := discoverNativeService(p.Cwd)
+	service, err := discoverNativeServiceContext(ctx, p.Cwd)
 	if err != nil {
 		return err
 	}

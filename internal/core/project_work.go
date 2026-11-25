@@ -83,6 +83,7 @@ type WorkStatus struct {
 	Job             *WorkJob                  `json:"job,omitempty"`
 	Result          *WorkAssociation          `json:"result,omitempty"`
 	TaskGoal        *TaskGoal                 `json:"task_goal,omitempty"`
+	TaskLifecycle   *TaskLifecycle            `json:"task_lifecycle,omitempty"`
 }
 
 // TaskGoal identifies standalone intake, not evidence of execution, handoff, or archive.
@@ -91,6 +92,16 @@ type TaskGoal struct {
 	Title        string `json:"title"`
 	BaseCommit   string `json:"base_commit"`
 	GoalSHA256   string `json:"goal_sha256"`
+}
+
+// TaskLifecycle joins the retained standalone identity to one stored SQLite
+// snapshot. WorkFinished describes the current job state, not evidence-file
+// availability, validation, mail handling or the native session lifecycle.
+type TaskLifecycle struct {
+	LaneID          string `json:"lane_id,omitempty"`
+	WorkFinished    *bool  `json:"work_finished"` // null before exact admission is observed
+	MainHandled     string `json:"main_handled"`
+	SessionArchived string `json:"session_archived"`
 }
 
 type WorkPreview struct {

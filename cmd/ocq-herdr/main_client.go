@@ -86,7 +86,7 @@ func mainClientCommands() []*cobra.Command {
 			}
 			var c core.WorkActionContext
 			if contextual {
-				b, e := compatibility(a[0], a[5])
+				b, e := compatibilityContext(cmd.Context(), a[0], a[5])
 				observation, flagErr := cmd.Flags().GetString("work-observation-context")
 				if e != nil || flagErr != nil || a[4] == "" || len(a[4]) > 128 || strings.ContainsAny(a[4], "\r\n\x00") ||
 					b.Queue != queue || b.ObservationStoreContext != store || store != a[6] || b.Image != a[7] || observation != b.ObservationContext {
@@ -139,7 +139,9 @@ func mainClientCommands() []*cobra.Command {
 				if e != nil {
 					return e
 				}
-				out, err = core.PrepareProjectClient(dir, raw)
+				ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+				defer cancel()
+				out, err = core.PrepareProjectClientContext(ctx, dir, raw)
 			case "client-open", "client-verify":
 				if !clientDigest.MatchString(a[3]) {
 					return errors.New("exact native pointer digest required")
@@ -148,10 +150,10 @@ func mainClientCommands() []*cobra.Command {
 				if e != nil {
 					return e
 				}
-				if _, e = boundHC(cmd.Context(), pin); e != nil {
+				binding, e := boundHC(cmd.Context(), pin)
+				if e != nil {
 					return e
 				}
-				binding, _ := boundHC(cmd.Context(), pin)
 				if binding.Space != c.Space || binding.Folder != c.Folder || binding.Queue != c.QueueIdentity {
 					return errors.New("native client HC scope changed")
 				}
@@ -216,11 +218,11 @@ func openNativeClient(parent context.Context, dir, project, digest string, c cor
 		return view, err
 	}
 	defer conn.Close()
-	s, err := core.ArmProjectClient(dir, project, digest, c)
+	s, err := core.ArmProjectClientContext(ctx, dir, project, digest, c)
 	if err != nil {
 		return view, err
 	}
-	if s, err = core.AttemptProjectClient(dir, project, digest, c); err != nil {
+	if s, err = core.AttemptProjectClientContext(ctx, dir, project, digest, c); err != nil {
 		return view, err
 	}
 	view.Status = s
@@ -243,6 +245,9 @@ func openNativeClient(parent context.Context, dir, project, digest string, c cor
 	launchEnv["OCQ_CLIENT_CONTEXT"], err = core.NativeClientLaunchContext()
 	if err != nil {
 		return view, err
+	}
+	if err = ctx.Err(); err != nil {
+		return view, err // the attempt is still consumed
 	}
 	var returned hcTerminal
 	err = conn.call("terminal.run", map[string]any{"argv": s.Pointer.LauncherArgv, "cwd": s.Pointer.Cwd, "env": launchEnv, "no_parent": true, "no_notify": true, "wait": false, "keep": false, "labels": map[string]string{"ocq.handoff": digest, "ocq.hc_binding": binding.digest(), "herdr.space": binding.Space}}, &returned)
@@ -278,7 +283,7 @@ func inspectNativeClient(parent context.Context, dir, project, digest string, c 
 		return view, err
 	}
 	if s.Terminal == nil || s.State != "terminal_recorded" {
-		view.Status, err = core.VerifyProjectClient(dir, project, digest, c)
+		view.Status, err = core.VerifyProjectClientContext(ctx, dir, project, digest, c)
 		return view, err
 	}
 	// Closed historical viewers are receipt/resource evidence, not authority
@@ -301,7 +306,7 @@ func inspectNativeClient(parent context.Context, dir, project, digest string, c 
 	view.TerminalState = observed.State
 	if observed.State != "finished" {
 		// Live viewers still require the full current launch/target/image fence.
-		view.Status, err = core.VerifyProjectClient(dir, project, digest, c)
+		view.Status, err = core.VerifyProjectClientContext(ctx, dir, project, digest, c)
 	}
 	return view, err
 }

@@ -263,17 +263,14 @@ export class RuntimeProject {
     const ready = this.compatibility.machineReady();
     const open = (kind, request, session, task) => {
       if (this.sessions.current(scope) && main.targetSession(kind, request) === session) main.openConversation(kind, request, task);
-      else main.openRefused(task);
     };
-    const opening = session => {
-      if (main.openIntent?.session !== session || !(main.working || main.tabNavigation || main.error || main.attachmentNotice)) return null;
-      const checking = main.working && main.openIntent?.readOnly;
-      const pending = main.working || main.tabNavigation;
-      return v_flex().gap(4)
-        .child(note(checking ? "Checking this opening…" : pending ? "Opening conversation…" :
-          main.error || "Attachment is unconfirmed. OCQ won’t repeat it."))
-        .when(!!(main.error || main.attachmentNotice || checking), v => v.child(
-          button("ocq-check-opening", "Check opening", task => main.checkOpeningStatus(task), ready && !pending)));
+    const canNavigate = ready && !main.working && !main.tabNavigation;
+    const checkOpening = (kind, request, session, label) =>
+      button(`ocq-check-opening-${session}`, "Check opening", task => main.checkOpeningStatus(kind, request, session, scope, task),
+        canNavigate, `Check opening: ${label}`);
+    const opening = (kind, request, session) => {
+      const message = main.openingMessage(scope, kind, request, session);
+      if (message) box.child(note(message));
     };
     const standalone = this.taskGoal.supported();
     if (standalone) box.child(this.taskGoal.render(cx, t, button));
@@ -283,34 +280,35 @@ export class RuntimeProject {
       if (legacy) box.child(legacy);
       const row = h_flex().items_center().gap(4).py(5).border_b(1).border_color(t.border)
         .child(div().flex_1().font_semibold().child("Main"))
-        .child(button("ocq-open-main", "Open", task => open("integrator", "", id, task),
-          ready && !main.working && !main.tabNavigation, "Open Main"));
+        .child(button("ocq-open-main", "Open", task => open("integrator", "", id, task), canNavigate, "Open Main"))
+        .child(checkOpening("integrator", "", id, "Main"));
       if (main.selectedMain.ownership_mode === "ocq_main") row.child(button("ocq-delete-main", "Delete…",
         task => this.requestDelete("integrator", "", id, "Main", task), !this.deleteIntent || this.deleteIntent.state !== "deleting", "Delete Main"));
       box.child(row);
-      const status = opening(id);
-      if (status) box.child(status);
+      opening("integrator", "", id);
       const confirmation = this.renderDelete("integrator", "", id, button, note);
       if (confirmation) box.child(confirmation);
     } else if (main.retirement === "uncertain") box.child(note("Main’s deletion could not be confirmed. Ask the machine owner to check."));
     else box.child(this.workflow.render(cx, t, button, false));
-    if (!main.openIntent && main.error) box.child(note(main.error));
     for (const row of this.sessions.rows) {
-      const state = sessionState(row.job), role = row.kind === "review" ? "Reviewer" : "Worker";
+      const lifecycle = row.task_lifecycle;
+      const state = sessionState(row.job, lifecycle), role = row.kind === "review" ? "Reviewer" : "Worker";
+      const summary = v_flex().flex_1().min_w(0).gap(2)
+        .child(div().truncate().font_semibold().child(row.title))
+        .child(note(`${row.goalTitle} · ${state}`));
+      if (lifecycle) summary.child(note("Main handling unverified · Session archive unverified"));
       const line = h_flex().id(`ocq-session-${row.job.session_id || row.request_id}`).items_center().gap(4).py(5).border_b(1).border_color(t.border)
-        .child(v_flex().flex_1().min_w(0).gap(2)
-          .child(div().truncate().font_semibold().child(row.title))
-          .child(note(`${row.goalTitle} · ${state}`)));
+        .child(summary);
       if (row.job.session_id && !row.job.session_state) {
         line.child(button(`ocq-open-${row.job.session_id}`, "Open", task => open("worker", row.request_id, row.job.session_id, task),
-          ready && !main.working && !main.tabNavigation, `Open ${role.toLowerCase()}: ${row.title}`));
+          canNavigate, `Open ${role.toLowerCase()}: ${row.title}`))
+          .child(checkOpening("worker", row.request_id, row.job.session_id, row.title));
         if (!row.task_goal) line.child(button(`ocq-delete-${row.job.session_id}`, "Delete…",
           task => this.requestDelete("worker", row.request_id, row.job.session_id, role.toLowerCase(), task),
           !this.deleteIntent || this.deleteIntent.state !== "deleting", `Delete ${role.toLowerCase()}: ${row.title}`));
       }
       box.child(line);
-      const status = opening(row.job.session_id);
-      if (status) box.child(status);
+      opening("worker", row.request_id, row.job.session_id);
       const confirmation = this.renderDelete("worker", row.request_id, row.job.session_id, button, note);
       if (confirmation) box.child(confirmation);
     }
@@ -319,9 +317,12 @@ export class RuntimeProject {
   }
 }
 
-function sessionState(job) {
+function sessionState(job, lifecycle) {
   if (job.session_state === "uncertain") return "Deletion unconfirmed";
   if (job.state === "unknown") return "Needs attention";
-  if (job.terminal_proven) return { agent_succeeded: "Job finished", agent_failed: "Job failed", agent_interrupted: "Job interrupted" }[job.outcome] || "Job ended";
+  if (lifecycle?.work_finished || job.terminal_proven) {
+    if (job.state === "cancelled") return "Job cancelled";
+    return { agent_succeeded: "Job finished", agent_failed: "Job failed", agent_interrupted: "Job interrupted" }[job.outcome] || "Job ended";
+  }
   return { queued: "Waiting", launching: "Starting", running: "Running" }[job.state] || "Status unconfirmed";
 }

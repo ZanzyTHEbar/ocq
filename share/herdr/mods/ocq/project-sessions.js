@@ -66,6 +66,11 @@ export class ProjectSessions {
           typeof task.title !== "string" || task.title.length > 144) throw Error("Invalid standalone task identity");
       if (!job || !item.receipt || item.receipt.project_id !== project || item.receipt.job_id !== job.job_id ||
           !decimal(job.sequence) || job.session_state === "deleted") continue;
+      const lifecycle = item.task_lifecycle;
+      if (lifecycle && (!/^lane-[A-Za-z0-9_-]{1,123}$/.test(lifecycle.lane_id || "") ||
+          lifecycle.work_finished !== ["finished", "cancelled", "resolved"].includes(job.state) ||
+          lifecycle.main_handled !== "unverified" || lifecycle.session_archived !== "unverified"))
+        throw Error("Invalid standalone task lifecycle");
       const session = job.session_id;
       if (session && (!validSession(session) || conflicts.has(session))) continue;
       const key = session || item.request_id;

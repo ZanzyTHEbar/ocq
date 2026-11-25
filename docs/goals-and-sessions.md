@@ -82,12 +82,40 @@ does not replace a queue receipt or change legacy Main goal lineage. Queued
 tasks and their exact owned sessions use the existing project session list.
 They have no Delete action in that list.
 
-This slice does not deliver a terminal handoff to Main or archive the task.
-The existing result-publication inbox mail is not a receipt that the exact
-authorized Main consumed and processed an input. A separate handoff operation
-must retain that Main identity, the terminal evidence and exact result
-associations, enforce one native input attempt, and identify its matching
-handled proof without altering the task's first-terminal snapshot. A native
-archive operation must separately protect against a now-active or changed
-task and read back archive state by exact session ID. Neither stage should be
-inferred from a successful queue or result receipt.
+`ocq project work status PROJECT REQUEST` and the existing session-list read
+project three separate facts for a standalone task:
+
+- **Work finished:** the exact Work intent and `.task.json` marker identify the
+  task. The prepared envelope and matching immutable SQLite receipt identify the
+  exact job; its owned lane must match the envelope in the same database read
+  transaction as the job state. `task_lifecycle.lane_id` identifies the existing
+  inbox route (`lane:<lane_id>` and `integrator:<project_id>`). Until the receipt
+  is observed, `work_finished` is null and no lane is projected. Then
+  `work_finished` reflects the **current stored** job state (`finished`,
+  `cancelled`, or `resolved`), with the exact outcome in `job.outcome`. It is
+  independent of `job.terminal_proven`, which separately checks retained agent
+  evidence on disk and still gates actions that require that proof. A stored
+  `unknown` is not finished, regardless of historical events. The journal and
+  evidence files are separate from the SQLite snapshot; this is not a live
+  session check or validation of a deliverable.
+- **Main handled:** unverified. The project's SQLite inbox is the only channel;
+  no native input is sent. Delivery, read/archive flags, replies, and sender
+  labels do not establish that the selected OpenCode Main session acted. Even
+  the automatic `lane.assigned` message is written by OCQ at admission, not by
+  Main. Existing explicit mail does not require terminal work, a result, or an
+  attachment; its existing kinds, routing, verification and text limits are
+  unchanged.
+- **Session archived:** unverified. No native archive check or mutation is
+  exposed for these tasks. Archiving inbox mail does not archive a session.
+
+The stored Main binding and native viewer identify a **target**, not the actor
+invoking an inbox command. The CLI accepts caller-supplied IDs and sender labels,
+and the bridge's authenticated context identifies the project/operator
+connection, not an OpenCode conversation producing a particular acknowledgement.
+Before adding **Mark handled**, an existing or upstream-supported session-bound
+invocation must establish the acting session independently of its input. Then
+verify that it is the exact selected Main, recheck the binding revision in the
+SQLite write, and retain an idempotent handling record for that binding/setup/
+session and exact task/job/lane/message. Do not infer handling from older mail.
+Only after that gate exists should native archive be considered, with separate
+activity checks and exact session read-back.

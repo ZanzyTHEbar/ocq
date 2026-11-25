@@ -137,7 +137,11 @@ func ListProjectClients(dir, project string) ([]ClientStatus, error) {
 // current TUI route. Focus must say "Focus existing inspection terminal".
 // It never spawns, resumes or prompts.
 func VerifyProjectClient(dir, project, digest string, c ClientActionContext) (ClientStatus, error) {
-	return verifyProjectClientContext(dir, project, digest, c, false)
+	return VerifyProjectClientContext(context.Background(), dir, project, digest, c)
+}
+
+func VerifyProjectClientContext(ctx context.Context, dir, project, digest string, c ClientActionContext) (ClientStatus, error) {
+	return verifyProjectClientContext(ctx, dir, project, digest, c, false)
 }
 
 // InspectProjectClientReceipt validates stored history and current owning
@@ -146,10 +150,10 @@ func VerifyProjectClient(dir, project, digest string, c ClientActionContext) (Cl
 // The bridge must still prove the exact HC terminal finished before using this
 // as closure evidence. All launch paths retain VerifyProjectClient's checks.
 func InspectProjectClientReceipt(dir, project, digest string, c ClientActionContext) (ClientStatus, error) {
-	return verifyProjectClientContext(dir, project, digest, c, true)
+	return verifyProjectClientContext(context.Background(), dir, project, digest, c, true)
 }
 
-func verifyProjectClientContext(dir, project, digest string, c ClientActionContext, receiptOnly bool) (ClientStatus, error) {
+func verifyProjectClientContext(ctx context.Context, dir, project, digest string, c ClientActionContext, receiptOnly bool) (ClientStatus, error) {
 	r, err := OpenReader(dir)
 	if err != nil {
 		return ClientStatus{}, err
@@ -173,7 +177,7 @@ func verifyProjectClientContext(dir, project, digest string, c ClientActionConte
 		}
 		return status, nil
 	}
-	_, _, err = verifyClientPointer(r, j, status.Pointer)
+	_, _, err = verifyClientPointer(ctx, r, j, status.Pointer)
 	return status, err
 }
 
@@ -203,13 +207,21 @@ func ClientCLIContext(dir, project, digest string) (ClientActionContext, error) 
 }
 
 func ArmProjectClient(dir, project, digest string, c ClientActionContext) (ClientStatus, error) {
-	return markProjectClient(dir, project, digest, c, false)
+	return ArmProjectClientContext(context.Background(), dir, project, digest, c)
 }
 func AttemptProjectClient(dir, project, digest string, c ClientActionContext) (ClientStatus, error) {
-	return markProjectClient(dir, project, digest, c, true)
+	return AttemptProjectClientContext(context.Background(), dir, project, digest, c)
 }
 
-func markProjectClient(dir, project, digest string, c ClientActionContext, attempt bool) (ClientStatus, error) {
+func ArmProjectClientContext(ctx context.Context, dir, project, digest string, c ClientActionContext) (ClientStatus, error) {
+	return markProjectClient(ctx, dir, project, digest, c, false)
+}
+
+func AttemptProjectClientContext(ctx context.Context, dir, project, digest string, c ClientActionContext) (ClientStatus, error) {
+	return markProjectClient(ctx, dir, project, digest, c, true)
+}
+
+func markProjectClient(ctx context.Context, dir, project, digest string, c ClientActionContext, attempt bool) (ClientStatus, error) {
 	if !isValidProjectID(project) || !isValidHexLen(digest, 64) {
 		return ClientStatus{}, errors.New("invalid client pointer")
 	}
@@ -257,7 +269,7 @@ func markProjectClient(dir, project, digest string, c ClientActionContext, attem
 	if status.State != expected {
 		return status, errors.New("native client state does not authorize this stage")
 	}
-	if _, _, err = verifyClientPointer(r, j.dir, p); err != nil {
+	if _, _, err = verifyClientPointer(ctx, r, j.dir, p); err != nil {
 		return status, err
 	}
 	if err = j.syncFile(clientFile(digest, "pointer")); err != nil {
@@ -269,6 +281,9 @@ func markProjectClient(dir, project, digest string, c ClientActionContext, attem
 		}
 	}
 	if err = nativeJournalRoom(j.dir, 1); err != nil {
+		return status, err
+	}
+	if err = ctx.Err(); err != nil {
 		return status, err
 	}
 	if err = j.create(clientFile(digest, suffix), claim); err != nil {

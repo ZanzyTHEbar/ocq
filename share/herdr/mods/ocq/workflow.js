@@ -10,6 +10,23 @@ const hex = value => /^[0-9a-f]{64}$/.test(value || "");
 const token = prefix => `${prefix}-${randomBytes(16).toString("hex")}`;
 const pin = b => JSON.stringify([b?.image_sha256, b?.bridge_context, b?.queue_identity, b?.observation_context, b?.observation_store_context]);
 const activeTab = () => { const space = spaces().find(s => s.active); return [space?.id, space?.tabs.find(t => t.active)?.id]; };
+const earlierGoal = "Earlier goal for Main";
+
+function savedSendMessage(value, attempted) {
+  switch (value?.state) {
+    case "ready": return "The exact goal was found in Main’s conversation. This does not confirm the goal is complete.";
+    case "busy": return "The exact goal was found in Main’s conversation, and Main was active when checked.";
+    case "prompt_pending": return "Main’s inbox acknowledged this goal. Main has not been observed reading it.";
+    case "prepared": return attempted ? "The saved draft was found, but its send could not be confirmed." : "The saved draft is prepared and unsent.";
+    case "prompt_attempted_unknown": return value.reason === "exact retained input not observed; never resend" ?
+      "The exact goal was not observed in Main’s conversation or inbox. The earlier send remains unconfirmed." :
+      "The check could not finish verifying the exact goal in Main. The earlier send remains unconfirmed.";
+    case "missing_or_unknown": return "The original Main session could not be observed. The earlier send remains unconfirmed.";
+    case "mismatch":
+    case "role_unverified": return "The original Main session or role could not be verified. The earlier send remains unconfirmed.";
+    default: return "Could not confirm the saved send to Main.";
+  }
+}
 
 // Authoring is separate from project observations so first-project setup does
 // not require the binding it is about to create. Core journals remain authority.
@@ -245,14 +262,32 @@ export class GoalComposer {
     this.run(cx, async (s, task, intended) => {
       const record = this.saved?.[this.key(s)] || this.serverDraft();
       if (!record) return;
-      const value = await this.read(recover && record.phase === "start_attempted" ? "main-recover" : "main-status",
-        [s.space, s.queue, record.project, record.operation]);
-      if (!this.current(s) || value.protocol !== "ocq-main-v1" || value.operation_id !== record.operation ||
-        value.project_id !== record.project || value.mode !== record.mode) throw Error("Different recovered operation");
+      const attempted = record.phase === "start_attempted", checkSend = recover && record.mode === "send";
+      const main = this.host.mainClient.selectedMain;
+      const earlier = this.host.mainClient.goals.find(g => g.main.operation_id === record.operation);
+      const checked = checkSend && { scope: JSON.stringify(s), operation: record.operation,
+        session: main?.session_id, title: earlier?.title || earlierGoal, attempted };
+      let value;
+      try {
+        value = await this.read(recover && attempted ? "main-recover" : "main-status", [s.space, s.queue, record.project, record.operation]);
+        if (!this.current(s) || value.protocol !== "ocq-main-v1" || value.operation_id !== record.operation ||
+          value.project_id !== record.project || value.mode !== record.mode ||
+          checkSend && (!checked.session || value.session_id !== checked.session || value.setup_id !== s.mainSetup ||
+            value.repo !== s.folder || this.host.mainClient.selectedMain?.session_id !== checked.session ||
+            (earlier || record.intent) && value.intent_sha256 !== (earlier?.main.intent_sha256 || record.intent)))
+          throw Error("Different recovered operation");
+      } catch (error) {
+        if (!checkSend) throw error;
+        if (this.current(s)) this.checkedSend = { ...checked, message: "Could not verify this saved action. Nothing was resent." };
+        return;
+      }
+      if (checkSend) this.checkedSend = { ...checked, message: savedSendMessage(value, attempted) };
       this.status = value;
       if (recover && intended() && record.phase === "start_attempted" &&
           (value.state === "ready" || record.mode === "send" && ["busy", "prompt_pending"].includes(value.state))) {
-        await this.accept(s, record, value, task); return;
+        await this.accept(s, record, value, task);
+        if (checkSend && this.current(s)) this.checkedSend.accepted = true;
+        return;
       }
       if (record.phase === "author_uncertain" && value.state === "prepared") {
         record.phase = "prepared"; await this.persist();
@@ -286,7 +321,7 @@ export class GoalComposer {
     const note = text => div().text_size(12).text_color(t.muted).child(text);
     const mode = selectedMain ? "send" : this.host.mainClient.retirement === "deleted" ? "replace" : this.host.selected ? "adopt" : "create";
     const setup = mode === "replace" ? "Create Main" : "Set up Main";
-    box.child(div().font_semibold().child(selectedMain ? (legacyOnly ? "Earlier goal for Main" : "New goal") : setup));
+    box.child(div().font_semibold().child(selectedMain ? (legacyOnly ? earlierGoal : "New goal") : setup));
     const input = () => Textarea.new(this.goal).id("ocq-workflow-goal").accessibility_label("Goal for Main")
       .w_full().min_w(0).h(92).rounded(5).border_1().border_color(t.border).bg(t.input).p(8);
     if (!s || this.storageError) {
@@ -296,7 +331,23 @@ export class GoalComposer {
     }
     const key = JSON.stringify(s);
     const record = this.saved?.[this.key(s)] || this.serverDraft();
-    if (legacyOnly && !record && !this.ambiguousDraft) return null;
+    const last = this.checkedSend;
+    const checked = selectedMain && last?.scope === key && last.session === this.host.mainClient.selectedMain?.session_id &&
+      (!record || last.operation === record.operation) ? last : null;
+    const doNotResend = legacyOnly ? "Don’t resend this earlier goal. New goal starts a separate task." : "Don’t resend this earlier goal.";
+    const showChecked = () => {
+      if (checked.title !== earlierGoal || !legacyOnly) box.child(div().truncate().font_semibold().child(checked.title));
+      box.child(note(checked.message));
+      if (checked.attempted) box.child(note(doNotResend));
+    };
+    // The journal projection can still show the just-accepted draft until the
+    // next refresh. Keep the exact check result visible instead of an old CTA.
+    if (checked?.accepted && (legacyOnly || record && !this.saved?.[this.key(s)])) {
+      showChecked();
+      if (!record && this.ambiguousDraft) box.child(note("Several unsent goals are saved. Ask the project owner which one to continue."));
+      return box;
+    }
+    if (legacyOnly && !record && !this.ambiguousDraft && !checked) return null;
     if (!record && this.ambiguousDraft) return box.child(note("Several unsent goals are saved. Ask the project owner which one to continue."));
     if (this.formContext !== key) {
       this.formContext = key; this.review = null; this.status = null; this.error = null;
@@ -319,18 +370,22 @@ export class GoalComposer {
           .child(button("ocq-submit-goal", record.mode === "send" ? (legacyOnly ? "Send to Main" : "Send goal") : setup, task => this.submit(record.mode, task), !this.busy));
       } else {
         if (record.phase === "start_attempted") {
-          box.child(div().truncate().font_semibold().child(earlier?.title ||
-            (record.mode === "send" ? "Earlier goal sent to Main" : setup)));
-          box.child(note(this.busy ? "Checking the saved action…" :
-            earlier?.work.some(w => w.job?.session_id) ?
-              "This goal has linked sessions. Its original send receipt is unconfirmed; don’t resend it." :
-              record.mode === "send" ? "The earlier send to Main is unconfirmed. Don’t resend this goal." :
-                "Main setup is unconfirmed. Don’t repeat it."));
-        } else box.child(note(this.busy ? "Reading the saved draft…" : "This draft is still unsent."));
+          if (checked && !this.busy) showChecked();
+          else {
+            if (earlier?.title || !legacyOnly) box.child(div().truncate().font_semibold().child(earlier?.title ||
+              (record.mode === "send" ? earlierGoal : setup)));
+            box.child(note(this.busy ? "Checking the saved action…" :
+              record.mode === "send" ? (earlier?.work.some(w => w.job?.session_id) ?
+                "This goal has linked sessions, but the original send to Main is not confirmed." :
+                "The earlier send to Main is unconfirmed.") : "Main setup is unconfirmed. Don’t repeat it."));
+            if (!this.busy && record.mode === "send") box.child(note(doNotResend));
+          }
+        } else box.child(note(this.busy ? "Reading the saved draft…" : checked?.message || "This draft is still unsent."));
         if (this.readContext === readKey)
           box.child(button("ocq-check-goal", "Check saved action", task => this.readSaved(task, true), !this.busy));
       }
     } else if (selectedMain) {
+      if (checked) showChecked();
       box.child(input())
         .child(button("ocq-submit-goal", this.busy ? "Sending…" : "Send goal", task => this.submit(mode, task),
           !this.busy && Boolean(this.goal.value().trim()) && Buffer.byteLength(this.goal.value()) <= 14 << 10));

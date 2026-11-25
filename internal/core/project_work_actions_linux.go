@@ -109,6 +109,8 @@ func PreviewProjectWork(dir, project, id string, c WorkActionContext) (WorkPrevi
 	if status.State == "blocked" {
 		return WorkPreview{}, errors.New("work intent blocked")
 	}
+	// The read-only standalone view is not part of the retained authorization.
+	status.TaskLifecycle = nil
 	out := WorkPreview{Protocol: WorkProtocol, Status: status, Context: c, Binding: rec.Binding, InputJSON: rec.Input, Payload: p.Payload, PayloadSHA256: p.Digest}
 	raw, err := json.Marshal(out)
 	if err != nil {

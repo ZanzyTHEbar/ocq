@@ -122,13 +122,17 @@ func (r *Reader) SubmissionReceipt(raw []byte) (_ ProjectSubmissionReceipt, resu
 	if err != nil {
 		return ProjectSubmissionReceipt{}, faults.Wrap(faults.CodeValidationFailed, "invalid project submission", err)
 	}
-	var meta submissionRowMetadata
-	var found bool
+	var receipt ProjectSubmissionReceipt
 	err = r.store.readSchema5(func(tx sqlQueryer) error {
 		var err error
-		meta, found, err = r.store.lookupProjectSubmissionRow(context.Background(), tx, parsed)
+		receipt, err = r.store.submissionReceiptFrom(tx, parsed)
 		return err
 	})
+	return receipt, err
+}
+
+func (s *store) submissionReceiptFrom(q sqlQueryer, parsed parsedProjectSubmission) (ProjectSubmissionReceipt, error) {
+	meta, found, err := s.lookupProjectSubmissionRow(context.Background(), q, parsed)
 	if err != nil {
 		return ProjectSubmissionReceipt{}, err
 	}

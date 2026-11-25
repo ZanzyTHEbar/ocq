@@ -23,7 +23,11 @@ type nativeService struct {
 // Same-user read-only Service.discover registration contract; never ensure/start,
 // CLI service configuration or a credential-bearing persistent nativeService.
 func discoverNativeService(directory string) (nativeService, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	return discoverNativeServiceContext(context.Background(), directory)
+}
+
+func discoverNativeServiceContext(parent context.Context, directory string) (nativeService, error) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	reg, err := readNativeRegistration(ctx, directory)
 	if err != nil {
@@ -144,10 +148,14 @@ func nativePrivateRequest(ctx context.Context, service nativeService, method, pa
 }
 
 func nativeSession(directory string, service nativeService, id string) (map[string]any, error) {
+	return nativeSessionContext(context.Background(), directory, service, id)
+}
+
+func nativeSessionContext(ctx context.Context, directory string, service nativeService, id string) (map[string]any, error) {
 	if !strings.HasPrefix(id, "ses_") || strings.ContainsAny(id, "/?#\\ \t\r\n\x00") {
 		return nil, errors.New("invalid exact session ID")
 	}
-	b, err := nativeCall(directory, service, "get", "/api/session/"+url.PathEscape(id), nil)
+	b, err := nativeCallContext(ctx, directory, service, "get", "/api/session/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}

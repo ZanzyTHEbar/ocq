@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/ZanzyTHEbar/faults-go"
+
+	"ocq/internal/core/dbquery"
 )
 
 const workIntentLimit = 128
@@ -62,6 +65,10 @@ func workID(id string) bool {
 const workPublicationSpace = "spocqworkpublication"
 
 func workJournal(project string) string { return "project-work-" + sha256Hex([]byte(project)) }
+
+func workSubmissionKey(project, request string) string {
+	return "work-" + sha256Hex([]byte(project+"\n"+request))
+}
 
 func decodeWork(raw []byte) (WorkPrepareRequest, error) {
 	var in WorkPrepareRequest
@@ -215,11 +222,63 @@ func workJob(r *Reader, id string) (*WorkJob, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := &WorkJob{JobID: id, Sequence: strconv.FormatInt(j.Sequence, 10), State: j.State, Outcome: j.Outcome, Reason: j.Reason, TerminalProven: workTerminal(j)}
+	return workJobView(j), nil
+}
+
+func workJobView(j Job) *WorkJob {
+	out := &WorkJob{JobID: j.ID, Sequence: strconv.FormatInt(j.Sequence, 10), State: j.State, Outcome: j.Outcome, Reason: j.Reason, TerminalProven: workTerminal(j)}
 	if j.Agent != nil {
 		out.SessionID, out.Worktree = j.Agent.SessionID, j.Agent.Worktree
 	}
-	return out, nil
+	return out
+}
+
+func standaloneTaskAdmission(r *Reader, rec workRecord, in WorkPrepareRequest, p workPayload, out *WorkStatus) error {
+	parsed, err := parseSubmissionEnvelope([]byte(p.Payload))
+	if err != nil {
+		return err
+	}
+	e := parsed.Envelope
+	if e.ProjectID != in.ProjectID || e.Key != workSubmissionKey(in.ProjectID, in.RequestID) ||
+		e.BindingRevision != rec.Binding.Revision || e.Role != "implementation" ||
+		parsed.Request.Repo != rec.Binding.RepoRoot || parsed.Request.Base != rec.BaseCommit ||
+		parsed.Request.Prompt != in.Brief {
+		return errors.New("standalone task submission identity mismatch")
+	}
+	var receipt ProjectSubmissionReceipt
+	var job Job
+	var laneID string
+	err = r.store.readSchema5(func(tx sqlQueryer) error {
+		var err error
+		receipt, err = r.store.submissionReceiptFrom(tx, parsed)
+		if faults.IsCode(err, faults.CodeNotFound) {
+			return nil // No exact admission observed in this snapshot.
+		}
+		if err != nil {
+			return err
+		}
+		job, err = r.store.getFrom(tx, receipt.JobID)
+		if err != nil {
+			return fmt.Errorf("standalone task job: %w", err)
+		}
+		lane, err := dbquery.New(tx).LaneForJob(context.Background(), dbquery.LaneForJobParams{ProjectID: in.ProjectID, OwnerJobID: receipt.JobID})
+		if err != nil {
+			return fmt.Errorf("standalone task owned lane: %w", err)
+		}
+		if lane.LaneID != parsed.LaneID || lane.Role != e.Role || lane.BaseCommit != rec.BaseCommit ||
+			lane.FsforkDriver != parsed.FsforkDriver || job.Agent == nil {
+			return errors.New("standalone task job/lane ownership mismatch")
+		}
+		laneID = lane.LaneID
+		return nil
+	})
+	if err != nil || receipt.JobID == "" {
+		return err
+	}
+	finished := job.State == "finished" || job.State == "cancelled" || job.State == "resolved"
+	out.TaskLifecycle.LaneID, out.TaskLifecycle.WorkFinished = laneID, &finished
+	out.State, out.Receipt, out.Job = "recorded_observed", &receipt, workJobView(job)
+	return nil
 }
 
 func workInspect(r *Reader, dir *os.File, project, id string) (out WorkStatus, resultErr error) {
@@ -241,6 +300,7 @@ func workInspect(r *Reader, dir *os.File, project, id string) (out WorkStatus, r
 			return out, errors.New("standalone task identity mismatch")
 		}
 		out.TaskGoal = &saved
+		out.TaskLifecycle = &TaskLifecycle{MainHandled: "unverified", SessionArchived: "unverified"}
 	} else if !errors.Is(e, syscall.ENOENT) {
 		return out, e
 	}
@@ -263,7 +323,14 @@ func workInspect(r *Reader, dir *os.File, project, id string) (out WorkStatus, r
 		claim = c
 		out.State = step.state
 	}
-	if in.Kind == "implementation" || in.Kind == "review" {
+	if out.TaskGoal != nil {
+		if err = standaloneTaskAdmission(r, rec, in, p, &out); err != nil {
+			return out, err
+		}
+		if out.Job != nil && out.Job.SessionID != "" {
+			out.Job.SessionState = sessionDeletionState(dir, project, out.Job.SessionID, id)
+		}
+	} else if in.Kind == "implementation" || in.Kind == "review" {
 		receipt, e := r.SubmissionReceipt([]byte(p.Payload))
 		if e == nil {
 			out.State = "recorded_observed"
@@ -585,7 +652,7 @@ func buildWorkPayload(r *Reader, dir *os.File, in WorkPrepareRequest, b ProjectB
 		if err != nil {
 			return nil, err
 		}
-		p.Key = "work-" + sha256Hex([]byte(in.ProjectID+"\n"+in.RequestID))
+		p.Key = workSubmissionKey(in.ProjectID, in.RequestID)
 		p.ProjectID = in.ProjectID
 		p.BindingRevision = b.Revision
 		p.Repo = b.RepoRoot
