@@ -398,9 +398,9 @@ bound. Use narrower exact views when aggregate output exceeds its existing cap.
 Large review prompts reuse the source-validated native discovery/authenticated
 private HTTP body transport, avoiding OS `--data` argument-size limits. The sole
 durable prompt attempt and exact-ID recovery rules are unchanged; Main's smaller
-body/response limits remain unchanged. The cooperative execution policy still
-requires the pinned OpenCode 2.3.2 runtime; the older versions listed for
-permission-rule validation alone are not new larger-inline execution claims.
+body/response limits remain unchanged. The cooperative observer requires the
+expected V2 API shapes and evidence; that transport boundary does not expand
+the separately validated restricted-review permission policy.
 
 Old binaries/clients can reject larger records. Quiesce and replace the matched
 CLI/bridge/dispatcher and affected intake/publication client assets before use;
@@ -601,7 +601,7 @@ These are explicit configured profiles, not invented Elephant/Guppy IDs. Setup
 retains a versioned operating contract with these selections, canonical
 project/queue/state pointers and the actual local CLI path/image digest. Preview
 discloses its complete bytes. Before binding or the first prompt, bootstrap
-journals a separate arm/one attempt for OpenCode 2.3.0/2.3.2's session-scoped instruction
+journals a separate arm/one attempt for OpenCode V2's session-scoped instruction
 entry PUT, then requires exact GET read-back. Lost acknowledgement is recovered
 by GET only; conflicting/removed instructions are never silently overwritten.
 This ordinary instruction entry persists across turns/compaction without a fake
@@ -783,7 +783,7 @@ preview/session creation because OpenCode 2.3 projects an omitted variant as
 loosening their exact profile fence.
 
 Only `opencode --server EXACT_VERIFIED_ORIGIN` is executed, with scoped intended
-authentication. For the source-validated local 2.3.0/2.3.2 service, the documented
+authentication. For a compatible local OpenCode V2 service, the documented
 `Service.discover` registration contract supplies authentication in memory when
 no explicit inherited password was selected. The launcher reads only the
 installed CLI's official private registration, validates same-user ownership,

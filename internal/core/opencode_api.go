@@ -178,6 +178,25 @@ func decodeData(b []byte, out any) error {
 	return classifyDiagnostic(faults.CodeRuntimeFailed, json.Unmarshal(env.Data, out))
 }
 
+// The documented V2 activity API is a map of running sessions. A different
+// representation must not silently turn into an absent (idle) session.
+func decodeSessionActivity(b []byte) (map[string]sessionActivity, error) {
+	var active map[string]sessionActivity
+	if err := decodeData(b, &active); err != nil {
+		return nil, err
+	}
+	for id, status := range active {
+		if !strings.HasPrefix(id, "ses") || status.Type != "running" {
+			return nil, diagnostic(faults.CodeRuntimeFailed, "OpenCode V2 session activity shape unavailable")
+		}
+	}
+	return active, nil
+}
+
+type sessionActivity struct {
+	Type string `json:"type"`
+}
+
 func getSession(ctx context.Context, directory, sessionID string) (sessionInfo, error) {
 	var info sessionInfo
 	if !strings.HasPrefix(sessionID, "ses_") || strings.ContainsAny(sessionID, "/?#\\ \t\r\n\x00") {

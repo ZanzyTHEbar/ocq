@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -128,10 +129,14 @@ func mainRoleEntryKey(role MainRoleContract) string {
 }
 
 func observeMainRole(rec mainRecord) (bool, bool, error) {
+	return observeMainRoleContext(context.Background(), rec)
+}
+
+func observeMainRoleContext(ctx context.Context, rec mainRecord) (bool, bool, error) {
 	if rec.Role.Protocol != MainRoleProtocol || rec.Role.SHA256 != mainRoleDigest(rec.Role) {
 		return false, false, errors.New("retained Main role missing or corrupt; explicit setup required")
 	}
-	seen, present, err := readMainRoleEntry(rec)
+	seen, present, err := readMainRoleEntry(ctx, rec)
 	if err != nil || !present {
 		return false, present, err
 	}
@@ -143,9 +148,9 @@ func observeMainRole(rec mainRecord) (bool, bool, error) {
 
 // There is one active API context key. Immutable previous values live in OCQ's
 // intent journal, not as competing active instruction sources in OpenCode.
-func readMainRoleEntry(rec mainRecord) (MainRoleContract, bool, error) {
+func readMainRoleEntry(ctx context.Context, rec mainRecord) (MainRoleContract, bool, error) {
 	var seen MainRoleContract
-	b, err := nativeCall(rec.Repo, rec.Server, "get", mainRolePath(rec), nil)
+	b, err := nativeCallContext(ctx, rec.Repo, rec.Server, "get", mainRolePath(rec), nil)
 	if err != nil {
 		return seen, false, err
 	}

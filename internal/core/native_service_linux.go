@@ -38,11 +38,15 @@ func discoverNativeServiceContext(parent context.Context, directory string) (nat
 	if err != nil {
 		return nativeService{}, err
 	}
-	var info map[string]any
-	if json.Unmarshal(body, &info) != nil || info["version"] != reg.Version || info["pid"] != float64(reg.PID) || info["hostname"] == nil {
-		return nativeService{}, errors.New("native client requires matching source-validated OpenCode server 2.3.0 or 2.3.2 identity")
+	var info struct {
+		Version  string `json:"version"`
+		PID      int    `json:"pid"`
+		Hostname string `json:"hostname"`
 	}
-	identity, _ := json.Marshal(map[string]any{"origin": reg.URL, "version": info["version"], "pid": info["pid"], "hostname": info["hostname"], "registration_id": reg.ID})
+	if json.Unmarshal(body, &info) != nil || info.Version != reg.Version || info.PID != reg.PID || strings.TrimSpace(info.Hostname) == "" {
+		return nativeService{}, errors.New("OpenCode /api/info does not match the exact managed V2 registration identity")
+	}
+	identity, _ := json.Marshal(map[string]any{"origin": reg.URL, "version": info.Version, "pid": info.PID, "hostname": info.Hostname, "registration_id": reg.ID})
 	service.Identity = sha256Hex(identity)
 	return service, nil
 }

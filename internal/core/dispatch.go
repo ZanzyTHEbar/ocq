@@ -25,12 +25,17 @@ type completion struct {
 	outputErr error
 }
 
-func (s *store) dispatch(ctx context.Context, slots int, floor int64, commandsOnly bool, onReady func()) error {
+func (s *store) dispatch(ctx context.Context, slots int, floor int64, commandsOnly bool, handoffProject string, onReady func()) error {
 	lock, err := s.lock()
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
+	if handoffProject != "" {
+		if err = s.checkAutomaticTaskHandoff(ctx, handoffProject); err != nil {
+			return err
+		}
+	}
 	boot, err := bootID()
 	if err != nil {
 		return err
@@ -68,6 +73,17 @@ func (s *store) dispatch(ctx context.Context, slots int, floor int64, commandsOn
 	if onReady != nil {
 		onReady()
 	}
+	stopHandoffs := func() {}
+	if handoffProject != "" {
+		handoffCtx, cancel := context.WithCancel(ctx)
+		stopHandoffs = cancel
+		handoffDone := make(chan struct{})
+		go func() {
+			defer close(handoffDone)
+			s.advanceTaskHandoffs(handoffCtx, handoffProject, slots, floor)
+		}()
+		defer func() { cancel(); <-handoffDone }()
+	}
 	for {
 		if !stopping {
 			select {
@@ -98,6 +114,9 @@ func (s *store) dispatch(ctx context.Context, slots int, floor int64, commandsOn
 				stopping = true // No additional launches after a persistence error.
 			}
 		}
+		if stopping {
+			stopHandoffs()
+		}
 		select {
 		case <-stop:
 			stopping = true
@@ -106,6 +125,7 @@ func (s *store) dispatch(ctx context.Context, slots int, floor int64, commandsOn
 			if err := s.finish(result); err != nil {
 				fatal = errors.Join(fatal, err)
 				stopping = true
+				stopHandoffs()
 			}
 		case <-tick.C:
 		}
@@ -240,7 +260,7 @@ func (s *store) admit(boot string, slots int, floor int64, done chan<- completio
 		if err = c.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil {
 			return err
 		}
-		if version == 7 {
+		if supportedSchedulingSchema(version) {
 			_, err = c.ExecContext(context.Background(), `UPDATE scheduling_policy SET last_project=
 		 (SELECT project_id FROM job_scheduling WHERE job_id=?) WHERE singleton=1
 		 AND EXISTS(SELECT 1 FROM job_scheduling WHERE job_id=?)`, head.ID, head.ID)

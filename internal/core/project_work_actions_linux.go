@@ -205,6 +205,24 @@ func ConfirmProjectWork(dir, project, id, digest string, c WorkActionContext) (W
 			return status, errors.New("terminal parent proof no longer available")
 		}
 	}
+	var handoff *taskHandoffTarget
+	if status.TaskGoal != nil {
+		if _, err := standaloneTaskSubmission(rec, in, p); err != nil {
+			return status, err
+		}
+		handoff = &taskHandoffTarget{RequestID: id, IntentDigest: rec.Digest, Binding: rec.Binding}
+		ready, err := mainHandledSchemaReady(r.store.db)
+		if err != nil {
+			return status, err
+		}
+		if ready {
+			main, _, selected, err := selectedMain(r, j.dir, project)
+			if err != nil || selected != rec.Binding {
+				return status, errors.New("schema 8 standalone admission requires the exact selected Main")
+			}
+			handoff.SetupID = main.SetupID
+		}
+	}
 	claim := workClaim{rec.Digest, p.Digest, digest, c}
 	if err = j.syncFile(id + ".started.json"); err != nil {
 		return status, err
@@ -231,7 +249,7 @@ func ConfirmProjectWork(dir, project, id, digest string, c WorkActionContext) (W
 	if in.Kind == "implementation" || in.Kind == "review" {
 		w, e := OpenExistingProjectIntake(dir)
 		if e == nil {
-			_, e = w.SubmitProject([]byte(p.Payload))
+			_, e = (&Queue{store: w.store}).submitProject([]byte(p.Payload), nil, handoff)
 			e = errors.Join(e, w.Close())
 		}
 		err = e

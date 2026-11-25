@@ -167,9 +167,12 @@ export class MainClientControls {
     if (!this.intentCurrent(intent) || intent.readOnly ||
         p.space !== intent.scope.space || p.session_id !== intent.session || p.target_kind !== intent.kind ||
         (p.work_request_id || "") !== intent.work) return false;
+    if (intent.kind === "worker") {
+      const job = this.work().rows.find(v => v.request_id === intent.work)?.job;
+      return p.job_id === job?.job_id && p.sequence === job?.sequence;
+    }
     const main = this.selectedMain;
-    return intent.kind !== "integrator" || (p.cwd === intent.scope.folder &&
-      p.setup_id === main?.setup_id && p.binding_revision === main?.binding_revision);
+    return p.cwd === intent.scope.folder && p.setup_id === main?.setup_id && p.binding_revision === main?.binding_revision;
   }
   markerKey(action, scope, target) { return JSON.stringify([action, scope.source ?? scope.machine, scope.space, scope.queue, scope.project, target]); }
   attempted(action, scope, target) {
@@ -201,7 +204,7 @@ export class MainClientControls {
     const intent = this.openIntent;
     if (intent?.kind === kind && intent.work === work && intent.session === session) {
       if (this.tabNavigation?.intent === intent) return "Looking for the viewer in this project’s tabs…";
-      if (this.working) return intent.readOnly ? "Checking this opening…" : "Verifying and opening this conversation…";
+      if (this.working && !intent.attaching) return intent.readOnly ? "Checking this opening…" : "Verifying and opening this conversation…";
     }
     return this.openingMessages.get(this.openingKey(kind, work, session));
   }
@@ -278,7 +281,7 @@ export class MainClientControls {
             return;
           }
         }
-        const proof = await this.observeViewers(intent, authorization);
+        const proof = await this.observeViewers(intent, authorization, task);
         if (!this.intentCurrent(intent)) {
           if (this.openIntent === intent) this.openRefused(task);
           return;
@@ -321,10 +324,25 @@ export class MainClientControls {
     const value = this.checkedClientView(view, scope, stored.pointer_sha256, stored);
     return this.targetCurrent({ value }) ? view : null;
   }
-  async observeViewers(intent, authorization, reviewedTarget = null) {
+  async observeViewers(intent, authorization, task, reviewedTarget = null) {
+    let expired = false, timer;
+    const timeout = new Promise((_, reject) => {
+      timer = task.timer.after(15000, () => {
+        expired = true;
+        reject(Error("Saved viewer observation timed out"));
+      });
+    });
+    // Stop awaiting this read without treating a missing result as closure.
+    // The transport still settles its in-flight command; the guard forbids
+    // late results from starting another history read or lending authority.
+    try {
+      return await Promise.race([this.readViewers(intent, authorization, () => !expired, reviewedTarget), timeout]);
+    } finally { timer.cancel(); }
+  }
+  async readViewers(intent, authorization, withinBudget, reviewedTarget) {
     const { scope, generation, kind, work, session } = intent;
     const hc = this.host.nativeHC.approved, context = this.host.nativeHC.context();
-    const current = () => this.intentCurrent(intent) && this.authorized(authorization, scope, generation) &&
+    const current = () => withinBudget() && this.intentCurrent(intent) && this.authorized(authorization, scope, generation) &&
       hc === this.host.nativeHC.approved && context === this.host.nativeHC.context();
     if (!session || !current()) throw Error("Exact conversation context is unavailable.");
     const matches = v => v.pointer.target_kind === kind && v.pointer.session_id === session &&
@@ -374,12 +392,11 @@ export class MainClientControls {
         const exactReady = reviewedTarget?.pointer_sha256 === digest &&
           status?.state === "ready_to_open" && !status.terminal && !old?.terminal &&
           identity(status.pointer) === identity(reviewedTarget.pointer);
-        const view = exactReady ? { protocol: "ocq-client-v1", current_route: "unverified", status, terminal_state: "unobserved" } :
-          await this.call("client-verify", scope, digest, true, [], current, hc.value.binding_sha256);
+        const view = exactReady ? null : await this.call("client-verify", scope, digest, true, [], current, hc.value.binding_sha256);
         if (!current()) throw Error("Conversation context changed.");
         let client;
         try {
-          client = this.checkedClientView(view, scope, digest, old || status);
+          client = exactReady ? status : this.checkedClientView(view, scope, digest, old || status);
           if (!matches(client) || status && (identity(status.pointer) !== identity(client.pointer) ||
               status.terminal && identity(status.terminal) !== identity(client.terminal))) throw Error();
         } catch (_) { throw conflict("Returned viewer identity does not match its retained record."); }
@@ -391,7 +408,7 @@ export class MainClientControls {
         const state = client.state === "blocked" ? "unobservable" :
           client.terminal && view.terminal_state === "live" ? "live" :
           client.terminal && view.terminal_state === "finished" && client.state === "terminal_recorded" ? "finished" :
-          !client.terminal && view.terminal_state === "unobserved" && client.state === "ready_to_open" &&
+          !client.terminal && (exactReady || view.terminal_state === "unobserved") && client.state === "ready_to_open" &&
             !this.attempted("client-open", scope, digest) ? "not_invoked" : "unobservable";
         rows.push({ client, view, state });
       } catch (error) {
@@ -458,25 +475,27 @@ export class MainClientControls {
       history: [...new Map(history.map(v => [v.pointer, v])).values()] };
     this.navigations[key] = navigation;
     this.review = null;
-      try {
-        localStorage.setItem("native-navigation-v1", JSON.stringify(this.navigations));
-        await localStorage.flush();
-        const authorization = proof.authorization;
-        if (!this.proofCurrent(proof)) return this.openRefused(cx, undefined, proof.intent);
-        const value = await this.call("client-attention-prepare-v1", scope, navigation.id, true, [kind, work], () => this.proofCurrent(proof));
-        if (!this.proofCurrent(proof)) return this.openRefused(cx, undefined, proof.intent);
-        pointer(value, scope);
-        if (value.navigation_id !== navigation.id || value.target_kind !== kind || (value.work_request_id || "") !== work || value.space !== scope.space ||
-            this.openIntent && value.session_id !== this.openIntent.session) throw Error("Different client target");
-        navigation.phase = "prepared"; navigation.pointer = value.pointer_sha256;
-        localStorage.setItem("native-navigation-v1", JSON.stringify(this.navigations));
-        await localStorage.flush();
-        if (!this.proofCurrent(proof)) return this.openRefused(cx, undefined, proof.intent);
-        this.selectClient({ protocol: "ocq-client-v1", project_id: scope.project, pointer_sha256: value.pointer_sha256,
-          state: "ready_to_open", pointer: value, attempt_permitted: false, current_route: "unverified" });
-        this.freeze(this.client, scope, generation, authorization);
-      } catch (_) { this.setOpeningMessage(proof.intent, "Could not verify preparation. The saved opening is retained; no viewer launch was requested."); }
-    if (this.review) await this.continueOpen(cx);
+    try {
+      localStorage.setItem("native-navigation-v1", JSON.stringify(this.navigations));
+      await localStorage.flush();
+      if (!this.proofCurrent(proof)) return this.openRefused(cx, undefined, proof.intent);
+      const value = await this.call("client-attention-prepare-v1", scope, navigation.id, true, [kind, work], () => this.proofCurrent(proof));
+      if (!this.proofCurrent(proof)) return this.openRefused(cx, undefined, proof.intent);
+      pointer(value, scope);
+      if (value.navigation_id !== navigation.id || value.target_kind !== kind || (value.work_request_id || "") !== work ||
+          value.space !== scope.space || value.session_id !== proof.intent.session) throw Error("Different client target");
+      navigation.phase = "prepared"; navigation.pointer = value.pointer_sha256;
+      localStorage.setItem("native-navigation-v1", JSON.stringify(this.navigations));
+      await localStorage.flush();
+      if (!this.proofCurrent(proof)) return this.openRefused(cx, undefined, proof.intent);
+      this.selectClient({ protocol: "ocq-client-v1", project_id: scope.project, pointer_sha256: value.pointer_sha256,
+        state: "ready_to_open", pointer: value, attempt_permitted: false, current_route: "unverified" });
+      this.freeze(this.client, scope, generation, proof.authorization);
+    } catch (_) {
+      this.setOpeningMessage(proof.intent, "Could not verify preparation. The saved opening is retained; no viewer launch was requested.");
+      return;
+    }
+    await this.continueOpen(cx);
   }
   async continueOpen(cx) {
     const review = this.review, scope = review?.scope;
@@ -488,45 +507,43 @@ export class MainClientControls {
     const key = this.markerKey(action, scope, target);
     const completionCurrent = () => this.authorized(review, scope, review.generation) && this.targetCurrent(review) &&
       review.hc === this.host.nativeHC.approved && !!this.host.nativeHC.approvedDigest("navigation");
-    const attempt = { state: "not_invoked", digest: target };
     const intent = this.openIntent;
-    this.attempts[key] = attempt;
-      let invoked = false;
-      try {
-        await this.saveAttempts();
-        if (!this.pinned(review)) throw Error("Context changed");
-        // Read the entire retained set again immediately before arming.
-        const proof = await this.observeViewers(intent, review, review.value);
-        if (!this.pinned(review) || !this.intentCurrent(proof.intent) || proof.unresolvedLocal ||
-            proof.rows.some(r => r.state === "live" || r.state === "unobservable") ||
-            !proof.rows.some(r => r.client?.pointer_sha256 === target && r.state === "not_invoked"))
-          throw Error("Another viewer is live, pending or unobservable");
-        this.navigationProof = proof;
-        attempt.state = "uncertain"; await this.saveAttempts();
-        if (!this.pinned(review) || !this.proofCurrent()) throw Error("Context changed");
-        invoked = true;
-        const value = await this.call(action, scope, target, true, [],
-          () => this.pinned(review) && this.proofCurrent(), review.hc.value.binding_sha256);
-        // A successful open changes the observed client state and may clear its
-        // review. Keep the original dispatch fence, but validate completion by
-        // the same scope/pins/HC identity rather than that expected old state.
-        if (!completionCurrent()) return this.openRefused(cx, "The project or tab changed. Check opening status; no launch will be repeated.", intent);
-        this.acceptClientView(value, scope, target);
-        // client-open records the exact fresh terminal.get result. Herdr
-        // still checks the native terminal and pane before attaching/focusing.
-        if (this.verification.state === "live") await this.showTerminal(scope, this.client, cx);
-        else this.setOpeningMessage(intent, this.client.terminal ?
-          "A launch is recorded, but the viewer was not verified live. Use Check opening to verify its status." :
-          "The launch was not confirmed. Check opening; OCQ won’t repeat it.");
-      } catch (_) {
-        if (!invoked && this.attempts[key] === attempt) {
-          attempt.state = "not_invoked";
-          try { await this.saveAttempts(); } catch (_) { attempt.state = "uncertain"; this.storageError = true; }
-        }
-        this.setOpeningMessage(intent, invoked
-          ? "The owner did not confirm this launch. Check opening; OCQ won’t repeat it."
-          : "Could not verify a safe launch. No launch was requested.");
+    const attempt = { state: "uncertain", digest: target };
+    let invoked = false;
+    try {
+      // Read the entire retained set again immediately before arming.
+      const proof = await this.observeViewers(intent, review, cx, review.value);
+      if (!this.pinned(review) || !this.intentCurrent(proof.intent) || proof.unresolvedLocal ||
+          proof.rows.some(r => r.state === "live" || r.state === "unobservable") ||
+          !proof.rows.some(r => r.client?.pointer_sha256 === target && r.state === "not_invoked"))
+        throw Error("Another viewer is live, pending or unobservable");
+      this.navigationProof = proof;
+      this.attempts[key] = attempt;
+      await this.saveAttempts();
+      if (!this.pinned(review) || !this.proofCurrent()) throw Error("Context changed");
+      invoked = true;
+      const value = await this.call(action, scope, target, true, [],
+        () => this.pinned(review) && this.proofCurrent(), review.hc.value.binding_sha256);
+      // A successful open changes the observed client state and may clear its
+      // review. Keep the original dispatch fence, but validate completion by
+      // the same scope/pins/HC identity rather than that expected old state.
+      if (!completionCurrent()) return this.openRefused(cx, "The project or tab changed. Check opening status; no launch will be repeated.", intent);
+      this.acceptClientView(value, scope, target);
+      // client-open records the exact fresh terminal.get result. Herdr
+      // still checks the native terminal and pane before attaching/focusing.
+      if (this.verification.state === "live") await this.showTerminal(scope, this.client, cx);
+      else this.setOpeningMessage(intent, this.client.terminal ?
+        "A launch is recorded, but the viewer was not verified live. Use Check opening to verify its status." :
+        "The launch was not confirmed. Check opening; OCQ won’t repeat it.");
+    } catch (_) {
+      if (!invoked && this.attempts[key] === attempt) {
+        attempt.state = "not_invoked";
+        try { await this.saveAttempts(); } catch (_) { attempt.state = "uncertain"; this.storageError = true; }
       }
+      this.setOpeningMessage(intent, invoked
+        ? "The owner did not confirm this launch. Check opening; OCQ won’t repeat it."
+        : "Could not verify a safe launch. No launch was requested.");
+    }
   }
   checkedClientView(value, scope, digest, previous = null) {
     if (value.protocol !== "ocq-client-v1" || value.current_route !== "unverified" ||
@@ -570,7 +587,7 @@ export class MainClientControls {
     const receipt = value.terminal;
     if (!receipt || value !== this.client || !this.current(scope) || !this.verifiedClient(value) ||
         this.verification.state !== "live" || receipt.peer !== (scope.machine ?? "local") ||
-        !this.intentCurrent() || this.openIntent.readOnly) throw Error("Native navigation intent or receipt changed");
+        !this.targetCurrent({ value })) throw Error("Native navigation intent or receipt changed");
     if (this.tabNavigation) return;
     const address = scope.machine === null ? receipt.returned_terminal_id : `${scope.machine}/${receipt.returned_terminal_id}`;
     const spaceID = scope.machine === null ? scope.space : `${scope.machine}/${scope.space}`;
@@ -581,6 +598,7 @@ export class MainClientControls {
       marker: panelEpoch(), origin: this.navigationOrigin(), digest: value.pointer_sha256,
       cwd: receipt.cwd, argv: JSON.stringify(receipt.argv), hc: receipt.labels["ocq.hc_binding"],
       key: this.markerKey("terminal.keep", scope, value.pointer_sha256), phase: "observing" };
+    ticket.intent.attaching = true;
     this.tabNavigation = ticket;
     const expiry = task.timer.after(6000, task => {
       if (this.tabNavigation !== ticket) return;
@@ -591,79 +609,85 @@ export class MainClientControls {
     // Event/task only, implicitly owned. Native observation is bounded; expiry
     // ends the spinner, never proves failure or permits another keep.
     task.notify();
-      try {
-        for (let read = 0; read < 40; read++) {
-          if (!this.tabTicketCurrent(ticket)) {
-            ticket.message = "Navigation context changed. Further selection and attachment were cancelled; prior attempts remain retained.";
-            return;
-          }
-          const terminal = terminals().find(t => t.address === ticket.address);
-          if (terminal && (terminal.state !== "live" || terminal.cwd !== ticket.cwd ||
-              JSON.stringify(terminal.argv) !== ticket.argv || terminal.labels?.["ocq.handoff"] !== ticket.digest ||
-              terminal.labels?.["ocq.hc_binding"] !== ticket.hc || terminal.labels?.["herdr.space"] !== scope.space))
-            throw Error("The native viewer identity or state changed. No attachment was repeated.");
-          const nativePanes = panes().filter(p => p.terminal === ticket.address);
-          if (nativePanes.length > 1) throw Error("The viewer has conflicting pane identities; nothing was selected.");
-          const pane = nativePanes[0], currentSpace = spaces().find(s => s.id === ticket.spaceID && s.machine === scope.machine);
-          if (!currentSpace) throw Error("The exact existing project space is unavailable.");
-          if (terminal && pane) {
-            if (!currentSpace.tabs.some(t => t.id === pane.tab)) throw Error("The viewer is attached outside its exact project space; nothing was moved.");
-            const saved = this.attempts[ticket.key];
-            if (this.attempted("terminal.keep", scope, ticket.digest) &&
-                (saved.state !== "attached" || saved.terminal !== ticket.address || saved.tab !== pane.tab)) {
-              this.attempts[ticket.key] = { ...saved, state: "attached",
-                digest: ticket.digest, terminal: ticket.address, tab: pane.tab };
-              await this.saveAttempts();
-            }
+    const exactTerminal = () => {
+      const terminal = terminals().find(t => t.address === ticket.address);
+      return terminal && (terminal.state === "live" && terminal.cwd === ticket.cwd &&
+        JSON.stringify(terminal.argv) === ticket.argv && terminal.labels?.["ocq.handoff"] === ticket.digest &&
+        terminal.labels?.["ocq.hc_binding"] === ticket.hc && terminal.labels?.["herdr.space"] === scope.space);
+    };
+    try {
+      for (let read = 0; read < 40; read++) {
+        if (!this.tabTicketCurrent(ticket)) {
+          ticket.message = "Navigation context changed. Further selection and attachment were cancelled; prior attempts remain retained.";
+          return;
+        }
+        const terminal = exactTerminal();
+        if (terminal === false) throw Error("The native viewer identity or state changed. No attachment was repeated.");
+        const nativePanes = panes().filter(p => p.terminal === ticket.address);
+        if (nativePanes.length > 1) throw Error("The viewer has conflicting pane identities; nothing was selected.");
+        const pane = nativePanes[0], currentSpace = spaces().find(s => s.id === ticket.spaceID && s.machine === scope.machine);
+        if (!currentSpace) throw Error("The exact existing project space is unavailable.");
+        if (terminal && pane) {
+          if (!currentSpace.tabs.some(t => t.id === pane.tab)) throw Error("The viewer is attached outside its exact project space; nothing was moved.");
+          const saved = this.attempts[ticket.key];
+          if (this.attempted("terminal.keep", scope, ticket.digest) &&
+              (saved.state !== "attached" || saved.terminal !== ticket.address || saved.tab !== pane.tab)) {
+            this.attempts[ticket.key] = { ...saved, state: "attached",
+              digest: ticket.digest, terminal: ticket.address, tab: pane.tab };
+            await this.saveAttempts();
             if (!this.tabTicketCurrent(ticket)) return;
-            if (!panes().some(p => p.terminal === ticket.address && p.tab === pane.tab && p.pane === pane.pane))
+            const observed = panes().filter(p => p.terminal === ticket.address);
+            if (!exactTerminal() || observed.length !== 1 || observed[0].tab !== pane.tab || observed[0].pane !== pane.pane ||
+                !spaces().some(s => s.id === ticket.spaceID && s.machine === scope.machine && s.tabs.some(t => t.id === pane.tab)))
               throw Error("The observed pane changed before selection.");
-            ticket.phase = "attached";
-            run("space.select", { id: currentSpace.id });
-            run("tab.select", { id: pane.tab });
-            run("pane.focus", { terminal: ticket.address });
-            return;
           }
-          if (terminal && ticket.phase === "observing" && !ticket.attachedOnly) {
-            ticket.phase = "waiting";
-            if (!this.attempted("terminal.keep", scope, ticket.digest)) {
-              if (!this.intentCurrent(ticket.intent) || !this.verifiedClient(value)) return;
-              let invoked = false;
-              const attempt = { state: "not_invoked", digest: ticket.digest };
-              try {
-                this.attempts[ticket.key] = attempt;
-                await this.saveAttempts();
-                if (!this.tabTicketCurrent(ticket) || !this.intentCurrent(ticket.intent) || !this.verifiedClient(value)) return;
-                attempt.state = "uncertain"; await this.saveAttempts();
-                if (!this.tabTicketCurrent(ticket) || !this.intentCurrent(ticket.intent) || !this.verifiedClient(value)) return;
-                invoked = true;
-                run("terminal.keep", { terminal: ticket.address, place: "tab" });
-              } finally {
-                if (!invoked && this.attempts[ticket.key] === attempt) {
-                  attempt.state = "not_invoked";
-                  try { await this.saveAttempts(); }
-                  catch (_) { attempt.state = "uncertain"; this.storageError = true; }
-                }
+          ticket.phase = "attached";
+          if (!currentSpace.active) run("space.select", { id: currentSpace.id });
+          if (!currentSpace.tabs.some(t => t.id === pane.tab && t.active)) run("tab.select", { id: pane.tab });
+          run("pane.focus", { pane: pane.pane });
+          return;
+        }
+        if (terminal && ticket.phase === "observing" && !ticket.attachedOnly) {
+          ticket.phase = "waiting";
+          if (!this.attempted("terminal.keep", scope, ticket.digest)) {
+            if (!this.verifiedClient(value)) return;
+            let invoked = false;
+            const attempt = { state: "uncertain", digest: ticket.digest };
+            try {
+              this.attempts[ticket.key] = attempt;
+              await this.saveAttempts();
+              if (!this.tabTicketCurrent(ticket) || !this.verifiedClient(value) || !exactTerminal()) return;
+              // A pane may have appeared during the storage flush. Observe it
+              // on the next pass rather than repeating attachment.
+              if (panes().some(p => p.terminal === ticket.address)) continue;
+              invoked = true;
+              run("terminal.keep", { terminal: ticket.address, place: "tab" });
+            } finally {
+              if (!invoked && this.attempts[ticket.key] === attempt) {
+                attempt.state = "not_invoked";
+                try { await this.saveAttempts(); }
+                catch (_) { attempt.state = "uncertain"; this.storageError = true; }
               }
             }
           }
-          await task.sleep(125);
         }
-        ticket.message = "Project-tab attachment is not yet observed. Check opening status; no viewer launch or keep will be repeated.";
-      } catch (error) { ticket.message = error.message || "Attachment is unconfirmed; no keep was repeated."; }
-      finally {
-        expiry.cancel();
-        if (this.tabNavigation === ticket) {
-          this.tabNavigation = null;
-          this.setOpeningMessage(ticket.intent, ticket.message || (ticket.phase === "attached" ?
-            "The viewer is live in this project’s tabs." : "Project-tab attachment was not confirmed. Use Check opening to verify the viewer."));
-          task.notify();
-        }
+        await task.sleep(125);
       }
+      ticket.message = "Project-tab attachment is not yet observed. Check opening status; no viewer launch or keep will be repeated.";
+    } catch (error) { ticket.message = error.message || "Attachment is unconfirmed; no keep was repeated."; }
+    finally {
+      expiry.cancel();
+      if (this.tabNavigation === ticket) {
+        this.tabNavigation = null;
+        this.setOpeningMessage(ticket.intent, ticket.message || (ticket.phase === "attached" ?
+          "The viewer is live in this project’s tabs." : "Project-tab attachment was not confirmed. Use Check opening to verify the viewer."));
+        task.notify();
+      }
+    }
   }
   tabTicketCurrent(ticket) {
     const h = this.host;
-    return this.tabNavigation === ticket && !h.closed && (!h.root || h.root.detail === h) &&
+    return this.tabNavigation === ticket && this.intentCurrent(ticket.intent) && !h.closed && (!h.root || h.root.detail === h) &&
       (!h.source || h.source.current() && h.source.generation === ticket.sourceGeneration) &&
       h.selected === ticket.scope.project && JSON.stringify(h.setupContext) === ticket.context &&
       h.nativeHC.approvedDigest("navigation") === ticket.hc &&

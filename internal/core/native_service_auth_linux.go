@@ -42,7 +42,7 @@ func readNativeRegistration(ctx context.Context, directory string) (nativeRegist
 	if !filepath.IsAbs(state) || strings.ContainsAny(state, "\r\n\x00") {
 		return reg, errors.New("invalid OpenCode state path")
 	}
-	// Stable 2.3.0/2.3.2 CLI and the documented Service fallback select service.json.
+	// Use only the known managed registration filename and verify its shape.
 	// No legacy/channel scan, config/password getter, migration or ensure/start.
 	fd, err := syscall.Open(state, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
@@ -78,8 +78,8 @@ func readNativeRegistration(ctx context.Context, directory string) (nativeRegist
 		return nativeRegistration{}, errors.New("official registration invalid/bounded")
 	}
 	u, err := url.Parse(reg.URL)
-	if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.Port() == "" || strings.ContainsAny(reg.URL, "\r\n\x00") || (reg.Version != "2.3.0" && reg.Version != "2.3.2") || reg.PID <= 0 || reg.ID == "" {
-		return nativeRegistration{}, errors.New("source-validated exact managed service identity/origin unavailable")
+	if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.Port() == "" || strings.ContainsAny(reg.URL, "\r\n\x00") || !isOpenCodeV2(reg.Version) || reg.PID <= 0 || reg.ID == "" {
+		return nativeRegistration{}, errors.New("exact managed OpenCode V2 registration identity/origin unavailable")
 	}
 	ip := net.ParseIP(u.Hostname())
 	if ip == nil || !ip.IsLoopback() {

@@ -42,7 +42,7 @@ func ReadSchedulingPolicy(dir string) (SchedulingPolicy, error) {
 	if err = tx.QueryRow("PRAGMA user_version").Scan(&v.Schema); err != nil {
 		return v, err
 	}
-	if v.Schema != 7 {
+	if !supportedSchedulingSchema(v.Schema) {
 		return v, nil
 	}
 	var cutoff int64
@@ -70,7 +70,7 @@ func (s *store) validateSchedulingIdentity() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version != 7 {
+	if !supportedSchedulingSchema(version) {
 		return nil
 	}
 	var expected string
@@ -159,7 +159,7 @@ func (q *Queue) ActivateScheduling() error {
 		return err
 	}
 	defer lock.Close()
-	if err := migrateStore(q.store.db, true); err != nil {
+	if err := migrateStore(q.store.db, 3); err != nil {
 		return err
 	}
 	identity, err := notificationQueueIdentity(q.store)
@@ -171,8 +171,8 @@ func (q *Queue) ActivateScheduling() error {
 		if err := c.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil {
 			return err
 		}
-		if version != 7 {
-			return fmt.Errorf("scheduling activation requires schema 7")
+		if !supportedSchedulingSchema(version) {
+			return fmt.Errorf("scheduling activation requires schema 7 or 8")
 		}
 		_, err := c.ExecContext(context.Background(), `INSERT INTO scheduling_policy(singleton,cutoff,activated_at,queue_identity)
 		 SELECT 1,COALESCE(max(sequence),0),?,? FROM receipts WHERE true ON CONFLICT(singleton) DO NOTHING`, now(), identity)
@@ -186,7 +186,7 @@ func insertScheduling(c *sql.Conn, id string, raw []byte, project string) error 
 	if err := c.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version != 7 {
+	if !supportedSchedulingSchema(version) {
 		if len(raw) > 0 {
 			return fmt.Errorf("scheduling metadata requires schema 7")
 		}
@@ -240,7 +240,7 @@ func compareScheduling(q sqlQueryer, id string, raw []byte, project string) erro
 	if err := q.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version != 7 {
+	if !supportedSchedulingSchema(version) {
 		if len(raw) > 0 {
 			return fmt.Errorf("scheduling metadata requires schema 7")
 		}
@@ -273,7 +273,7 @@ func readJobScheduling(q sqlQueryer, id string) (*SchedulingEnvelope, error) {
 	if err := q.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil {
 		return nil, err
 	}
-	if version != 7 {
+	if !supportedSchedulingSchema(version) {
 		return nil, nil
 	}
 	var raw []byte
@@ -322,7 +322,7 @@ func projectScheduling(q sqlQueryer, p parsedProjectSubmission, raw []byte) ([]b
 	if err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return nil, err
 	}
-	if version != 7 {
+	if !supportedSchedulingSchema(version) {
 		return nil, nil
 	}
 	var id string
@@ -375,7 +375,7 @@ func (s *store) schedulingCandidate(q sqlQueryer, available int64, slots int, fl
 	if err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return "", err
 	}
-	if version != 7 {
+	if !supportedSchedulingSchema(version) {
 		var id string
 		err := q.QueryRowContext(ctx, `SELECT j.id FROM receipts r JOIN jobs j ON j.id=r.job_id WHERE j.state='queued' ORDER BY r.sequence LIMIT 1`).Scan(&id)
 		return id, err

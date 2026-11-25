@@ -69,7 +69,7 @@ export class ProjectSessions {
       const lifecycle = item.task_lifecycle;
       if (lifecycle && (!/^lane-[A-Za-z0-9_-]{1,123}$/.test(lifecycle.lane_id || "") ||
           lifecycle.work_finished !== ["finished", "cancelled", "resolved"].includes(job.state) ||
-          lifecycle.main_handled !== "unverified" || lifecycle.session_archived !== "unverified"))
+          !["unverified", "recorded"].includes(lifecycle.main_handled) || lifecycle.session_archived !== "unverified"))
         throw Error("Invalid standalone task lifecycle");
       const session = job.session_id;
       if (session && (!validSession(session) || conflicts.has(session))) continue;

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -118,8 +117,8 @@ func nativeReleaseImages() (nativeImages, error) {
 	var version handoffOutput
 	c.Stdout = &version
 	c.Stderr = io.Discard
-	if c.Run() != nil || (strings.TrimSpace(version.String()) != "opencode v2.3.0" && strings.TrimSpace(version.String()) != "opencode v2.3.2") {
-		return out, errors.New("native client requires exact source-validated OpenCode 2.3.0 or 2.3.2")
+	if c.Run() != nil || !isOpenCodeV2CLI(version.String()) {
+		return out, errors.New("native client requires an identifiable OpenCode V2 CLI")
 	}
 	return out, nil
 }

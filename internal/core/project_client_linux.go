@@ -113,8 +113,8 @@ func nativeClientIdleContext(ctx context.Context, directory string, service nati
 	if err != nil {
 		return err
 	}
-	var active map[string]json.RawMessage
-	if decodeData(body, &active) != nil {
+	active, err := decodeSessionActivity(body)
+	if err != nil {
 		return errors.New("native client idle state unavailable")
 	}
 	if _, running := active[id]; running {

@@ -126,7 +126,7 @@ func pushCommands() []*cobra.Command {
 		folder, _ := cmd.Flags().GetString("mod-folder")
 		binding, err := compatibilityContext(cmd.Context(), space, folder)
 		if err != nil || binding.Queue == "" || !pushObservationSchema(binding.ObservationSchema) {
-			return errors.New("push requires an existing private schema6/7 store and explicit mod-space/mod-folder")
+			return errors.New("push requires an existing private schema6/7/8 store and explicit mod-space/mod-folder")
 		}
 		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
@@ -294,7 +294,7 @@ func pushNonce() string {
 // argv dispatcher or silently transport a mutation without its original fences.
 var pushControls = []string{"subscribe", "unsubscribe", "ping", "close"}
 
-func pushObservationSchema(version int) bool { return version == 6 || version == 7 }
+func pushObservationSchema(version int) bool { return version == 6 || version == 7 || version == 8 }
 
 func validPushID(s string) bool {
 	return len(s) > 0 && len(s) <= 16 && strings.Trim(s, "0123456789") == "" && s[0] != '0'

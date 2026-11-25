@@ -45,7 +45,7 @@ func (i *ProjectIntake) SubmitScheduledProject(raw, scheduling []byte) (ProjectS
 }
 
 // The historical helper name denotes the project intake floor, not a >= range:
-// only the explicitly supported schema 5, 6 and 7 are accepted, including rechecks
+// only explicitly supported project schemas are accepted, including rechecks
 // on every writer's actual transaction connection.
 func requireProjectSchema5(q sqlQueryer) error {
 	var version int
@@ -53,7 +53,7 @@ func requireProjectSchema5(q sqlQueryer) error {
 		return classifyDiagnostic(faults.CodeDatabaseRead, err)
 	}
 	if !supportedProjectSchema(version) {
-		return faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing project store requires schema version 5, 6 or 7, got %d", version))
+		return faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing project store requires schema version 5, 6, 7 or 8, got %d", version))
 	}
 	return nil
 }

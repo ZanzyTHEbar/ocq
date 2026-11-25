@@ -150,6 +150,28 @@ type ProjectLane struct {
 	SealedAt             sql.NullString
 }
 
+type ProjectMainHandled struct {
+	ProjectID         string
+	RequestID         string
+	IntentDigest      string
+	SubmissionKey     string
+	EnvelopeDigest    string
+	AdmissionRevision int64
+	JobID             string
+	LaneID            string
+	InboxID           string
+	InboxSequence     int64
+	AssociationID     string
+	ResultDigest      string
+	MainRevision      int64
+	MainSetupID       string
+	MainSessionID     string
+	MainRoleDigest    string
+	NativeMessageID   string
+	NativeCallID      string
+	RecordedAt        string
+}
+
 type ProjectManifest struct {
 	Digest     string
 	ProjectID  string
@@ -185,6 +207,34 @@ type ProjectSubmission struct {
 	EnvelopeCanonical []byte
 	JobID             string
 	RecordedAt        string
+}
+
+type ProjectTaskHandoff struct {
+	ProjectID     string
+	RequestID     string
+	IntentDigest  string
+	JobID         string
+	MainRevision  int64
+	MainSetupID   string
+	MainSessionID string
+	InboxID       sql.NullString
+}
+
+type ProjectTaskHandoffStatus struct {
+	ProjectID      string
+	RequestID      string
+	IntentDigest   string
+	JobID          string
+	MainRevision   int64
+	MainSetupID    string
+	MainSessionID  string
+	InboxID        sql.NullString
+	InboxSequence  sql.NullInt64
+	AssocID        sql.NullString
+	ManifestDigest sql.NullString
+	LaneID         sql.NullString
+	State          string
+	Reason         string
 }
 
 type Receipt struct {

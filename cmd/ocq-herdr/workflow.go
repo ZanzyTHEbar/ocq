@@ -88,39 +88,43 @@ func loadWorkflowRegistry(file, space, folder, queue string) (*workflowRegistry,
 	return &r, nil
 }
 
-func (r *workflowRegistry) ready(ctx context.Context, state string) (string, error) {
+func (r *workflowRegistry) executionReady(ctx context.Context, state string) error {
 	if r == nil {
-		return "", errors.New("owner workflow registry not provisioned")
+		return errors.New("owner workflow registry not provisioned")
 	}
 	hc, _ := ctx.Value(hcBindingKey{}).(*hcBinding)
 	if hc == nil || hc.Space != r.Space || hc.Folder != r.Folder || hc.Queue != r.Queue {
-		return "", errors.New("exact private native HC capability missing")
+		return errors.New("exact private native HC capability missing")
 	}
 	conn, err := hc.connect(ctx)
 	if err != nil {
-		return "", err
+		return err
 	}
 	conn.Close()
 	exe, err := os.Executable()
 	if err != nil {
-		return "", err
+		return err
 	}
 	cli := filepath.Join(filepath.Dir(exe), "ocq")
 	raw, err := os.ReadFile(cli)
 	if err != nil || compatHash(raw) != r.CLISHA256 {
-		return "", errors.New("matched owner CLI image unavailable")
+		return errors.New("matched owner CLI image unavailable")
 	}
 	if err = core.VerifyOperatorDispatcher(state, cli, r.Dispatcher); err != nil {
-		return "", err
+		return err
 	}
-	if err = core.VerifyOperatorNative(); err != nil {
+	return core.VerifyOperatorNative()
+}
+
+func (r *workflowRegistry) ready(ctx context.Context, state string) (string, error) {
+	if err := r.executionReady(ctx, state); err != nil {
 		return "", err
 	}
 	selections := []core.OperatorProfileSelection{}
 	for _, s := range r.Selections {
 		selections = append(selections, core.OperatorProfileSelection{Role: s.Role, Profile: s.Profile})
 	}
-	if err = core.VerifyOperatorSelections(r.Folder, selections); err != nil {
+	if err := core.VerifyOperatorSelections(r.Folder, selections); err != nil {
 		return "", err
 	}
 	return core.OperatorRepository(r.Folder)
@@ -307,17 +311,28 @@ func standaloneGoalCommand() *cobra.Command {
 		} else if !errors.Is(e, os.ErrNotExist) {
 			return e
 		}
-		if _, err = registry.ready(cmd.Context(), dir); err != nil {
+		if err = registry.executionReady(cmd.Context(), dir); err != nil {
 			return err
 		}
-		profile := ""
+		var implementation *workflowSelection
 		for _, item := range registry.Selections {
 			if item.Role == "implementation" {
-				if profile != "" {
+				if implementation != nil {
 					return errors.New("one default implementation selection is required")
 				}
-				profile = item.Profile
+				implementation = &item
 			}
+		}
+		if implementation == nil {
+			return errors.New("one default implementation selection is required")
+		}
+		// Standalone admission runs only this implementation profile. Core
+		// pins the already selected Main as a handoff target, not an execution.
+		if err = core.VerifyOperatorImplementation(registry.Folder, implementation.Profile); err != nil {
+			return err
+		}
+		if _, err = core.OperatorRepository(registry.Folder); err != nil {
+			return err
 		}
 		reader, err := core.OpenReader(dir)
 		if err != nil {
@@ -325,11 +340,11 @@ func standaloneGoalCommand() *cobra.Command {
 		}
 		binding, err := reader.WorkBinding(a[2])
 		reader.Close()
-		if err != nil || binding.RepoRoot != a[5] || profile == "" {
+		if err != nil || binding.RepoRoot != a[5] {
 			return errors.New("exact bound project/base/default profile unavailable")
 		}
 		req := core.WorkPrepareRequest{Protocol: core.WorkProtocol, ProjectID: a[2], RequestID: a[3],
-			Kind: "implementation", BindingRevision: strconv.Itoa(binding.Revision), Brief: in.Goal, BaseRef: binding.CommitAnchor, Profile: profile}
+			Kind: "implementation", BindingRevision: strconv.Itoa(binding.Revision), Brief: in.Goal, BaseRef: binding.CommitAnchor, Profile: implementation.Profile}
 		action := core.WorkActionContext{Protocol: core.WorkProtocol, Space: a[0], QueueIdentity: a[1], Peer: a[4],
 			Folder: a[5], StoreContext: a[6], ImageSHA256: a[7], ImageRole: "bridge", Action: "confirm"}
 		body, err := json.Marshal(req)

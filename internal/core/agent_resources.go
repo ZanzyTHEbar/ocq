@@ -116,6 +116,9 @@ func (s *store) observeResources(j Job, name string, references []string) (resou
 		return snapshot, diagnostic(faults.CodeRuntimeFailed, "runtime job inventory unavailable")
 	}
 	for _, job := range jobs {
+		if !strings.HasPrefix(job.SessionID, "ses") || job.ID == "" || job.Kind == "" {
+			return snapshot, diagnostic(faults.CodeRuntimeFailed, "runtime job inventory lacks exact session/job ownership; capacity held")
+		}
 		if job.SessionID != j.Agent.SessionID {
 			continue
 		}
@@ -189,6 +192,9 @@ func (s *store) observeResources(j Job, name string, references []string) (resou
 		return snapshot, diagnostic(faults.CodeRuntimeFailed, "runtime PTY list unavailable")
 	}
 	for _, pty := range ptys {
+		if pty.ID == "" {
+			return snapshot, diagnostic(faults.CodeRuntimeFailed, "runtime PTY inventory lacks exact resource identity; capacity held")
+		}
 		if pty.Status != "exited" {
 			snapshot.RunningPTYs++
 			pending = "PTY " + pty.ID + " in owned location is running or unsupported; stop/inspect that exact resource before reconciliation"

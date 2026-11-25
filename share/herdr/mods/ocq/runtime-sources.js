@@ -44,9 +44,10 @@ class RuntimeSource {
         frame.runtime?.core_id !== this.runtime.core_id || frame.runtime.queue_identity !== this.runtime.queue_identity ||
         frame.descriptor?.queue_identity !== this.runtime.queue_identity || frame.descriptor.image_sha256 !== this.runtime.image_sha256 ||
         !hex(frame.descriptor.observation_context) || !hex(frame.descriptor.observation_store_context) ||
-        ![6, 7].includes(frame.descriptor.observation_schema) || typeof frame.mutations !== "boolean") throw Error("Runtime welcome mismatch");
+        ![6, 7, 8].includes(frame.descriptor.observation_schema) || typeof frame.mutations !== "boolean") throw Error("Runtime welcome mismatch");
     this.generation++;
     this.connectionID = frame.connection_id; this.sequence = "0"; this.revision = null; this.mutations = frame.mutations;
+    this.observationSchema = frame.descriptor.observation_schema;
     this.binding = Object.freeze({ queue_identity: this.runtime.queue_identity, store_context: frame.descriptor.observation_store_context, bridge_context: frame.descriptor.observation_context });
     this.lastRequest = null;
     if (this.owner.detail?.source === this) this.owner.detail.invalidate();
@@ -85,7 +86,7 @@ class RuntimeSource {
     const capture = this.subscription, s = frame.snapshot;
     if (!capture || frame.id !== capture.id || capture.generation !== this.connectionGeneration) return;
     if (s?.protocol !== "ocq-observe-v1" || s.status !== "ready" || s.queue_identity !== this.runtime.queue_identity ||
-        ![6, 7].includes(s.schema) || s.consistency !== "single_sqlite_snapshot" || !Array.isArray(s.slots) ||
+        s.schema !== this.observationSchema || s.consistency !== "single_sqlite_snapshot" || !Array.isArray(s.slots) ||
         s.slots.length !== capture.selectors.length || new Set(s.slots.map(v => v.slot)).size !== s.slots.length ||
         capture.selectors.some(v => !s.slots.some(slot => slot.slot === v.slot && slot.kind === v.kind && ["ready", "not_found", "limit_exceeded", "reset_required"].includes(slot.status))) ||
         s.store_context !== this.binding.store_context || s.bridge_context !== this.binding.bridge_context ||

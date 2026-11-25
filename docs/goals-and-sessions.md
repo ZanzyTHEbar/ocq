@@ -72,7 +72,12 @@ A matching bridge advertising `work-task-submit-v1` can queue an explicitly
 submitted New goal as implementation work, without sending its text to Main.
 It uses the owner registry's single implementation selection and the project's
 saved binding revision and commit anchor. The bridge accepts bounded text over
-the authenticated project connection. The UI stores the request ID and text
+the authenticated project connection. Standalone admission checks the owner’s
+implementation agent/model and shared execution readiness, but does not
+validate or invoke a reviewer. Main setup and review-capable actions retain
+their existing review checks. The panel accepts schema 8 from a matching
+bridge and requires the selected project and snapshots to agree with that
+connection’s advertised schema. The UI stores the request ID and text
 digest before submitting and checks the exact Work receipt if the reply is
 lost. An incomplete preparation or ambiguous submission does not permit a
 second attempt. No session is opened by submission.
@@ -98,24 +103,199 @@ project three separate facts for a standalone task:
   `unknown` is not finished, regardless of historical events. The journal and
   evidence files are separate from the SQLite snapshot; this is not a live
   session check or validation of a deliverable.
-- **Main handled:** unverified. The project's SQLite inbox is the only channel;
-  no native input is sent. Delivery, read/archive flags, replies, and sender
-  labels do not establish that the selected OpenCode Main session acted. Even
-  the automatic `lane.assigned` message is written by OCQ at admission, not by
-  Main. Existing explicit mail does not require terminal work, a result, or an
-  attachment; its existing kinds, routing, verification and text limits are
-  unchanged.
-- **Session archived:** unverified. No native archive check or mutation is
-  exposed for these tasks. Archiving inbox mail does not archive a session.
+- **Main handled:** `recorded` only after the exact selected Main acknowledges one
+  incoming `work.submitted` through the opt-in tool below. Otherwise it is
+  `unverified`. The receipt describes the particular result acknowledged at
+  the time, not any later result or proof that Main understood it. Delivery,
+  read/archive flags, replies, `lane.assigned`, and sender labels do not count.
+- **Native wake:** for an attempted automatic wake, Work shows its retained
+  native message ID and `uncertain`, `not_sent`, `rejected`, or
+  `native_message_observed`. `unresolved` means the local attempt/receipt
+  could not be matched. None of these is a Main-handled receipt.
+- **Session archived:** Work status can show the local `archived` receipt or
+  an `uncertain` attempt, but does not query live native archive state. See
+  `project task-archive check` below. Archiving inbox mail does not archive
+  a session.
 
-The stored Main binding and native viewer identify a **target**, not the actor
-invoking an inbox command. The CLI accepts caller-supplied IDs and sender labels,
-and the bridge's authenticated context identifies the project/operator
-connection, not an OpenCode conversation producing a particular acknowledgement.
-Before adding **Mark handled**, an existing or upstream-supported session-bound
-invocation must establish the acting session independently of its input. Then
-verify that it is the exact selected Main, recheck the binding revision in the
-SQLite write, and retain an idempotent handling record for that binding/setup/
-session and exact task/job/lane/message. Do not infer handling from older mail.
-Only after that gate exists should native archive be considered, with separate
-activity checks and exact session read-back.
+### Opt in to one-inbox Main handling
+
+Stop dispatch and coordinate replacement of queue clients that do not support
+schema 8. Upgrade an existing schema 6 or 7 queue explicitly:
+
+```sh
+ocq --state-dir STATE project main-handled upgrade
+```
+
+The upgrade is additive. From schema 6 it installs the schema 7 scheduling
+tables on the way to schema 8, **without** activating scheduling. The tool and
+receipt lookup do not migrate the store. Only new standalone admissions after
+this opt-in get a handoff pointer. Legacy Work, manual mail and historical
+results are not enrolled or replayed. Schema 8 in this branch is an unpublished
+candidate; do not upgrade a deployed queue with it.
+
+Admission retains the exact request, job and intended Main setup, session and
+binding revision with the existing job and owned lane. After the task has a
+retained terminal proof, publish its snapshot through the existing result path
+(`capture-result` or `record-result`, with their existing verification limits).
+Finished is not publication and imported claims are not test validation. The
+first result association seals the lane, deposits the original `work.submitted`
+message, and records its outbox pointer in one transaction. It creates no
+second copy or queue. If proof is missing, the whole first publication rolls
+back. Inspect the exact association and inbox first after an uncertain response;
+absence alone does not authorize repeating an uncertain external action.
+
+`ocq project work status PROJECT REQUEST` shows `task_lifecycle.handoff`: use
+its `request_id` and `inbox_id` together. `awaiting_result` means no publication;
+`pending_main` means the original envelope is ready for acknowledgement, not
+that Main is running or that an OpenCode input was sent. Read the original
+message through `project inbox` (include archived mail if it was archived
+manually). Reconnect by reading the same status again. A replaced binding or
+superseded result appears as `dead_letter` with a reason on the original
+record; no redrive, retargeting, or copied mail. An existing handling receipt
+stays `handled`, even after replacement or supersession. Global completion
+acknowledgements and inbox read/archive are independent of this handoff.
+
+In **trusted local project configuration only**, load the
+`share/opencode/ocq-main-handled` server plugin. Configure the canonical Main
+checkout and a trusted installed OCQ helper, not a binary from a worker lane:
+
+```jsonc
+{
+  "plugins": [{
+    "package": "/absolute/path/to/ocq-main-handled",
+    "options": {
+      "helper": "/absolute/path/to/ocq",
+      "state_dir": "/absolute/path/to/private-queue",
+      "directory": "/absolute/path/to/canonical-main-checkout",
+      "project_id": "proj-EXACT"
+    }
+  }]
+}
+```
+
+Use an explicit OpenCode `ask` rule for action `ocq_main_handled` on resource
+`msg-*` in Main's effective policy if human confirmation is required. The
+plugin runs the native permission assertion on the exact incoming message
+ID; it never replies to a permission request. Do not install this globally or
+use worker-controlled plugin options. This requires the same locally managed
+OpenCode V2 server that hosts Main, not an external/standalone server.
+
+After actually handling the result within the user's instructions, Main can
+call `ocq_main_handled` with `request_id` and `inbox_id` from the exact standalone
+task and its existing incoming `work.submitted` message. This does not send
+mail, wake Main, change inbox read/archive flags, allow integration, release
+capacity, or archive a native session. A result that is not the lane's current
+seal, a missing result, a nondedicated Work request, or a changed Main binding
+revision is refused rather than inferred or retargeted.
+
+The engine passes the acting session, assistant message and direct call IDs
+separately from model input. The helper corroborates them via exact native
+session and assistant-message GETs, then checks the selected binding and the
+exact Work receipt, lane, association and inbox sequence in one SQLite write.
+This is attribution of an explicit call in a cooperative same-UID system; it
+does not prove comprehension, independent validation, or protect against
+malicious plugins, local processes or synthetic API injection by the same user.
+
+For uncertain output, use exact read-back only, using the native tool-call IDs:
+
+```sh
+ocq --state-dir STATE project main-handled receipt PROJECT REQUEST INBOX SESSION MESSAGE CALL
+```
+
+Matching committed invocation evidence returns the original immutable receipt;
+another invocation cannot replace it. Absence does not prove a delayed commit
+cannot occur and does not authorize resend. The native viewer and generic
+inbox commands remain inspection tools, not actor proof.
+
+OpenCode V2's `/api/event` stream has no replay cursor. Typed execution,
+tool, idle or archive events can only suggest a fresh, bounded read of the
+stored handoff. Subscribe and reconnect by reading the committed OCQ snapshot
+again; the existing observer already does this and observes the SQLite
+publication and acknowledgement directly. A native listener would not
+observe an additional authoritative transition, so this flow does not add one.
+
+### Opt in to cooperative automatic wake and archive
+
+After explicitly installing schema 8 and configuring the Main tool for the
+project, opt in for one project for the lifetime of an agent-enabled dispatcher:
+
+```sh
+ocq --state-dir STATE dispatch --auto-task-handoff PROJECT
+```
+
+This enables **both** wake and task archive, including for previously published
+eligible standalone handoffs in that project. Without the flag neither runs
+automatically; `--commands-only` refuses it. The dispatcher advances one
+stored handoff at a time at its bounded cadence, without a new service, native
+event subscriber, second queue, or duplicate result body. Main is not an OCQ
+job: the wake checks observed free queue capacity and memory headroom, but
+does not reserve a slot for Main or limit its resource usage.
+
+Wake uses the [V2 prompt API](https://opencode.ai/docs/api), with `delivery:
+"queue"` and `resume: true`. It sends a fixed `ocq-task-handoff-v1` marker and
+only the two existing tool pointers, never result contents, a user brief or a
+permission answer. It checks the exact retained binding, selected session,
+active role/profile and original sealed handoff, then observes stable idle
+history (or a pristine session), no native inbox/forms/permissions and no
+owned resources observable through the supported APIs. Observed activity or
+unavailable evidence defers before arming. The project journal retains one
+native message ID before POST. Exact consumed-message GET, not a successful
+POST or queued input, records `native_message_observed`. A documented rejection
+or ID clash does not authorize resend. A lost response may remain `uncertain`;
+subsequent passes can only read that exact native identity. Main must still
+inspect and explicitly acknowledge via `ocq_main_handled`. Neither a wake
+receipt nor that call implies inbox read flags, a reply, validation or permission
+to integrate.
+
+After the Main-handled receipt, the same dispatcher may archive the exact finished worker
+through the check and journal described below. It requires the original
+still-current result and Main binding, retained and fresh worker proof, and
+closed/unattempted viewer evidence as supported by the local archive path.
+Uncertain viewer history holds. Automatic and manual archive use the same
+single attempt and GET-only reconciliation.
+
+**This is cooperative, not atomic.** Another native client can add input, start
+execution, create a request or resource, change the session, open a viewer,
+or archive/restore between observation and effect. A separately submitted SQL
+binding or result change can also race the final check and native write.
+The project journal serializes OCQ's attempts and its ordinary local Work/Main
+actions, not independent native writers. V2 `queue` orders input, but is not an
+idle predicate. Native read-back proves observed state, not who caused it or
+that the preconditions remained true. Leave the flag off where you cannot
+accept these windows. No synthetic messages, permission/form answers,
+deletions, automatic viewer closures, or effect retries are used.
+
+### Explicit local archive
+
+For one finished standalone task on the current admission binding, use:
+
+```sh
+ocq --state-dir STATE project task-archive check PROJECT REQUEST SESSION
+ocq --state-dir STATE project task-archive confirm PROJECT REQUEST SESSION PREVIEW_SHA256 --confirm-exclusive-window
+```
+
+Review the exact session and Main-handled receipt on `check`. Confirm only
+while you can keep an exclusive window: no other native clients or writers,
+viewer opens, or OCQ changes affecting this task. The local CLI refuses any
+relevant armed or attempted OCQ viewer history because it cannot prove exact
+historical HC closure; a missing viewer record is not closure. An unattempted
+pointer alone is not a viewer launch.
+
+Archive requires the original immutable Main-handled receipt and still-matching
+sealed result, retained terminal ownership and transcript, and fresh native
+idle, request and resource observations. The preview binds the queue, current
+binding, original acknowledgement, viewer history and exact native service,
+session and transcript. The project journal durably consumes one attempt and
+rechecks the preview before sending only `archived: true`. The native API
+offers no conditional ownership or idle check: this is **cooperative, not
+atomic**. The manual path still requires explicit exclusive-window confirmation;
+the opt-in dispatcher instead uses the cooperative window described above.
+
+Success requires exact native `time.archived` and unchanged transcript
+read-back, plus a durable local observation receipt. If the attempt is
+uncertain, `project task-archive reconcile PROJECT REQUEST SESSION PREVIEW_SHA256`
+may observe that same state using GET only; it cannot send another PATCH.
+The receipt says what was observed, not which writer caused it, and it is
+historical rather than a live check for a later restore. This does not delete,
+close a viewer, change Main, integrate a result, mutate mail or release queue
+capacity. It preserves session history and exact access by ID.

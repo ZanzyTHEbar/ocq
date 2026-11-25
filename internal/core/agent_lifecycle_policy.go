@@ -76,8 +76,8 @@ func (s *store) lifecycleRuntime(j Job, evidence string) (lifecycleRuntime, erro
 		return runtime, err
 	}
 	// /api/info is a raw ServerInfo, unlike session/resource data envelopes.
-	if json.Unmarshal(b, &runtime) != nil || runtime.Version != "2.3.2" || runtime.PID <= 0 {
-		return runtime, fmt.Errorf("%s supports OpenCode 2.3.2 lifecycle observations; observed runtime unavailable or incompatible", CooperativeLifecyclePolicy)
+	if json.Unmarshal(b, &runtime) != nil || !isOpenCodeV2(runtime.Version) || runtime.PID <= 0 {
+		return runtime, fmt.Errorf("%s requires identifiable OpenCode V2 /api/info; observation unavailable", CooperativeLifecyclePolicy)
 	}
 	if _, err := s.agentEvidence(j.ID, evidence, b); err != nil {
 		return runtime, err

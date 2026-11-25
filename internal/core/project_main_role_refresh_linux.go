@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -132,7 +133,7 @@ func startMainRoleRefresh(r *Reader, j *composeJournal, rec mainRecord, in MainP
 	if err = checkSession(); err != nil {
 		return MainStatus{}, err
 	}
-	seen, present, err := readMainRoleEntry(rec)
+	seen, present, err := readMainRoleEntry(context.Background(), rec)
 	if err != nil || !present {
 		return MainStatus{}, errors.Join(err, errors.New("active contract unavailable; no repair or overwrite"))
 	}
@@ -157,7 +158,7 @@ func startMainRoleRefresh(r *Reader, j *composeJournal, rec mainRecord, in MainP
 		if err = checkSession(); err != nil {
 			return MainStatus{}, err
 		}
-		before, present, err := readMainRoleEntry(rec)
+		before, present, err := readMainRoleEntry(context.Background(), rec)
 		if err != nil || !present || !jsonEqual(before, selected.Role) {
 			return MainStatus{}, errors.Join(err, errors.New("predecessor changed before replacement; attempt held, no retry"))
 		}

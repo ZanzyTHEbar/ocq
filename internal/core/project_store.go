@@ -303,7 +303,11 @@ func (q *Queue) SubmitProject(rawEnvelope []byte) (_ ProjectSubmissionResult, re
 	return q.SubmitScheduledProject(rawEnvelope, nil)
 }
 
-func (q *Queue) SubmitScheduledProject(rawEnvelope, scheduling []byte) (_ ProjectSubmissionResult, resultErr error) {
+func (q *Queue) SubmitScheduledProject(rawEnvelope, scheduling []byte) (ProjectSubmissionResult, error) {
+	return q.submitProject(rawEnvelope, scheduling, nil)
+}
+
+func (q *Queue) submitProject(rawEnvelope, scheduling []byte, handoff *taskHandoffTarget) (_ ProjectSubmissionResult, resultErr error) {
 	defer func() { resultErr = classifyDiagnostic(faults.CodeRuntimeFailed, resultErr) }()
 	s := q.store
 	var empty ProjectSubmissionResult
@@ -315,12 +319,27 @@ func (q *Queue) SubmitScheduledProject(rawEnvelope, scheduling []byte) (_ Projec
 	if err != nil {
 		return empty, err
 	}
+	recoverAdmission := func(c sqlQueryer, job string) error {
+		if err := compareScheduling(c, job, scheduling, parsed.Envelope.ProjectID); err != nil {
+			return err
+		}
+		if handoff == nil || handoff.SetupID == "" {
+			return nil
+		}
+		h, err := taskHandoffFrom(context.Background(), c, parsed.Envelope.ProjectID, handoff.RequestID)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && (h.job != job || h.intent != handoff.IntentDigest ||
+			h.MainSetupID != handoff.SetupID || h.MainRevision != handoff.Binding.Revision ||
+			h.MainSessionID != handoff.Binding.ElephantSessionID) {
+			return errors.New("existing admission does not have this exact task handoff; no adoption")
+		}
+		return err
+	}
 
 	// B1 resolution: check global receipts / project_submissions key FIRST before any live repo/session/binding checks.
 	if existing, found, err := s.lookupProjectSubmission(s.db, parsed); err != nil {
 		return empty, err
 	} else if found {
-		return existing, compareScheduling(s.db, existing.JobID, scheduling, parsed.Envelope.ProjectID)
+		return existing, recoverAdmission(s.db, existing.JobID)
 	}
 
 	ctx := context.Background()
@@ -328,7 +347,7 @@ func (q *Queue) SubmitScheduledProject(rawEnvelope, scheduling []byte) (_ Projec
 		// If external validation fails, recheck the key before returning failure so an
 		// exact concurrent acceptance can still be recovered receipt-first.
 		if existing, found, err := s.lookupProjectSubmission(s.db, parsed); err == nil && found {
-			return existing, compareScheduling(s.db, existing.JobID, scheduling, parsed.Envelope.ProjectID)
+			return existing, recoverAdmission(s.db, existing.JobID)
 		}
 		return empty, verifyErr
 	}
@@ -337,7 +356,7 @@ func (q *Queue) SubmitScheduledProject(rawEnvelope, scheduling []byte) (_ Projec
 		if previous, found, err := s.lookupProjectSubmissionRow(ctx, c, parsed); err != nil {
 			return err
 		} else if found {
-			return compareScheduling(c, previous.jobID, scheduling, parsed.Envelope.ProjectID)
+			return recoverAdmission(c, previous.jobID)
 		}
 
 		currentRev, err := currentBindingRevision(ctx, c, parsed.Envelope.ProjectID)
@@ -403,6 +422,20 @@ func (q *Queue) SubmitScheduledProject(rawEnvelope, scheduling []byte) (_ Projec
 		}
 		if err := queries.InsertLane(ctx, dbquery.InsertLaneParams{LaneID: parsed.LaneID, ProjectID: parsed.Envelope.ProjectID, OwnerJobID: jobID, Role: parsed.Envelope.Role, BaseCommit: parsed.Request.Base, FsforkDriver: parsed.FsforkDriver, FsforkPath: "", CreatedAt: ts}); err != nil {
 			return err
+		}
+		if handoff != nil {
+			ready, err := mainHandledSchemaReady(c)
+			if err != nil {
+				return err
+			}
+			if ready != (handoff.SetupID != "") {
+				return errors.New("task handoff schema changed during admission; no job queued")
+			}
+			if ready {
+				if err := s.insertTaskHandoff(ctx, c, *handoff, parsed, jobID); err != nil {
+					return err
+				}
+			}
 		}
 		elephantSessionID, err := queries.BindingSession(ctx, dbquery.BindingSessionParams{ProjectID: parsed.Envelope.ProjectID, Revision: int64(parsed.Envelope.BindingRevision)})
 		if err != nil {

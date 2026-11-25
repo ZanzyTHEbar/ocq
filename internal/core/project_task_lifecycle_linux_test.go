@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +34,7 @@ func TestStandaloneTaskLifecycle(t *testing.T) {
 	q, err := OpenQueue(dir)
 	must(err)
 	defer q.Close()
+	must(UpgradeProjectMainHandled(dir))
 	const project, id, job = "proj-task", "task-one", "job-standalone"
 	must(q.store.write(func(c *sql.Conn) error {
 		ctx := context.Background()
@@ -65,7 +68,7 @@ func TestStandaloneTaskLifecycle(t *testing.T) {
 	j, err := workReadDir(r, project)
 	must(err)
 	defer j.Close()
-	_, p, _, err := workLoad(r, j, project, id)
+	rec, p, _, err := workLoad(r, j, project, id)
 	must(err)
 	e, err := parseSubmissionEnvelope([]byte(p.Payload))
 	must(err)
@@ -83,7 +86,10 @@ func TestStandaloneTaskLifecycle(t *testing.T) {
 		_, err = c.ExecContext(ctx, `INSERT INTO project_jobs(job_id,project_id,binding_revision,role,brief_digest,recorded_at) VALUES(?,?,1,'implementation',?,'time')`, job, project, e.BriefManifest.Digest)
 		must(err)
 		_, err = c.ExecContext(ctx, `INSERT INTO project_lanes(lane_id,project_id,owner_job_id,role,base_commit,fsfork_driver,created_at) VALUES(?,?,?,'implementation',?,'git_worktree','time')`, e.LaneID, project, job, base)
-		return err
+		must(err)
+		return q.store.insertTaskHandoff(ctx, c, taskHandoffTarget{
+			RequestID: id, IntentDigest: rec.Digest, SetupID: "fixture-main", Binding: rec.Binding,
+		}, e, job)
 	}))
 	check := func(state, outcome string, finished bool) {
 		t.Helper()
@@ -94,7 +100,8 @@ func TestStandaloneTaskLifecycle(t *testing.T) {
 			got.Receipt == nil || got.Receipt.JobID != job || got.Receipt.EnvelopeDigest != e.EnvelopeDigest ||
 			got.Job == nil || got.Job.State != state || got.Job.Outcome != outcome || got.Job.TerminalProven ||
 			life == nil || life.LaneID != e.LaneID || life.WorkFinished == nil || *life.WorkFinished != finished ||
-			life.MainHandled != "unverified" || life.SessionArchived != "unverified" {
+			life.MainHandled != "unverified" || life.SessionArchived != "unverified" ||
+			life.Handoff == nil || life.Handoff.State != "awaiting_result" || life.Handoff.InboxID != "" {
 			t.Fatalf("unexpected task projection: %+v, job=%+v lifecycle=%+v", got, got.Job, life)
 		}
 	}
@@ -116,6 +123,22 @@ func TestStandaloneTaskLifecycle(t *testing.T) {
 		return err
 	}))
 	check("finished", "agent_failed", true)
+	manifest := ResultManifest{Version: 1, Kind: "result", ProjectID: project, Source: "author_import",
+		JobID: job, RequestDigest: e.RequestDigest, Base: base, Worktree: repo, StagedStatus: "clean", UnstagedStatus: "clean",
+		UntrackedPaths: []string{}, BeforeStatusDigest: "not_recorded", AfterStatusDigest: "not_recorded",
+		BeforeContentDigest: "not_recorded", AfterContentDigest: "not_recorded", IgnoredExclusions: []string{},
+		ChangedFiles: []ManifestChangedFile{}, ClaimedValidation: ClaimedValidation{Status: "not_run", Commands: []string{}, Provenance: "not_recorded", Limitations: "fixture"}}
+	result, err := json.Marshal(manifest)
+	must(err)
+	if _, err = q.RecordResult(project, job, result, ""); err == nil || !strings.Contains(err.Error(), "retained terminal proof") {
+		t.Fatalf("publication without proof: %v", err)
+	}
+	var count int
+	must(q.store.db.QueryRow(`SELECT count(*) FROM project_result_associations`).Scan(&count))
+	if count != 0 {
+		t.Fatal("proof refusal did not roll back association")
+	}
+	check("finished", "agent_failed", true)
 	_, err = q.store.db.Exec(`UPDATE jobs SET state='unknown',outcome='agent_unknown' WHERE id=?`, job)
 	must(err)
 	var historical string
@@ -124,4 +147,65 @@ func TestStandaloneTaskLifecycle(t *testing.T) {
 		t.Fatalf("expected retained first-terminal outcome, got %q", historical)
 	}
 	check("unknown", "agent_unknown", false)
+
+	// Supply the terminator's retained wire shape without claiming a live
+	// callback. The publication and receipt projections below use real SQLite.
+	proofPath := filepath.Join(root, "retained-proof.json")
+	jb, err := q.store.get(job)
+	must(err)
+	metadata, err := json.Marshal(ownershipMetadata(jb))
+	must(err)
+	session := sessionInfo{ID: "ses_worker", ProjectID: "fixture", Agent: jb.agentRequest.Agent,
+		Model: jb.agentRequest.Model, Metadata: metadata, Permissions: jb.agentRequest.Permissions}
+	proof, err := json.Marshal(map[string]any{"completion_policy": agentCompletionPolicy, "prompt_id": jb.Agent.PromptID,
+		"request_digest": jb.Digest, "session": session, "active": false, "stable_transcript": true})
+	must(err)
+	must(os.WriteFile(proofPath, proof, 0600))
+	must(q.store.write(func(c *sql.Conn) error {
+		if _, err := c.ExecContext(context.Background(), `UPDATE agent_ownership SET terminal_evidence=? WHERE job_id=?`, proofPath, job); err != nil {
+			return err
+		}
+		_, err := c.ExecContext(context.Background(), `UPDATE jobs SET state='finished',outcome='agent_failed' WHERE id=?`, job)
+		return err
+	}))
+	assoc, err := q.RecordResult(project, job, result, "")
+	must(err)
+	notification, err := q.store.acknowledge("completion-" + job)
+	must(err)
+	if notification.AcknowledgedAt == nil || notification.Outcome != historical {
+		t.Fatalf("unchanged first-terminal completion event expected: %+v", notification)
+	}
+	retry, err := q.RecordResult(project, job, result, "")
+	must(err)
+	status, err := InspectProjectWork(dir, project, id)
+	must(err)
+	h := status.TaskLifecycle.Handoff
+	must(q.store.db.QueryRow(`SELECT count(*) FROM project_inbox_messages WHERE kind='work.submitted'`).Scan(&count))
+	if count != 1 || retry.ID != assoc.ID || h == nil || h.State != "pending_main" ||
+		h.AssociationID != assoc.ID || h.ResultDigest != assoc.ManifestDigest || h.MainSessionID != "ses_fixture" ||
+		h.MainRevision != 1 || !isValidInboxMessageID(h.InboxID) || status.TaskLifecycle.MainHandled != "unverified" ||
+		status.TaskLifecycle.SessionArchived != "unverified" || !status.Job.TerminalProven {
+		t.Fatalf("expected one pending pointer after reopen and exact retry: handoff=%+v status=%+v", h, status)
+	}
+	_, err = q.AcknowledgeMail(project, h.InboxID, true)
+	must(err)
+	status, err = InspectProjectWork(dir, project, id)
+	must(err)
+	if *status.TaskLifecycle.Handoff != *h || status.TaskLifecycle.MainHandled != "unverified" ||
+		status.TaskLifecycle.SessionArchived != "unverified" {
+		t.Fatalf("mail archive cannot acknowledge or archive native tasks: %+v", status.TaskLifecycle)
+	}
+	// The original pointer stays pinned when the binding changes; replacing
+	// Main creates no message and is never a redrive.
+	_, err = q.store.db.Exec(`INSERT INTO project_bindings SELECT project_id,2,repo_root,git_common_dir,commit_anchor,
+ 'ses_replacement',opencode_project_id,opencode_directory,handoff_manifest_digest,auth_ref,verified_at,recorded_at
+ FROM project_bindings WHERE project_id=? AND revision=1`, project)
+	must(err)
+	status, err = InspectProjectWork(dir, project, id)
+	must(err)
+	held := status.TaskLifecycle.Handoff
+	if held == nil || held.State != "dead_letter" || held.Reason != "main_binding_replaced" ||
+		held.InboxID != h.InboxID || held.MainSessionID != h.MainSessionID || !status.Job.TerminalProven {
+		t.Fatalf("replacement must hold the original handoff without changing job proof: %+v", status)
+	}
 }

@@ -194,13 +194,21 @@ func openQueueLog(ctx context.Context, q sqlQueryer, id string, stderr bool) (_ 
 // Dispatch keeps the singleton dispatcher lock until cancellation and drains
 // owned foreground commands before returning. onReady is called after recovery.
 func (q *Queue) Dispatch(ctx context.Context, slots int, floor int64, commandsOnly bool, onReady func()) error {
+	return q.DispatchWithTaskHandoff(ctx, slots, floor, commandsOnly, "", onReady)
+}
+
+// DispatchWithTaskHandoff opts a single project in for this invocation only.
+func (q *Queue) DispatchWithTaskHandoff(ctx context.Context, slots int, floor int64, commandsOnly bool, project string, onReady func()) error {
 	if slots < 1 || floor < 0 {
 		return faults.New(faults.CodeValidationFailed, "dispatch requires slots>=1 and memory-floor-bytes>=0")
 	}
 	if ctx == nil {
 		return faults.New(faults.CodeValidationFailed, "dispatch requires a context")
 	}
-	return classifyDiagnostic(faults.CodeRuntimeFailed, q.store.dispatch(ctx, slots, floor, commandsOnly, onReady))
+	if project != "" && (commandsOnly || !isValidProjectID(project)) {
+		return faults.New(faults.CodeValidationFailed, "automatic task handoff requires an exact project and agent-enabled dispatch")
+	}
+	return classifyDiagnostic(faults.CodeRuntimeFailed, q.store.dispatch(ctx, slots, floor, commandsOnly, project, onReady))
 }
 
 // Resolve records a human's evidence for an eligible unknown command job.

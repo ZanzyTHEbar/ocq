@@ -53,6 +53,16 @@ func VerifyOperatorSelections(repo string, selections []OperatorProfileSelection
 	if len(selections) < 3 || len(selections) > 32 {
 		return errors.New("bounded owner selections required")
 	}
+	return verifyOperatorSelections(repo, selections)
+}
+
+// VerifyOperatorImplementation checks the only execution profile used by a
+// standalone task. It cannot validate or authorize a review profile.
+func VerifyOperatorImplementation(repo, profile string) error {
+	return verifyOperatorSelections(repo, []OperatorProfileSelection{{"implementation", profile}})
+}
+
+func verifyOperatorSelections(repo string, selections []OperatorProfileSelection) error {
 	profiles := []MainProfile{}
 	for _, selection := range selections {
 		if selection.Role == "main" {

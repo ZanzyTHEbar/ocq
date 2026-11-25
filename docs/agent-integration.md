@@ -66,7 +66,7 @@ before the one prompt. A deferred inbox acknowledgement is not proof that the
 prompt was consumed. API calls use `opencode api` and its intended discovery and
 authentication context.
 
-There is no automatic continuation or mutation replay after a lost response.
+There is no automatic worker continuation or mutation replay after a lost response.
 While an already-running job's exact initial input or supported native project
 conversation text is still in the inbox,
 the observer retains nonterminal running capacity if its durable prompt
@@ -76,6 +76,9 @@ ownership proof. All inbox input must still drain before terminal proof.
 
 Lost Workmux acknowledgement remains unknown; session/prompt recovery uses exact
 supplied IDs only. Worktrees, branches, sessions and evidence are retained.
+The separate [opt-in project handoff](goals-and-sessions.md#opt-in-to-cooperative-automatic-wake-and-archive)
+can start a pointer-only turn on the selected Main after result publication; it
+does not add a second worker input or change the worker completion proof.
 
 ## Completion
 
@@ -98,8 +101,10 @@ profile mutations still latch interference; an idle response does not clear it.
 Native conversation after the first terminal commit is separate from the
 historical job and its review. See [goals and sessions](goals-and-sessions.md).
 
-`opencode-cooperative-v1` is a lifecycle adapter for OpenCode 2.3.2, not a
-second tool-permission engine. Normal configured local foreground tools and
+`opencode-cooperative-v1` observes the supported OpenCode V2 API shapes; it is
+not a second tool-permission engine. The exact observed version and PID must
+agree across the observation. Unknown shapes or missing evidence hold capacity.
+Normal configured local foreground tools and
 awaited MCP RPCs are trusted to finish when the harness reports their terminal
 state. There is no ordinary-tool name whitelist, producer-binary attestation,
 capability declaration or extra permission profile. Static review independently

@@ -604,7 +604,7 @@ func observationLogPath(ctx context.Context, dir string, c ObservationLogCursor)
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return "", err
 	}
-	if version != 6 && version != 7 {
+	if !supportedObservationSchema(version) {
 		return "", nil
 	}
 	row, err := dbquery.New(s.db).RetainedJobLog(ctx, c.JobID)

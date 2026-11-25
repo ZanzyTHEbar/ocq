@@ -42,13 +42,18 @@ export default Plugin.define({
   id: "ocq.exact-handoff",
   async setup(context) {
     const target = context.options;
-    const fail = () => context.ui.toast.show({
-      title: "Could not open this conversation",
+    const fail = (title = "Could not open this conversation") => context.ui?.toast?.show?.({
+      title,
       variant: "error",
     });
-    // Public router/plugin contract validated at official 2.3.2 commit
-    // c0ad18b402eb2827fc1ee71c171b1177b3fc02d1, not a semver range.
-    if (!["2.3.0", "2.3.2"].includes(context.app.version) || !["ocq-handoff-v1", "ocq-attention-handoff-v1"].includes(target.protocol) ||
+    // The release number cannot prove the public V2 router/client contract.
+    const router = context.ui?.router;
+    if (!/^2\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+[0-9A-Za-z.-]+)?$/.test(context.app?.version ?? "") ||
+      typeof router?.current !== "function" || typeof router?.navigate !== "function" ||
+      typeof context.client?.session?.get !== "function") {
+      fail("Required OpenCode V2 navigation is unavailable"); return;
+    }
+    if (!object(target) || !["ocq-handoff-v1", "ocq-attention-handoff-v1"].includes(target.protocol) ||
       !/^ses_[A-Za-z0-9_-]{1,128}$/.test(target.session_id || "") ||
       !["worker", "integrator"].includes(target.target_kind) || !text(target.project_id, 128) ||
       (target.target_kind === "worker" ? !text(target.job_id, 128) :
@@ -59,18 +64,18 @@ export default Plugin.define({
       fail(); return;
     }
     // Never hijack a route the person has already chosen during startup.
-    if (context.ui.router.current().type !== "home") { fail(); return; }
     try {
+      if (router.current()?.type !== "home") { fail(); return; }
       const session = await context.client.session.get(
         { sessionID: target.session_id }, { signal: AbortSignal.timeout(10000) },
       );
-      if (!matches(session, target) || context.ui.router.current().type !== "home") { fail(); return; }
+      if (!matches(session, target) || router.current()?.type !== "home") { fail(); return; }
       // This is the public router, NOT --session or an API creation fallback.
       // If the session disappears now, the native session view handles absence.
-      context.ui.router.navigate({ type: "session", sessionID: target.session_id });
+      router.navigate({ type: "session", sessionID: target.session_id });
       if (target.protocol === "ocq-attention-handoff-v1") {
-        const route = context.ui.router.current();
-        if (route.type !== "session" || route.sessionID !== target.session_id) fail();
+        const route = router.current();
+        if (route?.type !== "session" || route.sessionID !== target.session_id) fail();
       }
     } catch (_) { fail(); }
   },

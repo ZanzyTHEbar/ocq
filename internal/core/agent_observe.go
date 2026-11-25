@@ -237,8 +237,8 @@ func (s *store) observeAgentPolicy(j Job, explicit bool) error {
 		if err != nil {
 			return s.agentFailure(j, err)
 		}
-		var active map[string]json.RawMessage
-		if err := decodeData(b, &active); err != nil || active == nil {
+		active, err := decodeSessionActivity(b)
+		if err != nil {
 			return s.agentUnknown(j.ID, "execution activity inspection unavailable; capacity held", false)
 		}
 		var sampled sessionInfo
@@ -375,8 +375,8 @@ func (s *store) observeAgentPolicy(j Job, explicit bool) error {
 	if err != nil {
 		return s.agentFailure(j, err)
 	}
-	var active map[string]json.RawMessage
-	if err := decodeData(activeBody, &active); err != nil {
+	active, err := decodeSessionActivity(activeBody)
+	if err != nil {
 		return s.agentFailure(j, err)
 	}
 	if _, running := active[j.Agent.SessionID]; running {
@@ -447,7 +447,8 @@ func (s *store) observeAgentPolicy(j Job, explicit bool) error {
 	if err != nil {
 		return s.agentFailure(j, err)
 	}
-	if err := decodeData(activeBody, &active); err != nil {
+	active, err = decodeSessionActivity(activeBody)
+	if err != nil {
 		return s.agentFailure(j, err)
 	}
 	if _, running := active[j.Agent.SessionID]; running {

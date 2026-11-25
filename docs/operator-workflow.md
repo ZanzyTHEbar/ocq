@@ -180,17 +180,19 @@ instantaneous check never proves the terminal's subsequent current route.
 Neither contract prompts, resumes, approves permissions, changes policy, retries
 unknown launches or releases capacity.
 
-## Explicit OpenCode release compatibility
+## OpenCode V2 compatibility
 
-Native service discovery, packaged clients and the TUI handoff accept exactly
-2.3.0 and 2.3.2; static review additionally retains 2.2.6 support. Unknown versions
-fail closed. The 2.3.2 source is official release commit
-`c0ad18b402eb2827fc1ee71c171b1177b3fc02d1`, compared with 2.3.0
-`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`.
-Instruction entry CRUD, server model-list activation, managed service discovery,
-CLI explicit-server handling and the public TUI plugin/router contracts are
-byte-identical in those releases. Session identity/profile/metadata checks remain
-mandatory; accepting a release never adopts a changed service identity.
+Native service discovery, packaged clients and the TUI handoff use the OpenCode
+V2 family and require the specific API responses, managed registration and public
+client/router capabilities they use. Missing capabilities and changed shapes
+fail closed; OCQ does not try substitute endpoints. Session identity, profile
+and metadata checks remain mandatory. The observed release is still part of an
+exact service identity; compatibility never adopts a changed instance.
+
+Restricted review is different: an API shape cannot prove permission precedence
+or suppression of denied tools. Its permission-policy gate still requires
+source-validated 2.2.6, 2.3.0 or 2.3.2, including the exact agent at the exact
+location. This is not a condition for opening an already-owned review session.
 
 2.3.2 shell timeouts background commands by default. OCQ still checks
 location-scoped shells and exact known shell IDs, not just tool completion.

@@ -119,7 +119,7 @@ export class RuntimeProject {
       if (response.code !== 0) throw Error();
       const status = this.compatibility.validate(JSON.parse(response.stdout), { id: this.spaceID, machine: this.machine, folder });
       if (status.queue_identity !== this.source.runtime.queue_identity || status.image_sha256 !== this.source.runtime.image_sha256 ||
-          status.observation_store_context !== this.source.binding?.store_context || ![6, 7].includes(status.observation_schema) ||
+          status.observation_store_context !== this.source.binding?.store_context || status.observation_schema !== this.source.observationSchema ||
           !/^[a-f0-9]{64}$/.test(status.observation_context)) throw Error();
       this.compatibility.observe();
       this.compatibility.status = status; this.compatibility.allowActions = this.source.mutations;
@@ -296,7 +296,13 @@ export class RuntimeProject {
       const summary = v_flex().flex_1().min_w(0).gap(2)
         .child(div().truncate().font_semibold().child(row.title))
         .child(note(`${row.goalTitle} · ${state}`));
-      if (lifecycle) summary.child(note("Main handling unverified · Session archive unverified"));
+      if (lifecycle) {
+        const handling = lifecycle.main_handled === "recorded" ? "Main acknowledged"
+          : lifecycle.handoff?.state === "dead_letter" ? "Main handoff held"
+          : lifecycle.handoff?.state === "pending_main" ? "Waiting for Main"
+          : "Main handling unverified";
+        summary.child(note(`${handling} · Session archive unverified`));
+      }
       const line = h_flex().id(`ocq-session-${row.job.session_id || row.request_id}`).items_center().gap(4).py(5).border_b(1).border_color(t.border)
         .child(summary);
       if (row.job.session_id && !row.job.session_state) {

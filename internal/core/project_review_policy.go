@@ -34,8 +34,14 @@ func verifyReviewerRuntime(directory, agent string, rules []permissionRule) erro
 	var server struct {
 		Version string `json:"version"`
 	}
-	if err := json.Unmarshal(b, &server); err != nil || (server.Version != "2.2.6" && server.Version != "2.3.0" && server.Version != "2.3.2") {
-		return diagnostic(faults.CodeConfigInvalid, "review policy requires source-validated OpenCode server version 2.2.6, 2.3.0 or 2.3.2")
+	if err := json.Unmarshal(b, &server); err != nil || !isOpenCodeV2(server.Version) {
+		return diagnostic(faults.CodeConfigInvalid, "review policy cannot identify the OpenCode V2 runtime")
+	}
+	switch server.Version {
+	case "2.2.6", "2.3.0", "2.3.2":
+		// Transport and API shape do not establish permission precedence.
+	default:
+		return diagnostic(faults.CodeConfigInvalid, "restricted review permission semantics are unvalidated for OpenCode "+server.Version+"; review refused")
 	}
 	query := url.Values{"location[directory]": {directory}}
 	// Session creation stores a location reference; it does not initialize its

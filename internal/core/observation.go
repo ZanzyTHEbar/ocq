@@ -324,7 +324,7 @@ func observeSnapshot(ctx context.Context, dir string, req ObservationRequest) (r
 		out.Status = "reset"
 		return out, nil
 	}
-	if out.Schema != 6 && out.Schema != 7 {
+	if !supportedObservationSchema(out.Schema) {
 		if out.Schema == 5 {
 			out.Status = "upgrade_required"
 		}
@@ -332,6 +332,11 @@ func observeSnapshot(ctx context.Context, dir string, req ObservationRequest) (r
 	}
 	if err := validateObservationSchema(ctx, tx); err != nil {
 		return out, nil
+	}
+	if out.Schema == 8 {
+		if err := validateMainHandledSchema(ctx, tx); err != nil {
+			return out, nil
+		}
 	}
 	// This first table read establishes the SQLite snapshot before ANY view.
 	revision, err := dbquery.New(tx).ObservationRevision(ctx)
@@ -620,7 +625,7 @@ func observationJobProjects(ctx context.Context, q sqlQueryer, job string) ([]st
 	if err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return nil, err
 	}
-	if version == 7 {
+	if supportedSchedulingSchema(version) {
 		query = `SELECT project_id FROM project_jobs WHERE job_id=? UNION
 		 SELECT project_id FROM job_scheduling WHERE job_id=? AND project_id<>'unattributed' ORDER BY project_id LIMIT 33`
 		args = append(args, job)

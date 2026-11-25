@@ -313,7 +313,7 @@ func sealLaneAndDeliverMail(ctx context.Context, c *sql.Conn, m parsedManifest, 
 	}
 	manifestDigest := m.Digest
 	assoc := assocID
-	_, err = insertInboxMessageConn(ctx, c, ProjectInboxMessage{
+	mail, err := insertInboxMessageConn(ctx, c, ProjectInboxMessage{
 		Key:            "auto-mail:" + assocID,
 		ProjectID:      projectID,
 		Sender:         "lane:" + lane.LaneID,
@@ -328,7 +328,10 @@ func sealLaneAndDeliverMail(ctx context.Context, c *sql.Conn, m parsedManifest, 
 		FsforkPath:     effectivePath,
 		CreatedAt:      ts,
 	})
-	return err
+	if err != nil || kind != "work.submitted" {
+		return err
+	}
+	return publishTaskHandoff(ctx, c, mail)
 }
 
 func loadProjectLanesTx(ctx context.Context, tx sqlQueryer, projectID string) ([]ProjectLane, error) {

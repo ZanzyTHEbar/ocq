@@ -23,7 +23,7 @@ type AgentHandoff struct {
 	Unavailable     string               `json:"open_unavailable_reason"`
 }
 
-const handoffNoAttach = "Automatic open unavailable: installed OpenCode 2.2.6 --session may create an absent session; no existing-session-only, exact-service isolated navigation route is validated. Copy the recorded location/session and select it in the actual OpenCode interface."
+const handoffNoAttach = "Automatic open unavailable from this inspection-only handoff. Copy the recorded location/session and select it in the actual OpenCode interface."
 
 // One request deadline covers both commands; inherited pipes may add at most
 // this drain allowance, even after the direct CLI process has exited.
@@ -113,14 +113,13 @@ func InspectAgentHandoff(dir string, t AgentReconcileTarget, verifyService strin
 	defer cancel()
 	// The existing CLI --server route preserves the configured authentication
 	// environment; there is no pairing, service start, config reload or discovery.
-	// /api/info is not a data-envelope route in installed 2.2.6. Session GET
-	// itself supplies the identity/location/ownership fence; version is inspected
-	// with the installed CLI, without connecting or starting a service.
+	// Session GET supplies the identity/location/ownership fence. Inspect the
+	// installed CLI family without connecting or starting a service.
 	version := exec.CommandContext(ctx, "opencode", "--version")
 	version.WaitDelay = handoffWaitDelay
 	var v handoffOutput
 	version.Stdout, version.Stderr = &v, io.Discard
-	if version.Run() != nil || ctx.Err() != nil || strings.TrimSpace(v.String()) != "opencode v2.2.6" {
+	if version.Run() != nil || ctx.Err() != nil || !isOpenCodeV2CLI(v.String()) {
 		out.Observation = "unsupported_client"
 		return out, nil
 	}

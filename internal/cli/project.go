@@ -38,7 +38,7 @@ func projectPalette(state *string) []*cobra.Command {
 		projectResults(state), projectJob(state), projectManifest(state), projectLanes(state),
 		projectInbox(state), projectVerifyWorktree(state),
 		projectWork(state),
-		projectMain(state), projectClient(state),
+		projectMain(state), projectClient(state), projectMainHandled(state), projectTaskArchive(state),
 	}
 }
 

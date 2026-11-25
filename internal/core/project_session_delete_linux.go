@@ -123,7 +123,7 @@ func deleteSessionPath(t sessionDeleteTarget) string {
 	return "/api/session/" + url.PathEscape(t.Session)
 }
 
-func readDeletionTranscript(t sessionDeleteTarget, svc nativeService) ([]message, error) {
+func readSessionAuditTranscript(ctx context.Context, t sessionDeleteTarget, svc nativeService) ([]message, error) {
 	all := []message{}
 	cursor := ""
 	seen := map[string]bool{}
@@ -135,7 +135,7 @@ func readDeletionTranscript(t sessionDeleteTarget, svc nativeService) ([]message
 		} else {
 			query.Set("cursor", cursor)
 		}
-		body, err := nativeCall(t.Location, svc, "get", deleteSessionPath(t)+"/message?"+query.Encode(), nil)
+		body, err := nativeCallContext(ctx, t.Location, svc, "get", deleteSessionPath(t)+"/message?"+query.Encode(), nil)
 		size += len(body)
 		var page struct {
 			Data   []message
@@ -159,9 +159,9 @@ func readDeletionTranscript(t sessionDeleteTarget, svc nativeService) ([]message
 
 // This checks resources without persisting peer data, and includes known shell
 // handles from both the retained job and the current native transcript.
-func deletionResources(r *Reader, t sessionDeleteTarget, svc nativeService, messages []message) error {
+func deletionResources(ctx context.Context, r *Reader, t sessionDeleteTarget, svc nativeService, messages []message) error {
 	read := func(path string, out any, location bool) error {
-		body, err := nativeCall(t.Location, svc, "get", path, nil)
+		body, err := nativeCallContext(ctx, t.Location, svc, "get", path, nil)
 		if err == nil && location {
 			var envelope struct{ Location struct{ Directory string } }
 			if json.Unmarshal(body, &envelope) != nil || envelope.Location.Directory != t.Location {
@@ -182,6 +182,9 @@ func deletionResources(r *Reader, t sessionDeleteTarget, svc nativeService, mess
 		return errors.New("session resource inventory unavailable")
 	}
 	for _, job := range jobs {
+		if !strings.HasPrefix(job.SessionID, "ses_") {
+			return errors.New("session resource ownership unavailable")
+		}
 		if job.SessionID == t.Session {
 			return errors.New("owned background work remains")
 		}
@@ -200,6 +203,9 @@ func deletionResources(r *Reader, t sessionDeleteTarget, svc nativeService, mess
 		return errors.New("location shell inventory unavailable")
 	}
 	for _, shell := range shells {
+		if shell.Metadata.SessionID == "" {
+			return errors.New("location shell ownership unavailable")
+		}
 		if shell.Metadata.SessionID == t.Session {
 			return errors.New("owned shell is running")
 		}
@@ -249,17 +255,20 @@ func deletionResources(r *Reader, t sessionDeleteTarget, svc nativeService, mess
 	return nil
 }
 
-func deletionIdle(t sessionDeleteTarget, svc nativeService) string {
-	b, err := nativeCall(t.Location, svc, "get", "/api/session/active", nil)
-	var active map[string]json.RawMessage
-	if err != nil || decodeData(b, &active) != nil || active == nil {
+func deletionIdle(ctx context.Context, t sessionDeleteTarget, svc nativeService) string {
+	b, err := nativeCallContext(ctx, t.Location, svc, "get", "/api/session/active", nil)
+	if err != nil {
+		return "unavailable"
+	}
+	active, err := decodeSessionActivity(b)
+	if err != nil {
 		return "unavailable"
 	}
 	if _, present := active[t.Session]; present {
 		return "active"
 	}
 	for _, suffix := range []string{"/inbox", "/permission", "/form"} {
-		b, err = nativeCall(t.Location, svc, "get", deleteSessionPath(t)+suffix, nil)
+		b, err = nativeCallContext(ctx, t.Location, svc, "get", deleteSessionPath(t)+suffix, nil)
 		var items []json.RawMessage
 		if err != nil || decodeData(b, &items) != nil || items == nil {
 			return "unavailable"
@@ -272,23 +281,27 @@ func deletionIdle(t sessionDeleteTarget, svc nativeService) string {
 }
 
 func deletionSnapshot(r *Reader, t sessionDeleteTarget, job Job) (sessionDeleteAudit, string, error) {
+	return sessionIdleSnapshot(context.Background(), r, t, job)
+}
+
+func sessionIdleSnapshot(ctx context.Context, r *Reader, t sessionDeleteTarget, job Job) (sessionDeleteAudit, string, error) {
 	a := sessionDeleteAudit{Target: t}
-	svc, err := discoverNativeService(t.Location)
+	svc, err := discoverNativeServiceContext(ctx, t.Location)
 	if err != nil {
 		return a, "unavailable", err
 	}
 	a.Service = svc
-	a.Session, err = nativeSession(t.Location, svc, t.Session)
+	a.Session, err = nativeSessionContext(ctx, t.Location, svc, t.Session)
 	if err != nil || nativeIdentity(a.Session, t.Session, t.Location, t.NativeProject, t.Owner) != nil {
 		return a, "unavailable", errors.New("exact live session ownership unavailable")
 	}
-	if state := deletionIdle(t, svc); state != "ready" {
+	if state := deletionIdle(ctx, t, svc); state != "ready" {
 		return a, state, nil
 	}
 	if t.Job != "" && !workTerminal(job) {
 		return a, "job_unsettled", nil
 	}
-	a.Transcript, err = readDeletionTranscript(t, svc)
+	a.Transcript, err = readSessionAuditTranscript(ctx, t, svc)
 	if err != nil {
 		return a, "unavailable", err
 	}
@@ -298,17 +311,17 @@ func deletionSnapshot(r *Reader, t sessionDeleteTarget, job Job) (sessionDeleteA
 			return a, "unavailable", errors.New("explicit idle outcome unavailable")
 		}
 	}
-	if err = deletionResources(r, t, svc, a.Transcript); err != nil {
+	if err = deletionResources(ctx, r, t, svc, a.Transcript); err != nil {
 		return a, "resources", err
 	}
-	repeated, err := readDeletionTranscript(t, svc)
+	repeated, err := readSessionAuditTranscript(ctx, t, svc)
 	if err != nil || !jsonEqual(repeated, a.Transcript) {
 		return a, "changed", nil
 	}
-	if state := deletionIdle(t, svc); state != "ready" {
+	if state := deletionIdle(ctx, t, svc); state != "ready" {
 		return a, state, nil
 	}
-	final, err := nativeSession(t.Location, svc, t.Session)
+	final, err := nativeSessionContext(ctx, t.Location, svc, t.Session)
 	if err != nil || !jsonEqual(final, a.Session) {
 		return a, "changed", nil
 	}
@@ -426,7 +439,7 @@ func DeleteProjectSession(dir, project, session, work, preview string, c WorkAct
 		return out, err
 	}
 	final, err := nativeSession(t.Location, svc, t.Session)
-	if err != nil || !jsonEqual(final, audit.Session) || deletionIdle(t, svc) != "ready" || ctx.Err() != nil {
+	if err != nil || !jsonEqual(final, audit.Session) || deletionIdle(ctx, t, svc) != "ready" || ctx.Err() != nil {
 		out.State = "changed"
 		return out, nil
 	}

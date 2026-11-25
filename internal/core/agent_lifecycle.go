@@ -56,13 +56,20 @@ func (s *store) launchAgent(j Job) error {
 	}
 	j.Agent = a
 	r := j.agentRequest
-	// Check adapter compatibility before any Workmux/session mutation. This is
-	// a runtime-version check, not a capability inventory or permission policy.
+	// Check the runtime and the documented activity shape before any
+	// Workmux/session mutation. Per-session evidence is checked once it exists.
 	probe := j
 	probeOwner := *a
 	probeOwner.Worktree = r.Repo
 	probe.Agent = &probeOwner
 	if _, err := s.lifecycleRuntime(probe, "lifecycle-runtime-before-provision"); err != nil {
+		return s.agentFailure(j, err)
+	}
+	active, err := apiCall(r.Repo, "get", "/api/session/active", nil)
+	if err != nil {
+		return s.agentFailure(j, err)
+	}
+	if _, err := decodeSessionActivity(active); err != nil {
 		return s.agentFailure(j, err)
 	}
 	branch := "ocq-" + j.ID

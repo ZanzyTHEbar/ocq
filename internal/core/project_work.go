@@ -98,10 +98,13 @@ type TaskGoal struct {
 // snapshot. WorkFinished describes the current job state, not evidence-file
 // availability, validation, mail handling or the native session lifecycle.
 type TaskLifecycle struct {
-	LaneID          string `json:"lane_id,omitempty"`
-	WorkFinished    *bool  `json:"work_finished"` // null before exact admission is observed
-	MainHandled     string `json:"main_handled"`
-	SessionArchived string `json:"session_archived"`
+	LaneID          string       `json:"lane_id,omitempty"`
+	WorkFinished    *bool        `json:"work_finished"` // null before exact admission is observed
+	MainHandled     string       `json:"main_handled"`
+	SessionArchived string       `json:"session_archived"`
+	Handoff         *TaskHandoff `json:"handoff,omitempty"`
+	NativeWake      string       `json:"native_wake,omitempty"`
+	NativeWakeID    string       `json:"native_wake_message_id,omitempty"`
 }
 
 type WorkPreview struct {

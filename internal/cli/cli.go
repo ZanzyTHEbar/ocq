@@ -259,14 +259,18 @@ func commandPalette(state *string) []*cobra.Command {
 	slots := dispatch.Flags().Int("slots", 2, "maximum launching/running/unknown jobs")
 	floor := dispatch.Flags().Int64("memory-floor-bytes", 6<<30, "minimum Linux MemAvailable to preserve")
 	commandsOnly := dispatch.Flags().Bool("commands-only", false, "block agent admission/polling; foreground command queues only")
+	taskHandoff := dispatch.Flags().String("auto-task-handoff", "", "opt in one PROJECT to cooperative Main wake and finished task archive")
 	dispatch.RunE = queueRun(state, func(q *core.Queue, args []string) error {
 		if len(args) != 0 || *slots < 1 || *floor < 0 {
 			return validation("dispatch requires slots>=1 and memory-floor-bytes>=0")
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
-		return q.Dispatch(ctx, *slots, *floor, *commandsOnly, func() {
+		return q.DispatchWithTaskHandoff(ctx, *slots, *floor, *commandsOnly, *taskHandoff, func() {
 			_, _ = io.WriteString(os.Stderr, "dispatcher ready; shutdown stops admission and waits for owned foreground commands\n")
+			if *taskHandoff != "" {
+				_, _ = fmt.Fprintf(os.Stderr, "cooperative automatic Main wake and task archive enabled for %s\n", *taskHandoff)
+			}
 		})
 	})
 	resolve := queueCommand(state, "resolve JOB_ID", nil)

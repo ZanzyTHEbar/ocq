@@ -191,7 +191,14 @@ func workLoad(r *Reader, dir *os.File, project, id string) (workRecord, workPayl
 	return rec, payload, in, nil
 }
 
-func workTerminal(j Job) bool {
+func workTerminal(j Job) bool { return workTerminalEvidence(j, false) }
+
+func taskHandoffTerminal(j Job, mainSession string) bool {
+	return j.Agent != nil && j.Agent.SessionID != "" && j.Agent.SessionID != mainSession &&
+		workTerminalEvidence(j, true)
+}
+
+func workTerminalEvidence(j Job, exactSession bool) bool {
 	if j.State != "finished" || j.Agent == nil || j.Agent.Phase != "terminal" || j.Agent.TerminalEvidence == "" || j.Outcome != "agent_"+j.Agent.ServerOutcome {
 		return false
 	}
@@ -208,13 +215,16 @@ func workTerminal(j Job) bool {
 		return false
 	}
 	var proof struct {
-		Policy string `json:"completion_policy"`
-		Prompt string `json:"prompt_id"`
-		Digest string `json:"request_digest"`
-		Stable bool   `json:"stable_transcript"`
-		Active *bool  `json:"active"`
+		Policy  string      `json:"completion_policy"`
+		Prompt  string      `json:"prompt_id"`
+		Digest  string      `json:"request_digest"`
+		Stable  bool        `json:"stable_transcript"`
+		Active  *bool       `json:"active"`
+		Session sessionInfo `json:"session"`
 	}
-	return json.Unmarshal(b, &proof) == nil && proof.Policy == agentCompletionPolicy && proof.Prompt == j.Agent.PromptID && proof.Digest == j.Digest && proof.Stable && proof.Active != nil && !*proof.Active
+	return json.Unmarshal(b, &proof) == nil && proof.Policy == agentCompletionPolicy && proof.Prompt == j.Agent.PromptID &&
+		proof.Digest == j.Digest && proof.Stable && proof.Active != nil && !*proof.Active &&
+		(!exactSession || j.agentRequest != nil && validateSession(j, proof.Session) == nil)
 }
 
 func workJob(r *Reader, id string) (*WorkJob, error) {
@@ -233,17 +243,38 @@ func workJobView(j Job) *WorkJob {
 	return out
 }
 
-func standaloneTaskAdmission(r *Reader, rec workRecord, in WorkPrepareRequest, p workPayload, out *WorkStatus) error {
+func loadStandaloneTaskGoal(dir *os.File, rec workRecord, in WorkPrepareRequest) (TaskGoal, error) {
+	var saved TaskGoal
+	raw, err := workRead(dir, in.RequestID+".task.json")
+	if err != nil {
+		return saved, err
+	}
+	if _, err = decodeStrictJSONObject(raw, 4096, &saved); err != nil || in.Kind != "implementation" ||
+		in.BaseRef != rec.Binding.CommitAnchor || saved != standaloneTaskGoal(rec, in) {
+		return saved, errors.New("standalone task identity mismatch")
+	}
+	return saved, nil
+}
+
+func standaloneTaskSubmission(rec workRecord, in WorkPrepareRequest, p workPayload) (parsedProjectSubmission, error) {
 	parsed, err := parseSubmissionEnvelope([]byte(p.Payload))
 	if err != nil {
-		return err
+		return parsed, err
 	}
 	e := parsed.Envelope
 	if e.ProjectID != in.ProjectID || e.Key != workSubmissionKey(in.ProjectID, in.RequestID) ||
 		e.BindingRevision != rec.Binding.Revision || e.Role != "implementation" ||
 		parsed.Request.Repo != rec.Binding.RepoRoot || parsed.Request.Base != rec.BaseCommit ||
 		parsed.Request.Prompt != in.Brief {
-		return errors.New("standalone task submission identity mismatch")
+		return parsed, errors.New("standalone task submission identity mismatch")
+	}
+	return parsed, nil
+}
+
+func standaloneTaskAdmission(r *Reader, rec workRecord, in WorkPrepareRequest, p workPayload, out *WorkStatus) error {
+	parsed, err := standaloneTaskSubmission(rec, in, p)
+	if err != nil {
+		return err
 	}
 	var receipt ProjectSubmissionReceipt
 	var job Job
@@ -265,11 +296,39 @@ func standaloneTaskAdmission(r *Reader, rec workRecord, in WorkPrepareRequest, p
 		if err != nil {
 			return fmt.Errorf("standalone task owned lane: %w", err)
 		}
-		if lane.LaneID != parsed.LaneID || lane.Role != e.Role || lane.BaseCommit != rec.BaseCommit ||
+		if lane.LaneID != parsed.LaneID || lane.Role != parsed.Envelope.Role || lane.BaseCommit != rec.BaseCommit ||
 			lane.FsforkDriver != parsed.FsforkDriver || job.Agent == nil {
 			return errors.New("standalone task job/lane ownership mismatch")
 		}
 		laneID = lane.LaneID
+		ready, err := mainHandledSchemaReady(tx)
+		if err != nil || !ready {
+			return err
+		}
+		handoff, err := taskHandoffFrom(context.Background(), tx, in.ProjectID, in.RequestID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // Legacy work is not retroactively enrolled.
+		}
+		if err != nil {
+			return err
+		}
+		if handoff.job != job.ID || handoff.intent != rec.Digest || handoff.MainRevision != rec.Binding.Revision ||
+			handoff.MainSessionID != rec.Binding.ElephantSessionID || (handoff.InboxID != "" && handoff.lane != laneID) {
+			return errors.New("standalone task does not match stored handoff")
+		}
+		out.TaskLifecycle.Handoff = &handoff.TaskHandoff
+		handled, err := mainHandledReceiptFrom(tx, in.ProjectID, in.RequestID)
+		if err == nil {
+			if handled.IntentDigest != rec.Digest || handled.JobID != job.ID || handled.LaneID != laneID ||
+				handled.SubmissionKey != receipt.Key || handled.EnvelopeDigest != receipt.EnvelopeDigest ||
+				handled.AdmissionRevision != receipt.BindingRevision || handled.InboxID != handoff.InboxID ||
+				handled.AssociationID != handoff.AssociationID || handled.ResultDigest != handoff.ResultDigest {
+				return errors.New("standalone task does not match stored Main handled receipt")
+			}
+			out.TaskLifecycle.MainHandled = "recorded"
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		return nil
 	})
 	if err != nil || receipt.JobID == "" {
@@ -293,12 +352,7 @@ func workInspect(r *Reader, dir *os.File, project, id string) (out WorkStatus, r
 		return out, err
 	}
 	out.Kind, out.IntentSHA256, out.CreatedAt, out.BindingRevision, out.ParentRequestID = in.Kind, rec.Digest, rec.Created, in.BindingRevision, in.ParentRequestID
-	if raw, e := workRead(dir, id+".task.json"); e == nil {
-		var saved TaskGoal
-		if _, e = decodeStrictJSONObject(raw, 4096, &saved); e != nil || in.Kind != "implementation" ||
-			in.BaseRef != rec.Binding.CommitAnchor || saved != standaloneTaskGoal(rec, in) {
-			return out, errors.New("standalone task identity mismatch")
-		}
+	if saved, e := loadStandaloneTaskGoal(dir, rec, in); e == nil {
 		out.TaskGoal = &saved
 		out.TaskLifecycle = &TaskLifecycle{MainHandled: "unverified", SessionArchived: "unverified"}
 	} else if !errors.Is(e, syscall.ENOENT) {
@@ -327,8 +381,20 @@ func workInspect(r *Reader, dir *os.File, project, id string) (out WorkStatus, r
 		if err = standaloneTaskAdmission(r, rec, in, p, &out); err != nil {
 			return out, err
 		}
+		if h := out.TaskLifecycle.Handoff; h != nil && h.InboxID != "" {
+			a, state := taskWakeJournal(dir, rec, *h)
+			out.TaskLifecycle.NativeWake = state
+			if state != "" && state != "unresolved" {
+				out.TaskLifecycle.NativeWakeID = a.MessageID
+			}
+		}
 		if out.Job != nil && out.Job.SessionID != "" {
 			out.Job.SessionState = sessionDeletionState(dir, project, out.Job.SessionID, id)
+			view := archiveDisplay(project, id, out.Job.SessionID)
+			a, err := taskArchiveAttempt(r, dir, view)
+			if err == nil && taskArchiveResult(dir, a, &view) == nil {
+				out.TaskLifecycle.SessionArchived = view.State
+			}
 		}
 	} else if in.Kind == "implementation" || in.Kind == "review" {
 		receipt, e := r.SubmissionReceipt([]byte(p.Payload))

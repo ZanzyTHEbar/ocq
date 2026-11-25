@@ -292,7 +292,7 @@ HC response stays unknown. Replaying that pointer never spawns another client.
 An explicitly new navigation intent can open one fresh inspection client.
 
 The packaged TUI-only extension uses an authenticated existing-session GET and
-the public router on OpenCode 2.3.0 or 2.3.2. It checks the exact session, directory,
+the public OpenCode V2 router. It checks the exact session, directory,
 project, metadata and current profile digests before navigation. It never uses
 `--session`, creates an absent target, sends a prompt or answers a permission.
 The core launcher pins the exact discovered server, preserves effective plugins,

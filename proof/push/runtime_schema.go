@@ -355,7 +355,7 @@ func runtimeSchemaProof(bridge, cli, root string) {
 	run(cli, "--state-dir", state, "list")
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(state, "queue.db"))
 	must(err)
-	_, err = db.Exec("PRAGMA user_version=8")
+	_, err = db.Exec("PRAGMA user_version=9")
 	must(err)
 	must(db.Close())
 	tokenPath := filepath.Join(future, "token")
@@ -368,14 +368,14 @@ func runtimeSchemaProof(bridge, cli, root string) {
 	cmd.Stderr = &refusal
 	out, err := cmd.Output()
 	check(err != nil && len(out) == 0, "unsupported schema reached listen/readiness")
-	check(strings.Contains(refusal.String(), "push requires an existing private schema6/7 store"), "unsupported version did not fail at the startup schema boundary")
+	check(strings.Contains(refusal.String(), "push requires an existing private schema6/7/8 store"), "unsupported version did not fail at the startup schema boundary")
 	head, err := core.ObserveHead(context.Background(), state)
 	must(err)
-	check(head.Status != "ready" && head.Schema == 8, "unsupported observation or automatic migration")
+	check(head.Status != "ready" && head.Schema == 9, "unsupported observation or automatic migration")
 	_, err = os.Stat(filepath.Join(future, "config", "ocq", "runtime.json"))
 	check(os.IsNotExist(err), "unsupported store registered runtime")
 	hc.stop()
 	success = true
-	save(filepath.Join(root, "RESULT.json"), map[string]any{"pass": true, "cases": results, "unsupported8_rejected_before_listen": true, "schema7_explicitly_activated": true, "qualification": "Real compiled CLI/bridge, private real HC and authenticated runtime sockets. Populated projects/lanes are historical projection fixtures, not live agent or workflow execution."})
-	fmt.Println("PASS real runtime schema6/schema7 welcome + projects/lanes snapshot; unsupported8 refusal; private registration retirement")
+	save(filepath.Join(root, "RESULT.json"), map[string]any{"pass": true, "cases": results, "unsupported9_rejected_before_listen": true, "schema7_explicitly_activated": true, "qualification": "Real compiled CLI/bridge, private real HC and authenticated runtime sockets. Populated projects/lanes are historical projection fixtures, not live agent or workflow execution."})
+	fmt.Println("PASS real runtime schema6/schema7 welcome + projects/lanes snapshot; unsupported9 refusal; private registration retirement")
 }

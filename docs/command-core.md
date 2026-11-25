@@ -152,6 +152,9 @@ two new workers in addition to the unknown reservation.
 agent at the legacy FIFO head still blocks later commands; under the activated
 policy it blocks only its project lane. Existing unknown agent
 ownership still counts. Plain `dispatch` also handles supported agent jobs.
+The separate `--auto-task-handoff PROJECT` flag opts an agent-enabled dispatcher
+into [cooperative Main wake and task archive](goals-and-sessions.md#opt-in-to-cooperative-automatic-wake-and-archive)
+for one project. It is off by default and incompatible with `--commands-only`.
 
 SIGINT/SIGTERM stops new admission and waits for this dispatcher's direct
 commands. It does not kill them or wait for previously unknown work. A launch

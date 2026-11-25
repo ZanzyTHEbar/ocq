@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +23,52 @@ const mainSelectionPrefix = "ocq-main-v1 setup: "
 func mainFile(id, suffix string) string { return ".main-" + id + "." + suffix + ".json" }
 
 func mainCreatesSession(mode string) bool { return mode == "create" || mode == "replace" }
-func mainSetupMode(mode string) bool     { return mainCreatesSession(mode) || mode == "adopt" }
+func mainSetupMode(mode string) bool      { return mainCreatesSession(mode) || mode == "adopt" }
+
+func checkMainAgent(directory string, service nativeService, id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// A new V2 location exposes a valid but empty catalog while its plugins
+	// activate. Re-read only that read-only state, never a failed mutation or
+	// a populated catalog that does not contain the selected agent.
+	for attempt := 0; attempt < 3; attempt++ {
+		body, err := nativeCallContext(ctx, directory, service, "get", "/api/agent"+locationQuery(directory), nil)
+		if err != nil {
+			return err
+		}
+		var agents struct {
+			Location struct {
+				Directory string `json:"directory"`
+			} `json:"location"`
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &agents) != nil || agents.Location.Directory != directory || agents.Data == nil {
+			break
+		}
+		if len(agents.Data) != 0 {
+			matches := 0
+			for _, agent := range agents.Data {
+				if agent.ID == id {
+					matches++
+				}
+			}
+			if matches == 1 {
+				return nil
+			}
+			break
+		}
+		if attempt < 2 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
+	}
+	return errors.New("exact configured Main agent/location unavailable")
+}
 
 func nativeJournalRoom(j *os.File, additional int) error {
 	if _, err := j.Seek(0, 0); err != nil {
@@ -432,22 +476,10 @@ func PrepareProjectMain(dir string, raw []byte) (MainStatus, error) {
 		rec.ProfileSHA = nativeHash(generic)
 		rec.Metadata, _ = json.Marshal(map[string]any{"ocq_main": map[string]string{"project_id": in.ProjectID, "main_id": rec.SetupID, "role": "integrator", "owner_token": token, "profile_sha256": rec.ProfileSHA, "main_branch": rec.Branch, "git_common_dir": rec.Common}})
 		rec.OwnershipMode = "ocq_main"
-		agentBody, e := nativeCall(rec.Repo, rec.Server, "get", "/api/agent/"+url.PathEscape(profile.Agent)+locationQuery(rec.Repo), nil)
-		if e != nil {
+		if e := checkMainAgent(rec.Repo, rec.Server, profile.Agent); e != nil {
 			return MainStatus{}, e
 		}
-		var agent struct {
-			Location struct {
-				Directory string `json:"directory"`
-			} `json:"location"`
-			Data struct {
-				ID string `json:"id"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(agentBody, &agent) != nil || agent.Location.Directory != rec.Repo || agent.Data.ID != profile.Agent {
-			return MainStatus{}, errors.New("exact configured Main agent/project/location unavailable")
-		}
-		// Agent responses carry Location.PublicRef, not PublicInfo. Resolve
+		// The agent catalog carries Location.PublicRef, not PublicInfo. Resolve
 		// project identity through the supported read-only location endpoint.
 		locationBody, e := nativeCall(rec.Repo, rec.Server, "get", "/api/location"+locationQuery(rec.Repo), nil)
 		if e != nil {

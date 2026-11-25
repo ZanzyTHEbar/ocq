@@ -187,7 +187,7 @@ func openStore(dir string) (*store, error) {
 		database.Close()
 		return nil, classifyDiagnostic(faults.CodeDatabaseRead, err)
 	}
-	if version < 0 || version > 7 {
+	if version < 0 || version > 8 {
 		database.Close()
 		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("unsupported schema version %d", version))
 	}
@@ -198,7 +198,7 @@ func openStore(dir string) (*store, error) {
 			return nil, faults.Wrap(faults.CodeResourceLimit, "stop dispatcher before schema migration", err)
 		}
 	}
-	if err := migrateStore(db, false); err != nil {
+	if err := migrateStore(db, 2); err != nil {
 		database.Close()
 		return nil, err
 	}
@@ -214,7 +214,7 @@ func openStore(dir string) (*store, error) {
 // Goose commits each callback and its applied-version record in one transaction.
 // Goose may first commit an empty version table separately; this does not change
 // user_version or queue data and a subsequent open retries the migration.
-func migrateStore(db *sql.DB, schedulingUpgrade bool) error {
+func migrateStore(db *sql.DB, target int64) error {
 	migration := goose.NewGoMigration(1, &goose.GoFunc{RunTx: migrateSchema}, &goose.GoFunc{
 		RunTx: func(context.Context, *sql.Tx) error {
 			return faults.New(faults.CodeConfigInvalid, "schema downgrade is not supported")
@@ -226,6 +226,9 @@ func migrateStore(db *sql.DB, schedulingUpgrade bool) error {
 		},
 	})
 	scheduling := goose.NewGoMigration(3, &goose.GoFunc{RunTx: migrateSchedulingSchema}, &goose.GoFunc{
+		RunTx: func(context.Context, *sql.Tx) error { return fmt.Errorf("schema downgrade is not supported") },
+	})
+	handled := goose.NewGoMigration(4, &goose.GoFunc{RunTx: migrateMainHandledSchema}, &goose.GoFunc{
 		RunTx: func(context.Context, *sql.Tx) error { return fmt.Errorf("schema downgrade is not supported") },
 	})
 	// Reject a damaged ledger before Goose can hide it with a later migration.
@@ -243,22 +246,21 @@ func migrateStore(db *sql.DB, schedulingUpgrade bool) error {
 		if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 			return err
 		}
-		if applied > 3 || (applied == 3 && version != 7) || (applied == 2 && version != 6) || (applied == 1 && version < 5) {
+		if applied > 4 || (applied >= 2 && version != int(applied)+4) || (applied == 1 && version < 5) {
 			return faults.New(faults.CodeInvariantFailed, "inconsistent Goose ledger and queue schema")
 		}
 	}
 	provider, err := goose.NewProvider(goose.DialectSQLite3, db, nil,
-		goose.WithDisableGlobalRegistry(true), goose.WithGoMigrations(migration, observation, scheduling))
+		goose.WithDisableGlobalRegistry(true), goose.WithGoMigrations(migration, observation, scheduling, handled))
 	if err != nil {
 		return classifyDiagnostic(faults.CodeConfigInvalid, err)
 	}
-	target := int64(2)
 	var current int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&current); err != nil {
 		return err
 	}
-	if schedulingUpgrade || current == 7 {
-		target = 3
+	if current >= 7 && int64(current-4) > target {
+		target = int64(current - 4)
 	}
 	if _, err := provider.UpTo(context.Background(), target); err != nil {
 		return classifyDiagnostic(faults.CodeDatabaseWrite, err)
@@ -267,8 +269,13 @@ func migrateStore(db *sql.DB, schedulingUpgrade bool) error {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return classifyDiagnostic(faults.CodeDatabaseRead, err)
 	}
-	if (target == 2 && version != 6) || (target == 3 && version != 7) {
+	if version != int(target)+4 {
 		return faults.New(faults.CodeInvariantFailed, fmt.Sprintf("inconsistent Goose migration and schema version %d", version))
+	}
+	if version == 8 {
+		if err := validateMainHandledSchema(context.Background(), db); err != nil {
+			return err
+		}
 	}
 	return validateObservationSchema(context.Background(), db)
 }
@@ -311,10 +318,18 @@ func migrateObservationSchema(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
-func supportedProjectSchema(version int) bool { return version == 5 || version == 6 || version == 7 }
+func supportedProjectSchema(version int) bool {
+	return version == 5 || version == 6 || supportedSchedulingSchema(version)
+}
+
+func supportedObservationSchema(version int) bool {
+	return version == 6 || supportedSchedulingSchema(version)
+}
+
+func supportedSchedulingSchema(version int) bool { return version == 7 || version == 8 }
 
 // Non-initializing read-only store open for projection reads. Fails closed if
-// the directory or database file does not exist or is not at schema version 5/6.
+// the directory or database file does not exist or is not at a project schema.
 func openReadOnlyStore(dir string) (*store, error) {
 	return openReadOnlyStoreContext(context.Background(), dir)
 }
@@ -391,12 +406,12 @@ func openReadOnlyStoreVersionContext(ctx context.Context, dir string, requireSup
 	}
 	if requireSupported && !supportedProjectSchema(version) {
 		database.Close()
-		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("read-only store requires schema version 5, 6 or 7, got %d", version))
+		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("read-only store requires schema version 5, 6, 7 or 8, got %d", version))
 	}
 	return &store{db: db, database: database, dir: dir}, nil
 }
 
-// openExistingWritableStore opens only an existing schema-5/6 database. Unlike
+// openExistingWritableStore opens only an existing project-schema database. Unlike
 // openStore it creates neither state nor locks, changes no journal mode, and
 // never invokes Goose. The existing initialization lock excludes migrations
 // while the connection and its safety settings are inspected.
@@ -480,7 +495,7 @@ func openExistingWritableStore(dir string) (*store, error) {
 	}
 	if !supportedProjectSchema(version) {
 		database.Close()
-		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing writable store requires schema version 5, 6 or 7, got %d", version))
+		return nil, faults.New(faults.CodeConfigInvalid, fmt.Sprintf("existing writable store requires schema version 5, 6, 7 or 8, got %d", version))
 	}
 	s := &store{db: db, database: database, dir: dir}
 	if err := s.validateSchedulingIdentity(); err != nil {
