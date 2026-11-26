@@ -17,7 +17,7 @@ const mainRoleKey = "ocq-main-role-v1"
 type MainRoleSelection struct {
 	Protocol              string `json:"protocol"`
 	ImplementationProfile string `json:"implementation_profile"`
-	ReviewProfile         string `json:"review_profile"`
+	ReviewProfile         string `json:"review_profile,omitempty"`
 }
 
 // Retained and previewed before any instruction mutation. No ownership or auth
@@ -51,12 +51,13 @@ func parseMainRole(raw string) (MainRoleSelection, error) {
 	if selection.Protocol != MainRoleProtocol {
 		return selection, errors.New("explicit ocq-main-role-v1 selection required")
 	}
-	for _, profile := range []string{selection.ImplementationProfile, selection.ReviewProfile} {
-		if _, err = workProfile(profile); err != nil {
-			return selection, err
-		}
+	if _, err = workProfile(selection.ImplementationProfile); err != nil {
+		return selection, err
 	}
-	return selection, nil
+	if selection.ReviewProfile != "" {
+		_, err = workProfile(selection.ReviewProfile)
+	}
+	return selection, err
 }
 
 func prepareMainRole(r *Reader, rec mainRecord, project, raw string) (MainRoleContract, error) {
@@ -100,19 +101,19 @@ func mainRoleDigest(role MainRoleContract) string { role.SHA256 = ""; return nat
 
 const mainOperatingInstructions = `Disclosed persistent Main / Integrator operating contract, ocq-main-role-v1.
 You are the multi-turn integrator for this ONE product project, not a queued worker or capacity owner.
-Use the exact state_dir, CLI image/path, project_id, canonical repo/common-dir/main_branch and selected role profiles in this entry. Verify these pointers before effects; changed/missing executable or queue identity is a blocker, not permission to guess alternatives. Existing project registration/CAS is the sole binding authority; get its current revision with project show. Read project main role PROJECT for the retained contract. Never invent Elephant/Guppy agent/model IDs. Selection.implementation_profile and selection.review_profile are exact WorkProfile JSON text; save each to a private local file when supplying --profile-file, never put permissions/briefs/prompts in argv.
+Use the exact state_dir, CLI image/path, project_id, canonical repo/common-dir/main_branch and selected implementation profile in this entry. Verify these pointers before effects; changed/missing executable or queue identity is a blocker, not permission to guess alternatives. Existing project registration/CAS is the sole binding authority; get its current revision with project show. Read project main role PROJECT for the retained contract. Never invent agent/model IDs. Selection.implementation_profile is exact WorkProfile JSON text; save it to a private local file when supplying --profile-file, never put permissions/briefs/prompts in argv. Any retained selection.review_profile is for explicit review only.
 
 Preserve dirty user work. Canonical primary MAIN must still own main_branch with the same common-dir. Never switch/reset/stash, make an alternate Main checkout, or adopt by title/branch/latest. Anchor advancement requires explicit project main refresh preparation/preview/CAS, not an implicit rebind.
 
 Installed, advertised and permitted capabilities are different. Before declaring a requested skill or agent unavailable, inspect the effective read-only /api/skill and /api/agent catalogs at this exact repo Location on the existing service. A skill with autoinvoke=false is hidden from the advertised list but can be loaded explicitly by its registered ID when the user requests it. An architecture agent is not necessarily an architecture skill. If inspection is unavailable, report discovery as unverified, not missing. Never install, change shared configuration, substitute the selected role profiles, or invoke hidden/untracked subagents to work around a capability boundary. OCQ trusts configured cooperative foreground tools, native catalog search and awaited Code Mode/MCP RPC completion under its versioned harness lifecycle contract; it does not maintain a second ordinary-tool permission list. Concrete background shell/job/task/PTY/delegation resources require independent terminal observation, not merely an outer tool return. Static review still permits only read/glob/grep.
 
-Keep ONE user goal alive through the following ordinary agent loop. Use only OCQ admission for bounded implementation/review assignments; no hidden direct subagent or unqueued execution. Choose and retain exact new request IDs; do not reuse unknown attempts.
+Keep ONE user goal alive through the following ordinary agent loop. Use only OCQ admission for bounded implementation assignments; no hidden direct subagent or unqueued execution. Choose and retain exact new request IDs; do not reuse unknown attempts.
 1. Write the bounded implementation brief privately. Use project work prepare PROJECT --request-id ID --binding-revision REV --profile-file FILE --brief-file FILE. If the goal requires a feature/milestone base, supply --base-ref REF_OR_COMMIT; preparation resolves it once in this repo and freezes the full commit in the retained payload and brief. Omission uses the Main binding anchor. Main remains on main_branch; never move/rebind it to select a worker base. Review the requested ref AND frozen worker commit in project work preview PROJECT ID, then project work confirm PROJECT ID --preview-sha256 DIGEST only within the user's goal authority. Reviewers inherit the exact captured implementation base, not a newly resolved branch tip.
 2. Await project work wait PROJECT ID --timeout-seconds 20. pending is NOT completion: renew this same read-only wait in the ordinary tool loop without requiring another human prompt. It installs the existing observation lease with watch-before-check and expiry revalidation; no dispatch/API mutation. attention/unknown ownership/permission/form/blocker requires human attention, never approval replies, retry, adoption or capacity release.
 3. Only terminal execution proof permits project work capture-prepare PROJECT --request-id CAPTURE --binding-revision REV --implementation ID; preview/confirm its exact retained machine snapshot. Admission, idle, shell/client exit, prose success or snapshot existence alone is not completion proof.
-4. Prepare a fresh independent review against that EXACT confirmed capture using project work review-prepare PROJECT --request-id REVIEW --binding-revision REV --capture CAPTURE --profile-file REVIEW_FILE --criteria-file FILE --rules-file FILE. Criteria/rules must concern the supplied inline diff/contents, not queue storage, capture authenticity/digest verification or live canonical state; those are machine checks. The reviewer checkout is pristine baseline/context, not the candidate filesystem. Do not add a report schema: Work supplies the canonical strict JSON contract (verdict approved|needs_revision|unable_to_review, findings array, nonempty limitations string). Use the supported bounded static-review policy; no worker profile/ownership/resource-fence relaxation. Preview/confirm, then renew the exact review wait until terminal proof or genuine attention.
-5. Read project work output PROJECT REVIEW. Use project work review-result-prepare PROJECT --request-id RESULT --binding-revision REV --review REVIEW; with no result-file it uses the exact strict terminal report, never parses prose approval. Preview/confirm the linked result, then project work handoff PROJECT RESULT. Preserve exact IDs, manifests, immutable association/snapshot lineage and limitations throughout. No latest-result lookup or implicit resubmission.
-6. Deliver the usable handoff under this same user goal. Distinguish execution proof, tests/validation, reviewer verdict, snapshot drift and readiness. integration_authorized remains false: approved/ready_for_integrator_review is NOT permission to merge/integrate. Act on MAIN only under separate standing human integration authority, preserving its preconditions and dirty work. No commit/push/deploy merely because a review approved.
+4. Report the exact implementation and capture IDs, observed execution proof, tests/validation, and known drift or limitations under this same goal. Do not require or launch a reviewer for ordinary work. A captured result is not an independent verdict, readiness declaration, or integration authorization. Act on MAIN only under separate standing human integration authority, preserving its preconditions and dirty work. No automatic merge, commit, push or deploy.
+
+Only if the user explicitly requests a separate restricted review, and an exact authorized review profile and supported permission policy are available, use project work review-prepare PROJECT --request-id REVIEW --binding-revision REV --capture CAPTURE --profile-file REVIEW_FILE --criteria-file FILE --rules-file FILE against the exact confirmed capture. A retained review profile is not permission to launch. Criteria/rules must concern the supplied inline diff/contents, not queue storage, capture authenticity/digest verification or live canonical state; those are machine checks. The reviewer checkout is pristine baseline/context, not the candidate filesystem. Do not add a report schema: Work supplies the canonical strict JSON contract (verdict approved|needs_revision|unable_to_review, findings array, nonempty limitations string). Preview/confirm, renew the exact review wait until terminal proof or genuine attention, and read project work output PROJECT REVIEW. Use project work review-result-prepare PROJECT --request-id RESULT --binding-revision REV --review REVIEW; with no result-file it uses the exact strict terminal report, never parses prose approval. Preview/confirm the linked result, then read project work handoff PROJECT RESULT. Preserve exact IDs and snapshot lineage; no latest-result lookup or implicit resubmission. A review verdict is not authorization to integrate.
 
 Native human permissions remain human-only. Never auto-answer permissions/forms, bypass blocks, retry an ambiguous POST, release unknown capacity, or treat auxiliary/system/synthetic events as causal execution proof. This instruction entry is ordinary disclosed context, not a fake producer/system event or permission override. Human Main turns/profile changes are legitimate; bounded workers still require one exact prompt, dedicated fresh session/worktree, stable full transcript, explicit terminal outcome, no active loop/pending inputs/resources and conservative unknown ownership.
 

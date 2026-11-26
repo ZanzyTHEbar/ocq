@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"io"
+
 	"github.com/spf13/cobra"
 	"ocq/internal/core"
 )
@@ -84,6 +86,18 @@ func projectClient(state *string) *cobra.Command {
 		return output(out)
 	}
 	run := &cobra.Command{Use: "run PROJECT POINTER", Args: cobra.ExactArgs(2), RunE: func(_ *cobra.Command, args []string) error { return core.RunProjectClient(*state, args[0], args[1]) }}
-	root.AddCommand(prepare, status, record, run, packaging)
+	resolve := &cobra.Command{Use: "resolve-tui OPEN_CODE_STATE_DIR", Short: "Resolve one exact TUI target from stdin (read only)", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			raw, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 2049))
+			if err != nil {
+				return err
+			}
+			out, err := core.ResolveTUIOpen(*state, args[0], raw)
+			if err != nil {
+				return err
+			}
+			return output(out)
+		}}
+	root.AddCommand(prepare, status, record, run, packaging, resolve)
 	return root
 }

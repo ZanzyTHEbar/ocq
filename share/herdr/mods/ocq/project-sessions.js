@@ -28,7 +28,7 @@ export class ProjectSessions {
     this.bound = scope;
     return { scope, generation: this.generation };
   }
-  apply(capture, value, cx, main, clients) {
+  apply(capture, value, cx, main) {
     if (!capture || capture.generation !== this.generation || !this.current(capture.scope)) return;
     const project = capture.scope.project;
     if (value.protocol !== "ocq-work-v1" || value.project_id !== project ||
@@ -37,7 +37,7 @@ export class ProjectSessions {
         !Array.isArray(value.items) || value.items.length > 128) throw Error("Invalid project session observation");
     const items = new Map(value.items.map(item => [item.request_id, item]));
     if (items.size !== value.items.length) throw Error("Duplicate work pointers");
-    this.host.mainClient.apply(capture.scope, main, clients, cx);
+    this.host.mainClient.apply(capture.scope, main, cx);
     const rows = new Map(), conflicts = new Set();
     for (const goal of this.host.mainClient.goals) {
       for (const linked of goal.work) {

@@ -23,7 +23,7 @@ func clientDigest(p ClientPointer) string {
 	return nativeHash(p)
 }
 
-func clientTarget(ctx context.Context, r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer, error) {
+func storedClientTarget(r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer, error) {
 	p := ClientPointer{Protocol: in.Protocol, ProjectID: in.ProjectID, NavigationID: in.NavigationID, WorkRequestID: in.WorkRequestID, TargetKind: in.TargetKind, Space: in.Space}
 	binding, err := workBinding(r, in.ProjectID)
 	if err != nil {
@@ -35,7 +35,6 @@ func clientTarget(ctx context.Context, r *Reader, j *os.File, in ClientPrepareRe
 	if err != nil {
 		return p, err
 	}
-	var expectedProfile string
 	if in.TargetKind == "worker" {
 		status, e := workInspect(r, j, in.ProjectID, in.WorkRequestID)
 		if e != nil {
@@ -60,7 +59,7 @@ func clientTarget(ctx context.Context, r *Reader, j *os.File, in ClientPrepareRe
 		b, _ := json.Marshal(map[string]any{"agent": job.agentRequest.Agent, "model": job.agentRequest.Model, "permissions": job.agentRequest.Permissions})
 		var profile map[string]any
 		_ = json.Unmarshal(b, &profile)
-		expectedProfile = nativeHash(profile)
+		p.ProfileSHA256 = nativeHash(profile)
 	} else {
 		setup, _, _, e := selectedMain(r, j, in.ProjectID)
 		if e != nil {
@@ -73,6 +72,15 @@ func clientTarget(ctx context.Context, r *Reader, j *os.File, in ClientPrepareRe
 		p.SetupID, p.OwnershipMode, p.SessionID, p.Cwd, p.OpenCodeProjectID = setup.SetupID, setup.OwnershipMode, setup.SessionID, setup.Repo, setup.ProjectID
 		p.OwnershipSHA256 = nativeHash(json.RawMessage(setup.Metadata))
 	}
+	return p, nil
+}
+
+func clientTarget(ctx context.Context, r *Reader, j *os.File, in ClientPrepareRequest) (ClientPointer, error) {
+	p, err := storedClientTarget(r, j, in)
+	if err != nil {
+		return p, err
+	}
+	expectedProfile := p.ProfileSHA256
 	service, err := discoverNativeServiceContext(ctx, p.Cwd)
 	if err != nil {
 		return p, err
@@ -91,7 +99,7 @@ func clientTarget(ctx context.Context, r *Reader, j *os.File, in ClientPrepareRe
 		}
 	}
 	p.ProfileSHA256 = nativeProfile(s)
-	if expectedProfile != "" && p.ProfileSHA256 != expectedProfile {
+	if in.TargetKind == "worker" && expectedProfile != "" && p.ProfileSHA256 != expectedProfile {
 		return p, errors.New("worker immutable execution profile changed; navigation refused")
 	}
 	p.Options = ClientOptions{Protocol: "ocq-handoff-v1", TargetKind: p.TargetKind, ProjectID: p.ProjectID, MainID: p.SetupID, OwnershipMode: p.OwnershipMode, QueueIdentity: p.QueueIdentity, JobID: p.JobID, SessionID: p.SessionID, Worktree: p.Cwd, OpenCodeProjectID: p.OpenCodeProjectID, OwnershipSHA256: p.OwnershipSHA256, ProfileSHA256: p.ProfileSHA256}

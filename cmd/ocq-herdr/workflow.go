@@ -40,6 +40,16 @@ type workflowRegistry struct {
 }
 type workflowKey struct{}
 
+// Only stable, non-sensitive stage codes go to Herdr. The underlying error
+// can contain machine-local paths, environment, or profile information.
+type workflowBlock struct {
+	code string
+	err  error
+}
+
+func (b workflowBlock) Error() string { return b.err.Error() }
+func (b workflowBlock) Unwrap() error { return b.err }
+
 func (r *workflowRegistry) peer() string {
 	if r == nil || r.Peer == "" {
 		return "local"
@@ -66,7 +76,7 @@ func loadWorkflowRegistry(file, space, folder, queue string) (*workflowRegistry,
 	d.DisallowUnknownFields()
 	if d.Decode(&r) != nil || d.Decode(new(any)) != io.EOF || r.Protocol != workflowProtocol ||
 		r.Space != space || r.Folder != folder || r.Queue != queue || !clientDigest.MatchString(r.CLISHA256) ||
-		len(r.Selections) < 3 || len(r.Selections) > 32 {
+		len(r.Selections) < 2 || len(r.Selections) > 32 {
 		return nil, errors.New("workflow registry scope/contract mismatch")
 	}
 	if len(r.peer()) > 128 || strings.ContainsAny(r.peer(), "/\r\n\x00") {
@@ -82,8 +92,8 @@ func loadWorkflowRegistry(file, space, folder, queue string) (*workflowRegistry,
 		seen[s.ID] = true
 		roles[s.Role] = true
 	}
-	if len(roles) != 3 {
-		return nil, errors.New("Main, implementation and review selections are all required")
+	if !roles["main"] || !roles["implementation"] {
+		return nil, errors.New("Main and implementation selections are required")
 	}
 	return &r, nil
 }
@@ -94,26 +104,29 @@ func (r *workflowRegistry) executionReady(ctx context.Context, state string) err
 	}
 	hc, _ := ctx.Value(hcBindingKey{}).(*hcBinding)
 	if hc == nil || hc.Space != r.Space || hc.Folder != r.Folder || hc.Queue != r.Queue {
-		return errors.New("exact private native HC capability missing")
+		return workflowBlock{"native_hc_unavailable", errors.New("exact private native HC capability missing")}
 	}
 	conn, err := hc.connect(ctx)
 	if err != nil {
-		return err
+		return workflowBlock{"native_hc_unavailable", err}
 	}
 	conn.Close()
 	exe, err := os.Executable()
 	if err != nil {
-		return err
+		return workflowBlock{"cli_unavailable", err}
 	}
 	cli := filepath.Join(filepath.Dir(exe), "ocq")
 	raw, err := os.ReadFile(cli)
 	if err != nil || compatHash(raw) != r.CLISHA256 {
-		return errors.New("matched owner CLI image unavailable")
+		return workflowBlock{"cli_unavailable", errors.New("matched owner CLI image unavailable")}
 	}
 	if err = core.VerifyOperatorDispatcher(state, cli, r.Dispatcher); err != nil {
-		return err
+		return workflowBlock{"dispatcher_unavailable", err}
 	}
-	return core.VerifyOperatorNative()
+	if err = core.VerifyOperatorNative(); err != nil {
+		return workflowBlock{"native_package_unavailable", err}
+	}
+	return nil
 }
 
 func (r *workflowRegistry) ready(ctx context.Context, state string) (string, error) {
@@ -122,12 +135,18 @@ func (r *workflowRegistry) ready(ctx context.Context, state string) (string, err
 	}
 	selections := []core.OperatorProfileSelection{}
 	for _, s := range r.Selections {
-		selections = append(selections, core.OperatorProfileSelection{Role: s.Role, Profile: s.Profile})
+		if s.Role != "review" {
+			selections = append(selections, core.OperatorProfileSelection{Role: s.Role, Profile: s.Profile})
+		}
 	}
 	if err := core.VerifyOperatorSelections(r.Folder, selections); err != nil {
-		return "", err
+		return "", workflowBlock{"profiles_unavailable", err}
 	}
-	return core.OperatorRepository(r.Folder)
+	branch, err := core.OperatorRepository(r.Folder)
+	if err != nil {
+		return "", workflowBlock{"checkout_unavailable", err}
+	}
+	return branch, nil
 }
 
 type workflowAuthor struct {
@@ -149,16 +168,27 @@ func workflowCommands() []*cobra.Command {
 			return err
 		}
 		out := map[string]any{"protocol": workflowProtocol, "ready": false, "reason": "Owner must provision workflow execution and native navigation.", "selections": []any{}}
-		if r == nil || r.Space != a[0] || r.Queue != a[1] {
+		if r == nil {
+			out["reason_code"] = "registry_missing"
+			return writeWork(cmd, out)
+		}
+		if r.Space != a[0] || r.Queue != a[1] {
+			out["reason_code"] = "scope_mismatch"
 			return writeWork(cmd, out)
 		}
 		branch, err := r.ready(cmd.Context(), dir)
 		if err != nil {
+			var block workflowBlock
+			if errors.As(err, &block) {
+				out["reason_code"] = block.code
+			}
 			return writeWork(cmd, out)
 		}
 		choices := []map[string]string{}
 		for _, s := range r.Selections {
-			choices = append(choices, map[string]string{"id": s.ID, "label": s.Label, "role": s.Role})
+			if s.Role != "review" {
+				choices = append(choices, map[string]string{"id": s.ID, "label": s.Label, "role": s.Role})
+			}
 		}
 		out["ready"], out["reason"], out["repo"], out["branch"], out["selections"] = true, "", r.Folder, branch, choices
 		return writeWork(cmd, out)
@@ -193,14 +223,19 @@ func workflowCommands() []*cobra.Command {
 			if in.Goal != "" {
 				return errors.New("setup never starts a goal")
 			}
+			// Old setup submissions may reproduce an existing intent, but
+			// ordinary new setup never selects a reviewer.
+			if savedErr != nil && in.Review != "" {
+				return errors.New("setup accepts only Main and implementation selections")
+			}
 			profiles := map[string]string{}
 			for _, s := range r.Selections {
 				if s.Role == "main" && s.ID == in.Main || s.Role == "implementation" && s.ID == in.Implementation || s.Role == "review" && s.ID == in.Review {
 					profiles[s.Role] = s.Profile
 				}
 			}
-			if len(profiles) != 3 {
-				return errors.New("three explicit owner selections required")
+			if profiles["main"] == "" || profiles["implementation"] == "" || (in.Review != "" && profiles["review"] == "") {
+				return errors.New("exact owner selections required")
 			}
 			branch := saved.MainBranch
 			if savedErr != nil {
@@ -238,13 +273,7 @@ func workflowCommands() []*cobra.Command {
 		if _, err = r.ready(cmd.Context(), dir); err != nil {
 			return err
 		}
-		if req.Profile != "" {
-			var selection core.MainRoleSelection
-			_ = json.Unmarshal([]byte(req.Role), &selection)
-			if err = core.VerifyOperatorProfiles(r.Folder, req.Profile, selection.ImplementationProfile, selection.ReviewProfile); err != nil {
-				return err
-			}
-		}
+		// ready verified the ordinary registry selections, including the selected IDs.
 		out, err := core.PrepareProjectMain(dir, body)
 		if err != nil {
 			return err

@@ -10,23 +10,38 @@ import { TaskGoalComposer } from "./task-goal.js";
 import { PrivateHCBinding } from "./hc-binding.js";
 import { panelEpoch, panelVisible } from "./panel-state.js";
 
-export function projectSpaces(machine, repo = null) {
+export function setupSpaces(machine, repo = null) {
   const live = panes();
-  const choices = [];
-  for (const space of spaces().filter(s => s.machine === machine)) {
-    const matches = space.tabs.flatMap(tab => live.filter(p => p.tab === tab.id && p.terminal && p.cwd &&
-      (!repo || p.cwd === repo || p.cwd.startsWith(repo.endsWith("/") ? repo : `${repo}/`))).map(p => ({
-      ...space, folder: p.cwd, activeTab: tab.active,
-      setupContext: { tab: tab.id, tabName: tab.name, pane: p.pane, terminal: p.terminal, cwd: p.cwd, branch: p.branch },
-    })));
-    if (repo) {
-      // Prefer an exact root in each existing space. Git and the endpoint
-      // still reverify the chosen location before it can authorize actions.
-      matches.sort((a, b) => Number(b.folder === repo) - Number(a.folder === repo) || Number(b.activeTab) - Number(a.activeTab));
-      if (matches.length) choices.push(matches[0]);
-    } else choices.push(...matches);
-  }
-  return choices;
+  return spaces().filter(s => s.machine === machine).map(space => ({
+    space,
+    tabs: space.tabs.map(tab => ({
+      tab,
+      terminals: live.filter(p => p.tab === tab.id && p.pane && p.terminal && p.cwd &&
+        (!repo || p.cwd === repo || p.cwd.startsWith(repo.endsWith("/") ? repo : `${repo}/`))),
+    })).filter(({ terminals }) => terminals.length),
+  })).filter(({ tabs }) => tabs.length);
+}
+
+export function projectTerminal(space, tab, p) {
+  return {
+    ...space, folder: p.cwd, activeTab: tab.active,
+    setupContext: { tab: tab.id, tabName: tab.name, pane: p.pane, terminal: p.terminal, cwd: p.cwd, branch: p.branch },
+  };
+}
+
+export function projectTerminalCurrent(machine, spaceID, s) {
+  return !!s && spaces().some(space => space.id === spaceID && space.machine === machine && space.tabs.some(t => t.id === s.tab)) &&
+    panes().some(p => p.pane === s.pane && p.tab === s.tab && p.terminal === s.terminal && p.cwd === s.cwd && p.branch === s.branch);
+}
+
+export function projectSpaces(machine, repo) {
+  return setupSpaces(machine, repo).map(({ space, tabs }) => {
+    const matches = tabs.flatMap(({ tab, terminals }) => terminals.map(p => projectTerminal(space, tab, p)));
+    // Preserve existing bound-project navigation: prefer an exact root in
+    // each space. New setup always asks the user when a tab has multiple terminals.
+    matches.sort((a, b) => Number(b.folder === repo) - Number(a.folder === repo) || Number(b.activeTab) - Number(a.activeTab));
+    return matches[0];
+  });
 }
 
 export class RuntimeProject {
@@ -72,8 +87,7 @@ export class RuntimeProject {
   }
   terminalCurrent() {
     const s = this.setupContext;
-    return !s || (spaces().some(space => space.id === this.spaceID && space.machine === this.machine && space.tabs.some(t => t.id === s.tab)) &&
-      panes().some(p => p.pane === s.pane && p.tab === s.tab && p.terminal === s.terminal && p.cwd === s.cwd && p.branch === s.branch));
+    return !s || projectTerminalCurrent(this.machine, this.spaceID, s);
   }
   panelCurrent() {
     return !this.closed && this.root.detail === this && this.source.current() && this.source.machine === this.machine &&
@@ -113,7 +127,8 @@ export class RuntimeProject {
       const folder = result.stdout?.replace(/\r?\n$/, "");
       if (result.code !== 0 || !folder || /[\r\n\0]/.test(folder) || this.project && this.project.repo_root !== folder) throw Error();
       this.folder = folder; this.updates.scope.folder = folder;
-      reason = "Project connection could not be verified.";
+      reason = this.project ? "Project connection could not be verified." :
+        "Setup needs a verified connection and the primary Git checkout on a branch. Check this terminal or choose another.";
       const response = await this.updates.connection.command(["compatibility", this.localSpace(), folder]);
       if (!current()) return;
       if (response.code !== 0) throw Error();
@@ -155,7 +170,7 @@ export class RuntimeProject {
     return `open-${createHash("sha256").update(JSON.stringify([this.sourceKey, this.selected, row.request_id, row.job.session_id])).digest("hex")}`;
   }
   openNotified(command, cx) {
-    if (!this.sessions.current(this.sessions.bound) || !this.compatibility.machineReady()) return;
+    if (!this.sessions.current(this.sessions.bound)) return;
     const row = this.sessions.rows.find(item => item.job.session_id && !item.job.session_state && this.sessionCommand(item) === command);
     if (row) this.mainClient.openConversation("worker", row.request_id, cx);
   }
@@ -245,6 +260,8 @@ export class RuntimeProject {
     const note = text => div().text_size(12).text_color(t.muted).child(text);
     if (!this.source.online()) return box.child(note("Machine unavailable. Check its Herdr connection."));
     if (!this.spaceID || !this.terminalCurrent()) {
+      if (!this.project) return box.child(note("The selected terminal moved, closed, or changed checkout. Choose it again."))
+        .child(button("ocq-choose-space", "Choose a terminal", task => this.root.beginSetup(task)));
       const choices = projectSpaces(this.machine, this.project?.repo_root);
       if (!choices.length) return box.child(note("Open a terminal in this project’s checkout in Herdr."));
       box.child(note("Choose the Herdr space for this project."));
@@ -257,20 +274,24 @@ export class RuntimeProject {
     }
     if (this.error) return box.child(note(this.error))
       .child(button("ocq-verify-project", "Check project", task => task.spawn(next => this.initialize(next))))
-      .child(button("ocq-choose-space", "Choose space", task => this.root.openProject(this.source, this.project, null, task, true)));
+      .child(button("ocq-choose-space", this.project ? "Choose space" : "Choose a terminal", task => {
+        if (this.project) this.root.openProject(this.source, this.project, null, task, true);
+        else this.root.beginSetup(task);
+      }));
     if (!this.updates.binding || this.selected && !this.sessions.readAt) return box.child(note("Reading project…"));
     const main = this.mainClient, scope = this.sessions.bound;
-    const ready = this.compatibility.machineReady();
-    const open = (kind, request, session, task) => {
-      if (this.sessions.current(scope) && main.targetSession(kind, request) === session) main.openConversation(kind, request, task);
+    const canOpen = this.sessions.current(scope);
+    const open = (kind, request, session, task, viewer) => {
+      task.spawn(async next => {
+        if (this.sessions.current(scope) && main.targetSession(kind, request) === session)
+          await main.openConversation(kind, request, next, viewer);
+      });
     };
-    const canNavigate = ready && !main.working && !main.tabNavigation;
-    const checkOpening = (kind, request, session, label) =>
-      button(`ocq-check-opening-${session}`, "Check opening", task => main.checkOpeningStatus(kind, request, session, scope, task),
-        canNavigate, `Check opening: ${label}`);
     const opening = (kind, request, session) => {
-      const message = main.openingMessage(scope, kind, request, session);
-      if (message) box.child(note(message));
+      const state = main.openingStatus(scope, kind, request, session);
+      if (state) box.child(note(state.message));
+      for (const viewer of state?.choices ?? []) box.child(button(`ocq-open-in-${viewer.pane}`, viewer.label,
+        task => open(kind, request, session, task, viewer)));
     };
     const standalone = this.taskGoal.supported();
     if (standalone) box.child(this.taskGoal.render(cx, t, button));
@@ -280,8 +301,7 @@ export class RuntimeProject {
       if (legacy) box.child(legacy);
       const row = h_flex().items_center().gap(4).py(5).border_b(1).border_color(t.border)
         .child(div().flex_1().font_semibold().child("Main"))
-        .child(button("ocq-open-main", "Open", task => open("integrator", "", id, task), canNavigate, "Open Main"))
-        .child(checkOpening("integrator", "", id, "Main"));
+        .child(button("ocq-open-main", "Open", task => open("integrator", "", id, task), canOpen && !main.opening?.busy, "Open Main in existing OpenCode"));
       if (main.selectedMain.ownership_mode === "ocq_main") row.child(button("ocq-delete-main", "Delete…",
         task => this.requestDelete("integrator", "", id, "Main", task), !this.deleteIntent || this.deleteIntent.state !== "deleting", "Delete Main"));
       box.child(row);
@@ -307,8 +327,7 @@ export class RuntimeProject {
         .child(summary);
       if (row.job.session_id && !row.job.session_state) {
         line.child(button(`ocq-open-${row.job.session_id}`, "Open", task => open("worker", row.request_id, row.job.session_id, task),
-          canNavigate, `Open ${role.toLowerCase()}: ${row.title}`))
-          .child(checkOpening("worker", row.request_id, row.job.session_id, row.title));
+          canOpen && !main.opening?.busy, `Open ${role.toLowerCase()} in existing OpenCode: ${row.title}`));
         if (!row.task_goal) line.child(button(`ocq-delete-${row.job.session_id}`, "Delete…",
           task => this.requestDelete("worker", row.request_id, row.job.session_id, role.toLowerCase(), task),
           !this.deleteIntent || this.deleteIntent.state !== "deleting", `Delete ${role.toLowerCase()}: ${row.title}`));

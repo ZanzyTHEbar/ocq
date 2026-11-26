@@ -194,7 +194,8 @@ original compatibility/context/preview arguments. The digest becomes part of
 client authorization claims and immutable dispatcher targets; a refreshed core
 or socket cannot inherit an old authorization.
 
-`client-open` retains its original arm/one-attempt/receipt-first contract and
+Legacy `client-open` is not called by the panel's ordinary **Open…** action.
+It retains its original arm/one-attempt/receipt-first contract and
 launches only the pointer's retained argv/cwd, with no parent or notifications.
 `client-verify` reads only the exact recorded terminal on the pinned core and
 checks argv/cwd/pointer/binding/space labels. Neither verifies the TUI's current

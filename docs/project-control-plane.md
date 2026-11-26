@@ -591,14 +591,16 @@ selected profile. Herdr does not upload a remote textarea through `exec`.
 After registration, normal SQL observation discovers the project and its Main
 link; subsequent human messages use the official native OpenCode composer.
 
-`main-role.json` selects exact bounded implementation and reviewer profiles once:
+`main-role.json` selects an exact bounded implementation profile:
 
 ```json
-{"protocol":"ocq-main-role-v1","implementation_profile":"EXACT WorkProfile JSON TEXT","review_profile":"EXACT WorkProfile JSON TEXT"}
+{"protocol":"ocq-main-role-v1","implementation_profile":"EXACT WorkProfile JSON TEXT"}
 ```
 
-These are explicit configured profiles, not invented Elephant/Guppy IDs. Setup
-retains a versioned operating contract with these selections, canonical
+Use an explicitly configured profile, not invented agent or model IDs. A
+retained `review_profile` remains compatible for explicit review only; ordinary
+work does not require or launch a reviewer. Setup
+retains a versioned operating contract with the selection, canonical
 project/queue/state pointers and the actual local CLI path/image digest. Preview
 discloses its complete bytes. Before binding or the first prompt, bootstrap
 journals a separate arm/one attempt for OpenCode V2's session-scoped instruction
@@ -749,7 +751,13 @@ Recovery reports `head_advanced` against the selected binding. Refresh retains
 the same Main session/setup/branch and records the current HEAD; it never switches
 branches or integrates changes itself.
 
-## Exact native client navigation
+## Legacy inspection-client protocol
+
+Ordinary Herdr **Open** no longer uses this launcher, overlay, or its
+receipts. It requests the exact route in the user's
+[existing OpenCode TUI](herdr.md#opt-in-to-exact-navigation-in-your-normal-opencode-tui).
+The old explicit CLI/bridge protocol and retained records are described here
+for compatibility and receipt inspection, not as the normal Open workflow.
 
 `ocq project client` is separate from execution and Main bootstrap. It prepares
 an immutable, caller-known navigation pointer for either `worker` or `integrator`.

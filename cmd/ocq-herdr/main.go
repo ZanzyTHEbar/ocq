@@ -48,6 +48,7 @@ func bridgeRoot() *cobra.Command {
 	root.AddCommand(captureReceiptCommands()...)
 	root.AddCommand(workCommands()...)
 	root.AddCommand(mainClientCommands()...)
+	root.AddCommand(tuiOpenCommand())
 	root.AddCommand(sessionDeleteCommands()...)
 	root.AddCommand(pushCommands()...)
 	root.AddCommand(pushAssociationCommand())

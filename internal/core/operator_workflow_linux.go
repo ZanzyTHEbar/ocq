@@ -41,17 +41,21 @@ func VerifyOperatorNative() error {
 	return err
 }
 
-// VerifyOperatorProfiles checks owner-provisioned bytes against the real catalog.
-// Catalog bytes (which may contain provider configuration) never leave the core.
-func VerifyOperatorProfiles(repo, main, implementation, review string) error {
-	return VerifyOperatorSelections(repo, []OperatorProfileSelection{{"main", main}, {"implementation", implementation}, {"review", review}})
-}
-
 type OperatorProfileSelection struct{ Role, Profile string }
 
+// VerifyOperatorSelections checks ordinary setup profiles against the real
+// catalog. Explicit review validates its own profile at intake and pre-prompt.
 func VerifyOperatorSelections(repo string, selections []OperatorProfileSelection) error {
-	if len(selections) < 3 || len(selections) > 32 {
+	if len(selections) < 2 || len(selections) > 32 {
 		return errors.New("bounded owner selections required")
+	}
+	var main, implementation bool
+	for _, selection := range selections {
+		main = main || selection.Role == "main"
+		implementation = implementation || selection.Role == "implementation"
+	}
+	if !main || !implementation {
+		return errors.New("Main and implementation selections required")
 	}
 	return verifyOperatorSelections(repo, selections)
 }
@@ -73,21 +77,12 @@ func verifyOperatorSelections(repo string, selections []OperatorProfileSelection
 			profiles = append(profiles, p)
 			continue
 		}
-		if selection.Role != "implementation" && selection.Role != "review" {
+		if selection.Role != "implementation" {
 			return errors.New("unsupported operator role")
 		}
 		p, err := workProfile(selection.Profile)
 		if err != nil {
 			return err
-		}
-		if selection.Role == "review" {
-			rules, err := parseJobDraftPermissions(p.Permissions)
-			if err != nil {
-				return err
-			}
-			if err = verifyReviewerRuntime(repo, p.Agent, rules); err != nil {
-				return err
-			}
 		}
 		profiles = append(profiles, MainProfile{Agent: p.Agent, ProviderID: p.ProviderID, ModelID: p.ModelID, Variant: p.Variant})
 	}

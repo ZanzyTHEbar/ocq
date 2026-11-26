@@ -39,6 +39,13 @@ func readNativeRegistration(ctx context.Context, directory string) (nativeRegist
 		return reg, errors.New("installed read-only OpenCode state path unavailable")
 	}
 	state := strings.TrimSpace(out.String())
+	return readNativeRegistrationAt(state)
+}
+
+// The normal TUI integration is explicitly configured with its own state
+// directory, so resolving an Open target needs no invocation of the OpenCode CLI.
+func readNativeRegistrationAt(state string) (nativeRegistration, error) {
+	var reg nativeRegistration
 	if !filepath.IsAbs(state) || strings.ContainsAny(state, "\r\n\x00") {
 		return reg, errors.New("invalid OpenCode state path")
 	}

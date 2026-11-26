@@ -85,16 +85,17 @@ In a local Herdr space pointing at the canonical primary checkout:
 4. Main uses the existing Work prepare/wait/capture/review/handoff commands.
    Goal links are explicit retained operation/request identities, not timestamp
    or prose inference. Jobs, output and stored attention remain inspectable.
-5. Open Main/history or a selected worker/attention session through the exact
-   native client. Humans handle permissions in OpenCode; OCQ never answers them.
+5. **Open** opens Main or the selected worker in your existing opted-in
+   OpenCode tab. Choose a tab in Herdr if more than one matches. OCQ does not
+   launch another client. Humans handle permissions in OpenCode.
 6. Inspect the handoff and choose **Keep separate**. This leaves the owned
    checkout intact; it is a UI acknowledgement, not an integration receipt.
    Integration remains unauthorized. No integration mutation endpoint is added.
 
-Actual blockers or unknown ownership stop progression. A lost author/start/client
-response requires exact retained-record recovery, not another goal, Main or client.
+Actual blockers or unknown ownership stop progression. A lost author/start
+response requires exact retained-record recovery, not another goal or Main.
 
-Setup, goal, task and session-opening confirmations retain the complete immutable
+Setup, goal and task confirmations retain the complete immutable
 preview, native binding, operation/session IDs and server hash checks. They do not
 require paging through JSON. **Technical details** optionally exposes the full
 retained evidence; the explicit action confirms the semantic view of those same
@@ -129,7 +130,13 @@ the separately foreground-owned `push-serve`. The default remains read-only.
 `--allow-actions` alone does not enable onboarding or the goal composer.
 The historical native dispatcher validator remains `commands_only=true`.
 
-The registry is an absolute, nonsymlink, owned `0600` file, at most 128 KiB:
+The registry is an absolute, nonsymlink, owned `0600` file, at most 128 KiB.
+For the Machines panel (`push-serve --runtime`), set registry `space` and
+`folder` to `""`; these are resolved from the user's explicit checkout selection.
+Keep the endpoint's own `--mod-space`/`--mod-folder` and private HC binding
+matched to that foreground runtime as described in
+[push transport](push-transport.md). The single-context endpoint uses the
+explicit placeholders below instead:
 
 ```json
 {
@@ -141,19 +148,28 @@ The registry is an absolute, nonsymlink, owned `0600` file, at most 128 KiB:
   "cli_sha256": "MATCHED_CLI_SHA256",
   "selections": [
     {"id":"main-choice","label":"Configured Main","role":"main","profile":"EXACT MainProfile JSON TEXT"},
-    {"id":"implementation-choice","label":"Configured implementation","role":"implementation","profile":"EXACT WorkProfile JSON TEXT"},
-    {"id":"review-choice","label":"Configured independent review","role":"review","profile":"EXACT WorkProfile JSON TEXT"}
+    {"id":"implementation-choice","label":"Configured implementation","role":"implementation","profile":"EXACT WorkProfile JSON TEXT"}
   ]
 }
 ```
 
-These placeholders are not defaults. All three roles are required; at most 32
-unique friendly selections are allowed. Profile variants must be explicit
-(`default` selects the configured model's default). The real enabled chat model
-catalog and exact agents are checked; reviewers additionally pass the existing
-source-validated static-review policy. Registry bytes are frozen for the endpoint
-lifetime. Restarting its owner lifetime is an explicit operation, not a retry of
-any uncertain effect. No provider credentials are returned to the UI.
+These placeholders are not defaults. For panel setup the machine owner chooses
+exactly one installed Main agent/model/variant and one for implementation,
+using the real configured catalog and explicit ordered permissions for Work
+profiles. A variant of `default` means the configured model's default. Setup
+checks profile shapes, enabled chat models and exact agents. Legacy registry
+review entries do not affect ordinary readiness or appear in setup. An explicit
+restricted review still
+fails closed at intake and again before prompting unless the OpenCode release's
+permission semantics and the exact reviewer agent can be verified. This is not
+an exact OpenCode release pin for project setup.
+
+Registry bytes are frozen for the endpoint lifetime. Activating this configuration
+requires a separately authorized foreground owner lifetime; do not start a
+second dispatcher against the same queue or retry an uncertain effect. This
+bootstrap only makes setup available. It does not register a project, start
+Main or a goal, approve permissions, or enable handoffs. No provider credentials
+are returned to the UI.
 
 ## Protocol and recovery
 

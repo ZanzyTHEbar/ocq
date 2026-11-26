@@ -8,18 +8,26 @@ titles or timestamps. Older bridges can show the generic “Project goal” titl
 An existing unsent goal remains available as retained text. The panel neither
 submits it on navigation nor retries a send whose outcome is uncertain.
 
-Setup uses one configured choice per role. Open verifies the exact runtime,
-project, session and terminal service; it reuses a verified viewer when possible
-and never guesses a replacement. Herdr notifications use committed project
+To set up a project, expand its Herdr space, choose the tab, and, for a split
+tab, choose the terminal in the primary Git checkout. Setup uses the live
+terminal folder, not the space name or launch directory. A terminal that
+moves, closes, or changes checkout must be selected again. Setup uses one
+machine-owner configured choice per role; see
+[owner setup prerequisites](operator-workflow.md#owner-capability-boundary).
+**Open** navigates to the exact conversation in your
+[opted-in OpenCode tab](herdr.md#opt-in-to-exact-navigation-in-your-normal-opencode-tui).
+If more than one local tab matches, choose it in Herdr. If none match,
+start OpenCode normally in that space; OCQ never starts a replacement.
+Herdr notifications use committed project
 result event IDs, only for newly observed transitions in the selected project
-after the initial history read. Clicking a notification can Open only the same
-exact session in the currently verified project. A stale action never chooses
+after the initial history read. A notification action can open only the same
+exact session in the current project space. A stale action never chooses
 another target. This is a foreground signal, not a durable notification
 subscription. No event is acknowledged by the panel.
 
 ## Conversation and deletion
 
-- **Open is the conversation.** Type ordinary updates in OpenCode, including
+- **Open is the conversation.** Use the existing OpenCode tab for ordinary updates, including
   while a project worker is running. OCQ verifies the exact original prompt
   first, then treats later native text as context from the configured local
   harness, not evidence of a particular author. The history, agent/model,
@@ -73,9 +81,10 @@ submitted New goal as implementation work, without sending its text to Main.
 It uses the owner registry's single implementation selection and the project's
 saved binding revision and commit anchor. The bridge accepts bounded text over
 the authenticated project connection. Standalone admission checks the owner’s
-implementation agent/model and shared execution readiness, but does not
-validate or invoke a reviewer. Main setup and review-capable actions retain
-their existing review checks. The panel accepts schema 8 from a matching
+implementation agent/model and shared execution readiness. Neither Main setup
+nor ordinary goals need or launch a reviewer. Explicit restricted review
+intake and execution still
+require that separate release-specific policy check. The panel accepts schema 8 from a matching
 bridge and requires the selected project and snapshots to agree with that
 connection’s advertised schema. The UI stores the request ID and text
 digest before submitting and checks the exact Work receipt if the reply is

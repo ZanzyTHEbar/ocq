@@ -11,6 +11,18 @@ const token = prefix => `${prefix}-${randomBytes(16).toString("hex")}`;
 const pin = b => JSON.stringify([b?.image_sha256, b?.bridge_context, b?.queue_identity, b?.observation_context, b?.observation_store_context]);
 const activeTab = () => { const space = spaces().find(s => s.active); return [space?.id, space?.tabs.find(t => t.active)?.id]; };
 const earlierGoal = "Earlier goal for Main";
+const setupBlocks = {
+  registry_missing: "No workflow registry is configured. The machine owner must supply one Main and one implementation profile.",
+  scope_mismatch: "The workflow registry does not match this space or queue. Ask the machine owner to check its scope.",
+  native_hc_unavailable: "The private Herdr Core binding could not be verified. Ask the machine owner to check the endpoint’s HC binding.",
+  cli_unavailable: "The registry’s OCQ CLI does not match the installed CLI. Ask the machine owner to check the release and registry.",
+  dispatcher_unavailable: "The workflow dispatcher could not be verified. Ask the machine owner to check its identity, one-slot configuration, and available memory.",
+  native_package_unavailable: "Native workflow tools could not be verified. Ask the machine owner to check the OCQ package, OpenCode V2 configuration, and Workmux.",
+  profiles_unavailable: "The configured role profiles could not be verified. Ask the machine owner to check their OpenCode agents, models, variants, and ordered permissions.",
+  checkout_unavailable: "Choose a terminal in the primary Git checkout on a branch.",
+};
+const setupBlock = value => Object.hasOwn(setupBlocks, value?.reason_code) ? setupBlocks[value.reason_code] :
+  "The bridge did not verify project setup. Ask the machine owner to check the workflow registry and execution prerequisites.";
 
 function savedSendMessage(value, attempted) {
   switch (value?.state) {
@@ -117,7 +129,7 @@ export class GoalComposer {
     this.capability = value; this.capabilityScope = JSON.stringify(s);
     if (value.ready) {
       this.choices = {};
-      for (const role of ["main", "implementation", "review"]) {
+      for (const role of ["main", "implementation"]) {
         const choices = value.selections.filter(item => item.role === role);
         if (choices.length === 1 && !this.choices[role]) this.choices[role] = choices[0].id;
       }
@@ -130,6 +142,13 @@ export class GoalComposer {
       }
     }
     return value;
+  }
+  async checkSetup(s) {
+    this.capability = null; this.capabilityScope = null;
+    try { await this.readiness(s); }
+    catch (_) {
+      if (this.current(s)) this.error = "Could not check setup with the machine bridge. Check the connection, then check setup again.";
+    }
   }
   submit(mode, cx) {
     const draft = this.review?.text ?? (mode === "send" ? this.goal.value() : this.label.value());
@@ -149,8 +168,9 @@ export class GoalComposer {
       }
       const ready = await this.readiness(s);
       if (!intended()) return;
-      if (!ready.ready || mode !== "send" && this.setupReason(s)) {
-        this.error = "Main is not ready. Ask the machine owner to check project setup.";
+      const blocked = !ready.ready ? setupBlock(ready) : mode !== "send" && this.setupReason(s);
+      if (blocked) {
+        this.error = blocked;
         return;
       }
       const key = this.key(s);
@@ -161,7 +181,7 @@ export class GoalComposer {
       const input = { protocol, mode };
       if (mode !== "send") Object.assign(input, {
         label: draft, expected_revision: mode === "create" ? "0" : String(binding?.revision),
-        main_selection: this.choices.main, implementation_selection: this.choices.implementation, review_selection: this.choices.review,
+        main_selection: this.choices.main, implementation_selection: this.choices.implementation,
       });
       if (mode === "send") input.goal = draft;
       const record = { project, operation, mode, phase: "author_uncertain" };
@@ -226,7 +246,7 @@ export class GoalComposer {
       const ready = await this.readiness(s);
       if (!intended() || !this.pinned(review)) return;
       if (!ready.ready) {
-        this.error = "Main is not ready. The goal has not been sent.";
+        this.error = record.mode === "send" ? "Main is not ready. The goal has not been sent." : setupBlock(ready);
         return;
       }
       if (review.hc !== this.host.nativeHC.review || review.hc.context !== this.host.nativeHC.context()) throw Error("Reviewed native backend changed");
@@ -297,10 +317,13 @@ export class GoalComposer {
   }
   setupReason(s) {
     const ready = this.capabilityScope === JSON.stringify(s) && this.capability;
-    if (!ready?.ready) return "Ask the machine owner to enable project setup.";
+    if (!ready) return this.error || "Checking setup with the machine…";
+    if (!ready.ready) return setupBlock(ready);
+    const missing = ["main", "implementation"].filter(role => !ready.selections.some(v => v.role === role && v.id === this.choices[role]));
+    if (missing.length) return `Ask the machine owner to configure exactly one default for: ${missing.join(", ")}.`;
     if (!this.label.value().trim()) return "Enter a project name.";
-    const missing = ["main", "implementation", "review"].filter(role => !ready.selections.some(v => v.role === role && v.id === this.choices[role]));
-    return missing.length ? "Ask the machine owner to configure one default per role." : null;
+    if (Buffer.byteLength(this.label.value()) > 160) return "Shorten the project name.";
+    return null;
   }
   serverDraft() {
     const main = this.host.mainClient.selectedMain;
@@ -327,7 +350,7 @@ export class GoalComposer {
     if (!s || this.storageError) {
       if (legacyOnly) return null;
       if (selectedMain) box.child(input()).child(button("ocq-submit-goal", "Send goal", () => {}, false));
-      return box.child(note(!s ? "Ask the machine owner to enable project actions." : "Could not read saved drafts. Reopen the panel."));
+      return box.child(note(!s ? "Project actions are unavailable on this connection. Check the machine’s OCQ endpoint." : "Could not read saved drafts. Reopen the panel."));
     }
     const key = JSON.stringify(s);
     const record = this.saved?.[this.key(s)] || this.serverDraft();
@@ -359,7 +382,7 @@ export class GoalComposer {
       cx.spawn(async task => {
         if (!this.current(s)) return;
         if (record) this.readSaved(task);
-        else this.run(task, scope => this.readiness(scope));
+        else this.run(task, scope => this.checkSetup(scope));
       });
     }
     if (record) {
@@ -396,7 +419,12 @@ export class GoalComposer {
       const reason = this.setupReason(s);
       box.child(button("ocq-submit-setup", this.busy ? "Checking…" : setup, task => this.submit(mode, task),
         !this.busy && !reason));
-      if (!this.busy && reason) box.child(note(reason));
+      if (!this.busy && reason) {
+        box.child(note(reason));
+        if (this.capabilityScope !== key || !this.capability?.ready)
+          box.child(button("ocq-check-setup", "Check setup again", task => this.run(task, scope => this.checkSetup(scope))));
+      }
+      if (this.error && this.error === reason) return box;
     }
     if (this.error) box.child(note(this.error));
     return box;

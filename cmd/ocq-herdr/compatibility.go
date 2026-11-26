@@ -213,6 +213,11 @@ func installCompatibility(root *cobra.Command) {
 		if modRead(name) || name == "hc-binding" || name == "hc-binding-check" {
 			return nil
 		}
+		// The local TUI relay uses process/socket identity and validates the
+		// queue in the recipient. It is deliberately not a push command.
+		if name == "tui-open" {
+			return nil
+		}
 		// Runtime entry already checks exact immutable intent v1, binary image,
 		// queue and native argv before admission. Adding CLI flags would break that
 		// identity. No prior/new image can adopt an old intent; see core runner.

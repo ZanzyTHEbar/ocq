@@ -37,7 +37,7 @@ func projectMain(state *string) *cobra.Command {
 	revision := prepare.Flags().String("expected-revision", "", "explicit registration CAS revision (create=0)")
 	label := prepare.Flags().String("label", "", "explicit initial/existing project label")
 	profile := prepare.Flags().String("profile-file", "", "immutable explicit Main integrator role/agent/model/ordered permissions")
-	role := prepare.Flags().String("role-file", "", "explicit ocq-main-role-v1 implementation/review profile selection; retained instructions are previewed")
+	role := prepare.Flags().String("role-file", "", "explicit ocq-main-role-v1 implementation profile selection; retained instructions are previewed")
 	prompt := prepare.Flags().String("prompt-file", "", "private initial/send prompt file, or - for stdin; NEVER prompt argv")
 	prepare.RunE = func(cmd *cobra.Command, args []string) error {
 		var raw []byte

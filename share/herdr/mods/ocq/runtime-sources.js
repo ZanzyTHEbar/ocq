@@ -5,7 +5,7 @@ import { createHash } from "crypto";
 import { Buffer } from "buffer";
 import { PushConnection } from "./push-connection.js";
 import { decimal, compareRevision } from "./observation-version.js";
-import { RuntimeProject, projectSpaces } from "./runtime-project.js";
+import { RuntimeProject, projectSpaces, setupSpaces, projectTerminal, projectTerminalCurrent } from "./runtime-project.js";
 
 const hex = s => typeof s === "string" && /^[a-f0-9]{64}$/.test(s);
 const id = (...parts) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
@@ -104,7 +104,7 @@ class RuntimeSource {
       const board = s.slots.find(v => v.slot === "board");
       detail.board = board.status === "ready" && board.data?.project?.project_id === detail.selected ? board.data : null;
       if (!s.work) throw Error("Missing project session observation");
-      detail.sessions.apply(capture.sessions, s.work, cx, s.main, s.clients);
+      detail.sessions.apply(capture.sessions, s.work, cx, s.main);
       detail.observeResults(s.slots.find(v => v.slot === "results"));
     }
     this.connection.attempt = 0;
@@ -243,6 +243,66 @@ export class RuntimeSources extends View {
     this.setup = false; this.focusTarget = null;
     source.subscribe(true); cx.notify();
   }
+  beginSetup(cx) {
+    if (this.detail) this.back(cx);
+    this.setup = {};
+    cx.notify();
+  }
+  renderSetup(body, source, button, note) {
+    const choices = setupSpaces(source.machine);
+    const setup = this.setup, generation = source.generation;
+    const current = () => this.setup === setup && this.machineSelection === source.machine &&
+      source.online() && source.mutations && source.generation === generation;
+    const refuse = () => { setup.error = "That terminal or connection changed. Choose a tab and terminal again."; };
+    const select = (space, tab, p, task, single) => {
+      const selected = projectTerminal(space, tab, p);
+      if (!current() || setup.space !== space.id || !single && setup.tab !== tab.id ||
+          !projectTerminalCurrent(source.machine, space.id, selected.setupContext)) return refuse();
+      if (single && setupSpaces(source.machine).find(row => row.space.id === space.id)?.tabs
+        .find(row => row.tab.id === tab.id)?.terminals.length !== 1) {
+        setup.tab = tab.id;
+        return refuse();
+      }
+      this.openProject(source, null, selected, task);
+    };
+    if (!choices.length) note("Open a terminal in the project checkout in Herdr, then choose its space.");
+    const expanded = choices.find(({ space }) => space.id === setup.space);
+    if ((setup.space && !expanded) || (setup.tab && !expanded?.tabs.some(({ tab }) => tab.id === setup.tab)))
+      note("The selected space or tab no longer has a terminal. Choose another.");
+    else if (setup.error) note(setup.error);
+    for (const { space, tabs } of choices) {
+      const open = space.id === setup.space;
+      const name = choices.some(row => row.space.id !== space.id && row.space.name === space.name)
+        ? `Space ${space.index} · ${space.name}` : space.name;
+      body.child(button(id(source.key, "setup-space", space.id), `${open ? "Hide" : "Show"} tabs: ${name}`, () => {
+        if (!current()) return refuse();
+        setup.space = open ? null : space.id; setup.tab = null; setup.error = null;
+      }));
+      if (!open) continue;
+      const tabRows = v_flex().min_w(0).pl(12).gap(4).child(div().child("Choose a project tab"));
+      for (const { tab, terminals } of tabs) {
+        const name = !tab.named ? `Tab ${tab.index}` :
+          tabs.some(row => row.tab.id !== tab.id && row.tab.name === tab.name) ? `Tab ${tab.index} · ${tab.name}` : tab.name;
+        const split = terminals.length > 1, open = setup.tab === tab.id;
+        tabRows.child(button(id(source.key, "setup-tab", space.id, tab.id),
+          split ? `${open ? "Hide" : "Choose"} terminals: ${name}` : name, task => {
+            if (!current() || setup.space !== space.id) return refuse();
+            if (!split) return select(space, tab, terminals[0], task, true);
+            setup.tab = open ? null : tab.id; setup.error = null;
+          }));
+        if (!split || !open) continue;
+        const terminalRows = v_flex().min_w(0).pl(12).gap(4);
+        for (const p of terminals) {
+          const terminal = `Terminal ${p.terminal.split("/").pop()}`;
+          terminalRows.child(button(id(source.key, "setup-terminal", space.id, tab.id, p.pane),
+            terminal, task => select(space, tab, p, task, false), true, `${terminal}: ${p.cwd}`));
+          terminalRows.child(div().pl(8).text_size(12).child(p.cwd));
+        }
+        tabRows.child(terminalRows);
+      }
+      body.child(tabRows);
+    }
+  }
   back(cx) {
     if (this.detail) {
       const source = this.detail.source;
@@ -306,7 +366,7 @@ export class RuntimeSources extends View {
       if (this.cx && !checking()) cx.spawn(task => this.discover(task));
     }
     this.targets = [];
-    const button = (key, text, action, enabled) => this.button(key, text, action, t, enabled);
+    const button = (key, text, action, enabled, label) => this.button(key, text, action, t, enabled, label);
     const root = v_flex().size_full().min_w(0).min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .track_focus(this.handle).on_key_down((event, task) => this.key(event, task));
     const selected = this.machineSelection !== undefined;
@@ -335,10 +395,8 @@ export class RuntimeSources extends View {
       return root.child(body);
     }
     if (this.setup) {
-      const choices = projectSpaces(source.machine);
-      if (!choices.length) note("Open a terminal in the project checkout in Herdr.");
-      for (const s of choices) body.child(button(id(source.key, s.id, s.setupContext.pane), `${s.name} · ${s.setupContext.tabName}`,
-        task => this.openProject(source, null, s, task)));
+      if (source.mutations) this.renderSetup(body, source, button, note);
+      else note("This OCQ endpoint is read-only. The machine owner must enable workflow actions before setup.");
       return root.child(body);
     }
     const page = source.projects;
@@ -352,7 +410,8 @@ export class RuntimeSources extends View {
       task => this.openProject(source, project, null, task)));
     if (page.history.length) body.child(button("ocq-projects-previous", "Previous projects", task => source.page(task, "back")));
     if (page.more) body.child(button("ocq-projects-next", "More projects", task => source.page(task, "next")));
-    if (source.mutations) body.child(button("ocq-new-project", "Set up project", task => { this.setup = true; task.notify(); }));
+    if (source.mutations) body.child(button("ocq-new-project", "Set up project", task => this.beginSetup(task)));
+    else if (!page.items.length) note("This OCQ endpoint is read-only. The machine owner must enable workflow actions before setup.");
     return root.child(body);
   }
   async close(cx) {

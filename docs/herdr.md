@@ -58,10 +58,10 @@ the app once, then install the mod/layout on the display machine:
 sh share/herdr/install.sh "$HOME/.config/herdr-app" "$(command -v herdr-app)" --activate
 ```
 
-For native inspection clients, keep the matched `bin/ocq`, `bin/ocq-herdr` and
-release-relative `share/opencode/ocq-handoff/tui.js` together; copying only the
-binaries does not install their trusted TUI asset. The panel uses its configured
-socket, not the legacy HC PATH route described below.
+For the normal Open action, see [opt-in TUI setup](#opt-in-to-exact-navigation-in-your-normal-opencode-tui).
+Retain the matched `bin/ocq`, `bin/ocq-herdr` and
+release-relative `share/opencode/ocq-handoff/tui.js` if maintaining legacy
+inspection-client tooling. Do not load that legacy asset into your normal TUI.
 
 The display host additionally needs the matched configuration-only bootstrap at
 `APP_HOME/ocq-push/ocq-herdr` and a privately provisioned exact-context association;
@@ -283,35 +283,51 @@ stored progress through its existing observation lease, not another scheduler.
 Main/client journals share the Work filesystem fingerprint and remain separate
 from the SQLite snapshot. Automatic reads never query live sessions or HC.
 
-**Prepare NEW Main inspection client** creates a distinct navigation intent for
-the SQL-selected Main; the worker action pins its exact Work request instead.
-Review the resulting pointer and explicitly open once. The bridge durably arms
-and attempts before `hc run`, observes the exact returned terminal ID, and stores
-the matching cwd/argv/peer/label receipt before showing it. A lost or ambiguous
-HC response stays unknown. Replaying that pointer never spawns another client.
-An explicitly new navigation intent can open one fresh inspection client.
+**Open** navigates to Main or the selected worker/reviewer in an existing
+OpenCode TUI in the active project space. If one opted-in client matches,
+Herdr focuses its existing pane after it confirms the exact route. If several
+match, choose the tab or pane in Herdr. If none match, start OpenCode normally
+in that space with the opt-in below. Existing-tab navigation is local to this
+computer; it does not use the remote push endpoint.
 
-The packaged TUI-only extension uses an authenticated existing-session GET and
-the public OpenCode V2 router. It checks the exact session, directory,
-project, metadata and current profile digests before navigation. It never uses
-`--session`, creates an absent target, sends a prompt or answers a permission.
-The core launcher pins the exact discovered server, preserves effective plugins,
-and forces child-only `session.permissions="prompt"`; inherited autoaccept does
-not silently approve requests. Missing assets, authentication, incompatible
-configuration or changed identity fail closed without fallback.
+Herdr uses the terminal's foreground process, not the title or an old receipt.
+It never launches, attaches, or moves a viewer, copies anything to the
+clipboard, or sends terminal input. Legacy viewer receipts remain inspectable
+but are not route evidence and are not replayed by **Open**.
 
-**Show existing inspection terminal** verifies its retained launch/backend
-context and displays that ordinary native terminal. Its current TUI session is
-always **unverified**: a human may have used the native session picker since
-launch. Never infer current route from argv, title or cwd. A fresh inspection
-intent does not change Main's persistent backend ID or history.
+### Opt in to exact navigation in your normal OpenCode TUI
 
-Closing/collapsing OCQ does not request backend cancellation. Native quit,
-permission-overlay keys and terminal hangup are distinct actions; permission
-overlays may interpret quit keys as Reject/Dismiss. No runtime close-safety,
-initial-route, remote-client or complete one-goal execution proof is claimed
-for these new controls. Do not deploy them on the strength of syntax/build
-checks alone.
+Keep `share/opencode/ocq-open/` (both `package.json` and `tui.js`) in a trusted
+local directory on the machine where you run OpenCode. In your normal OpenCode
+V2 `cli.json`, append this entry to the existing `plugins` list:
+
+```json
+{
+  "package": "/absolute/path/to/ocq-open",
+  "options": {
+    "helper": "/absolute/path/to/ocq",
+    "state_dir": "/absolute/path/to/ocq-queue",
+    "opencode_state_dir": "/absolute/path/to/opencode-state"
+  }
+}
+```
+
+Use the matching OCQ CLI, `ocq-herdr` on Herdr's `PATH`, the owning queue
+directory, and the state directory printed by `opencode debug paths state`.
+Start `opencode` from your ordinary Herdr shell. The Herdr app and TUI need
+the same private Linux `XDG_RUNTIME_DIR` and user. No launcher flags,
+environment overlay, or separate OpenCode configuration are needed.
+Explicit `--server` and `--standalone` clients are not eligible.
+
+The opted-in TUI owns a per-process Unix socket in that runtime directory.
+The bridge checks its Linux peer credentials against the exact Herdr
+foreground process; a short-lived connection accepts one challenged request.
+The TUI verifies its terminal and location, the queue incarnation, the
+connected managed OpenCode server, and exact session/project/location/ownership
+(and the worker's immutable profile). Only then does it use the public TUI
+router and acknowledge the exact selected session ID. No server plugin,
+extra resident process, permission answer or prompt is needed. Normal
+OpenCode navigation, editor, preferences and permissions still apply.
 
 ## Inspect and acknowledge
 

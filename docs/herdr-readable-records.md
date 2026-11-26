@@ -57,31 +57,16 @@ The original graph has 28 modules; the shared readable-record module is new.
 | workflow | Main summaries and readable Technical details; no profile JSON editor |
 | worktree-check | Explicit labelled filesystem snapshot/drift fields; no raw-data renderer |
 
-## One explicit Open intent
+## Open in your existing OpenCode tab
 
-Open Main or Open worker authorizes navigation for that exact project, session,
-queue, service binding and origin context—not agent execution or permission
-responses. It first reads the current retained viewer list and verifies the
-authenticated HC identity. Read-only endpoints cannot launch viewers.
-
-The terminal service approval created by this intent is navigation-only.
-Dispatcher actions still require their separate existing identity review and
-confirmation. A context, source-generation, service, queue or binding mismatch
-stops navigation; it does not silently approve a replacement service.
-
-| Observation | Allowed navigation |
-| --- | --- |
-| Exact session and receipt verified; viewer live with an existing pane in the exact project space | Select that space/tab/pane |
-| Viewer live; exact native terminal observed but no pane | Persist one keep attempt, then `terminal.keep` with `place: "tab"`; observe the resulting pane before selecting it |
-| Native catalogue has not observed the terminal, or keep acknowledgement is pending | Wait/check the same retained identity; no second viewer or keep |
-| Exact `client-verify` returns `finished`, with unchanged session/profile/project/receipt identity | The explicit Open intent may prepare one new navigation pointer for the same session; retain prior pointer history |
-| API unavailable, missing terminal, ambiguous history, or uncertain launch | Show a readable blocker and retain the same ID; no new pointer or launch |
-| Viewer is attached outside the exact project space | Stop; do not move another workspace's terminal |
-
-No path creates a Main session, sends a goal, retries a worker, resumes an
-agent, answers a permission/form, releases capacity, opens a replacement space
-or overwrites a working terminal. A finished viewer is not a finished worker.
-Native idle/succeeded is not OCQ completion proof.
+Open Main or Open worker routes directly to a matching
+[opted-in OpenCode TUI](herdr.md#opt-in-to-exact-navigation-in-your-normal-opencode-tui).
+When several clients match, the person chooses an existing tab or pane in Herdr.
+The panel neither uses HC launch or keep nor selects a terminal by name or
+receipt. The request validates and routes only in the selected TUI.
+It never creates a session, sends a prompt, retries a worker, answers a
+permission/form or alters queue capacity. Historical inspection-client receipts
+are not migrated, retried or treated as proof of the current route.
 
 ## Worker bases and native skills
 
